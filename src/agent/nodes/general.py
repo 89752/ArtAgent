@@ -18,6 +18,9 @@ from src.tools.image_analysis import analyze_image
 from src.tools.image_lookup import image_lookup
 from src.tools.web_search import web_search
 from src.utils.llm import get_deterministic_llm
+from src.utils.logging_config import get_logger, log_event
+
+logger = get_logger("general")
 
 # general 分支可用的全部工具
 GENERAL_TOOLS = [
@@ -42,6 +45,11 @@ def general_agent(state: AgentState) -> dict:
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(messages)
 
     response = _get_llm_with_tools().invoke(messages)
+    tool_calls = [tc.get("name") for tc in getattr(response, "tool_calls", []) or []]
+    if tool_calls:
+        log_event(logger, "react", action="call_tools", tools=tool_calls)
+    else:
+        log_event(logger, "react", action="final_answer")
     return {"messages": [response], "current_step": "general_agent"}
 
 

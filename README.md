@@ -190,6 +190,22 @@ python tests/test_multi_tool.py  # 多工具链式调用
 
 ---
 
+## 🔍 可观测性
+
+多步 Agent 每轮要发多次 LLM 调用,没有日志就无法回答"走了哪个分支 / 检索到几条 / 反思结论 / 哪个节点慢"。每个节点都输出结构化日志 + 耗时(见 [`docs/sample_trace.md`](docs/sample_trace.md) 真实轨迹):
+
+```
+[classify] query=对比莫奈和梵高的色彩 intent=comparison
+[decompose] subjects=['Claude Monet', 'Vincent van Gogh'] dimensions=['color use', 'brushwork']
+[retrieve] hits_per_subject={'Claude Monet': 4, 'Vincent van Gogh': 4}
+[comp_retrieve] done in 15687ms → comparison_retrieve   ← 一眼定位瓶颈
+[reflection] verdict=PASS answer_len=1105
+```
+
+```bash
+ARTAGENT_LOG_LEVEL=DEBUG ARTAGENT_LOG_FILE=run.log python app.py
+```
+
 ## 📊 效果评估
 
 不止"能跑通",而是有可量化、可复现的指标（详见 [`eval/`](eval/README.md)）：

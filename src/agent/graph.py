@@ -26,6 +26,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.agent.state import AgentState
 from src.agent import nodes as N
+from src.utils.logging_config import traced
 
 
 # ── 路由函数 ────────────────────────────────────────────────────
@@ -49,32 +50,36 @@ def _route_after_reflection(state: AgentState) -> Literal["web_fallback", "save_
 def build_graph():
     builder = StateGraph(AgentState)
 
+    # 用 traced 包装每个函数节点，统一记录节点耗时（ms）
+    def add(name, fn):
+        builder.add_node(name, traced(name, fn))
+
     # 公共节点
-    builder.add_node("load_memory", N.load_memory)
-    builder.add_node("classify", N.classify_intent)
-    builder.add_node("reflection", N.reflection)
-    builder.add_node("web_fallback", N.web_fallback)
-    builder.add_node("save_memory", N.save_memory)
+    add("load_memory", N.load_memory)
+    add("classify", N.classify_intent)
+    add("reflection", N.reflection)
+    add("web_fallback", N.web_fallback)
+    add("save_memory", N.save_memory)
 
     # comparison 子管线
-    builder.add_node("comp_decompose", N.comparison_decompose)
-    builder.add_node("comp_retrieve", N.comparison_retrieve)
-    builder.add_node("comp_synthesize", N.comparison_synthesize)
+    add("comp_decompose", N.comparison_decompose)
+    add("comp_retrieve", N.comparison_retrieve)
+    add("comp_synthesize", N.comparison_synthesize)
 
     # timeline 子管线
-    builder.add_node("tl_subject", N.timeline_extract_subject)
-    builder.add_node("tl_periods", N.timeline_gather_periods)
-    builder.add_node("tl_synthesize", N.timeline_synthesize)
+    add("tl_subject", N.timeline_extract_subject)
+    add("tl_periods", N.timeline_gather_periods)
+    add("tl_synthesize", N.timeline_synthesize)
 
     # recommendation 子管线
-    builder.add_node("rec_extract", N.recommendation_extract_features)
-    builder.add_node("rec_search", N.recommendation_feature_search)
-    builder.add_node("rec_filter", N.recommendation_relevance_filter)
-    builder.add_node("rec_synthesize", N.recommendation_synthesize)
+    add("rec_extract", N.recommendation_extract_features)
+    add("rec_search", N.recommendation_feature_search)
+    add("rec_filter", N.recommendation_relevance_filter)
+    add("rec_synthesize", N.recommendation_synthesize)
 
     # general 分支（ReAct）
-    builder.add_node("general_agent", N.general_agent)
-    builder.add_node("general_tools", ToolNode(N.GENERAL_TOOLS))
+    add("general_agent", N.general_agent)
+    builder.add_node("general_tools", ToolNode(N.GENERAL_TOOLS))  # ToolNode 非普通函数，不包 traced
 
     # ── 连线 ──
     builder.add_edge(START, "load_memory")

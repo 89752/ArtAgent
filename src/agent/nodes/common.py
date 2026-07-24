@@ -15,7 +15,10 @@ from src.agent.prompts import (
     WEB_FALLBACK_SYNTHESIZE_PROMPT,
 )
 from src.utils.llm import get_llm, get_deterministic_llm
+from src.utils.logging_config import get_logger, log_event
 from src.memory.store import load_preferences, upsert_preference
+
+logger = get_logger("nodes")
 
 
 # ── 工具函数 ────────────────────────────────────────────────────
@@ -70,7 +73,9 @@ def classify_intent(state: AgentState) -> dict:
     raw = get_deterministic_llm().invoke(prompt).content.strip().lower()
     for intent in ("comparison", "timeline", "recommendation", "general"):
         if intent in raw:
+            log_event(logger, "classify", query=state.user_query, intent=intent)
             return {"intent": intent, "current_step": f"classify→{intent}"}
+    log_event(logger, "classify", query=state.user_query, intent="general", note="fallback")
     return {"intent": "general", "current_step": "classify→general"}
 
 
@@ -78,6 +83,12 @@ def classify_intent(state: AgentState) -> dict:
 def load_memory(state: AgentState) -> dict:
     """从持久化存储读取用户偏好，注入 state。"""
     prefs = load_preferences(state.user_id)
+    log_event(
+        logger, "load_memory",
+        user=state.user_id,
+        artists=prefs.get("artists", []),
+        styles=prefs.get("styles", []),
+    )
     return {"user_preferences": prefs, "current_step": "load_memory"}
 
 
@@ -91,11 +102,13 @@ def reflection(state: AgentState) -> dict:
 
     # 已经兜底过一次就不再重试，避免死循环
     if state.retry_count >= 1:
+        log_event(logger, "reflection", verdict="PASS", note="retry_exhausted")
         return {"reflection_notes": "PASS", "final_answer": answer, "current_step": "reflection"}
 
     prompt = REFLECTION_PROMPT.format(user_query=state.user_query, final_answer=answer)
     verdict = get_deterministic_llm().invoke(prompt).content.strip().upper()
     notes = "RETRY" if "RETRY" in verdict else "PASS"
+    log_event(logger, "reflection", verdict=notes, answer_len=len(answer or ""))
     return {"reflection_notes": notes, "final_answer": answer, "current_step": "reflection"}
 
 
@@ -105,6 +118,7 @@ def web_fallback(state: AgentState) -> dict:
     from src.tools.web_search import _search_impl
 
     results = _search_impl(state.user_query)
+    log_event(logger, "web_fallback", query=state.user_query, results=results)
     web_text = "\n".join(
         f"- {r['title']}: {r['snippet']} ({r.get('url', '')})" for r in results
     )
@@ -137,4 +151,5 @@ def save_memory(state: AgentState) -> dict:
             style_kw = state.extracted_features.strip()[:80]
             if style_kw:
                 upsert_preference(state.user_id, "style", style_kw, weight=1.0)
+        log_event(logger, "save_memory", user=state.user_id, saved_artists=state.subjects)
     return {"current_step": "save_memory"}

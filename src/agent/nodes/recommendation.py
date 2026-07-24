@@ -19,6 +19,9 @@ from src.agent.prompts import (
 )
 from src.agent.nodes.common import parse_json, collect_artworks
 from src.utils.llm import get_llm, get_deterministic_llm
+from src.utils.logging_config import get_logger, log_event
+
+logger = get_logger("recommend")
 
 
 def recommendation_extract_features(state: AgentState) -> dict:
@@ -46,6 +49,8 @@ def recommendation_extract_features(state: AgentState) -> dict:
     if not features:
         features = raw.strip()
 
+    # 核心亮点可观测：主观偏好 → 推理出的结构化风格特征
+    log_event(logger, "extract_features", liked=liked, features=features)
     return {
         "subjects": liked,
         "extracted_features": features,
@@ -61,7 +66,8 @@ def recommendation_feature_search(state: AgentState) -> dict:
         results = semantic_search.invoke(
             {"query": state.extracted_features, "top_k": 12}
         )
-    except Exception:
+    except Exception as e:
+        logger.warning("[feature_search] semantic_search failed: %s", e)
         results = []
 
     # 排除用户已喜欢的画家本人的作品
@@ -76,6 +82,10 @@ def recommendation_feature_search(state: AgentState) -> dict:
             continue
         filtered.append(r)
 
+    log_event(
+        logger, "feature_search",
+        raw_hits=len(results), after_exclude=len(filtered), excluded=state.subjects,
+    )
     return {
         "retrieved_docs": {"candidates": filtered},
         "artworks": collect_artworks({"candidates": filtered}),
@@ -107,6 +117,11 @@ def recommendation_relevance_filter(state: AgentState) -> dict:
                     {"author": item["author"], "reason": item.get("reason", "")}
                 )
 
+    log_event(
+        logger, "relevance_filter",
+        candidates_in=len(candidates),
+        recommended=[r["author"] for r in recommendations[:4]],
+    )
     return {
         "candidates": recommendations[:4],
         "current_step": "recommendation_relevance_filter",

@@ -13,6 +13,9 @@ from src.agent.state import AgentState
 from src.agent.prompts import COMPARISON_DECOMPOSE_PROMPT, COMPARISON_SYNTHESIZE_PROMPT
 from src.agent.nodes.common import parse_json, collect_artworks
 from src.utils.llm import get_llm, get_deterministic_llm
+from src.utils.logging_config import get_logger, log_event
+
+logger = get_logger("comparison")
 
 
 def comparison_decompose(state: AgentState) -> dict:
@@ -33,6 +36,7 @@ def comparison_decompose(state: AgentState) -> dict:
     dim_str = " ".join(dimensions)
     sub_queries = [f"{s} {dim_str} painting style characteristics" for s in subjects]
 
+    log_event(logger, "decompose", subjects=subjects, dimensions=dimensions)
     return {
         "subjects": subjects,
         "sub_queries": sub_queries,
@@ -48,11 +52,17 @@ def comparison_retrieve(state: AgentState) -> dict:
     for subject, query in zip(state.subjects, state.sub_queries):
         try:
             results = semantic_search.invoke({"query": query, "top_k": 4})
-        except Exception:
+        except Exception as e:
+            logger.warning("[retrieve] semantic_search failed for %s: %s", subject, e)
             results = []
         docs_by_subject[subject] = results
 
     artworks = collect_artworks(docs_by_subject)
+    log_event(
+        logger, "retrieve",
+        hits_per_subject={s: len(d) for s, d in docs_by_subject.items()},
+        artworks=artworks,
+    )
     return {
         "retrieved_docs": docs_by_subject,
         "artworks": artworks,

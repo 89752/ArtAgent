@@ -12,6 +12,9 @@ from langchain_core.messages import AIMessage
 from src.agent.state import AgentState
 from src.agent.prompts import TIMELINE_SUBJECT_PROMPT, TIMELINE_SYNTHESIZE_PROMPT
 from src.utils.llm import get_llm, get_deterministic_llm
+from src.utils.logging_config import get_logger, log_event
+
+logger = get_logger("timeline")
 
 # 每个时期取多少条评论证据 / 多少张配图
 _EVIDENCE_PER_PERIOD = 2
@@ -39,6 +42,7 @@ def timeline_gather_periods(state: AgentState) -> dict:
     subject = state.subjects[0] if state.subjects else state.user_query
     dataset = get_dataset()
     works = dataset.get_by_author(subject)
+    log_event(logger, "gather_periods", subject=subject, works_found=len(works))
 
     period_evidence_blocks = []
     images: list[dict] = []
@@ -87,6 +91,10 @@ def timeline_gather_periods(state: AgentState) -> dict:
         imgs = lookup_images(author=subject, timeframe=period, top_k=_IMAGES_PER_PERIOD)
         images.extend(imgs)
 
+    log_event(
+        logger, "gather_periods",
+        periods=periods[:_MAX_PERIODS], images=images,
+    )
     return {
         "retrieved_docs": docs_by_period,
         "images": images,

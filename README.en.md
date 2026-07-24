@@ -189,6 +189,22 @@ python tests/test_multi_tool.py  # multi-tool chained calls
 
 ---
 
+## 🔍 Observability
+
+A multi-step agent fires several LLM calls per turn; without logs you can't answer "which branch ran / how many docs retrieved / reflection verdict / which node was slow." Every node emits structured logs + latency (see [`docs/sample_trace.md`](docs/sample_trace.md) for real traces):
+
+```
+[classify] query=compare Monet and Van Gogh's color intent=comparison
+[decompose] subjects=['Claude Monet', 'Vincent van Gogh'] dimensions=['color use', 'brushwork']
+[retrieve] hits_per_subject={'Claude Monet': 4, 'Vincent van Gogh': 4}
+[comp_retrieve] done in 15687ms → comparison_retrieve   ← bottleneck at a glance
+[reflection] verdict=PASS answer_len=1105
+```
+
+```bash
+ARTAGENT_LOG_LEVEL=DEBUG ARTAGENT_LOG_FILE=run.log python app.py
+```
+
 ## 📊 Evaluation
 
 Not just "it runs" — quantifiable, reproducible metrics (see [`eval/`](eval/README.md)):
