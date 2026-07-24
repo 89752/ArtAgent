@@ -1,0 +1,284 @@
+/* ══════════════════════════════════════════════════════════════════
+   ArtAgent Web 样式 —— 深海蓝侧栏 + 米白主区 + 金饰线
+   复刻：欢迎态（徽标 + 示例卡）与 对话态（折叠思考 + 内联配图）
+   ══════════════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { height: 100%; overflow: hidden; }
+body {
+    height: 100%; overflow: hidden;
+    background: #f4efe4 !important;
+    font-family: 'Georgia', 'Songti SC', 'STSong', serif !important;
+    color: #2a3a52 !important;
+}
+.gradio-container {
+    height: 100vh !important; max-height: 100vh !important;
+    max-width: 100vw !important; width: 100vw !important;
+    padding: 0 !important; margin: 0 !important;
+    background: #f4efe4 !important; overflow: hidden !important;
+}
+.gradio-container > .main,
+.gradio-container > .main > .wrap,
+.gradio-container > .main > .wrap > .padding {
+    height: 100% !important; max-height: 100% !important;
+    padding: 0 !important; margin: 0 !important; overflow: hidden !important;
+}
+footer { display: none !important; }
+.gradio-container .label-wrap { display: none !important; }
+.generating { display: none !important; }
+.gap { gap: 0 !important; }
+
+/* ── 主体两栏 ── */
+#app-row {
+    height: 100vh !important; display: flex !important;
+    flex-wrap: nowrap !important; overflow: hidden !important; gap: 0 !important;
+}
+
+/* ══════════════ 左侧深海蓝侧栏 ══════════════ */
+#sidebar {
+    width: 300px !important; min-width: 300px !important; max-width: 300px !important;
+    height: 100vh !important; flex-shrink: 0 !important;
+    background: linear-gradient(180deg, #1b2b45 0%, #16233a 100%) !important;
+    border-right: 1px solid #0e1726;
+    display: flex !important; flex-direction: column !important;
+    padding: 22px 18px !important; overflow: hidden !important;
+}
+/* 新建对话按钮：金色渐变 */
+#btn-new {
+    background: linear-gradient(180deg, #cba766 0%, #b18e42 100%) !important;
+    color: #1b2b45 !important; border: none !important;
+    border-radius: 10px !important; font-weight: bold !important;
+    font-size: 1.02em !important; height: 52px !important;
+    letter-spacing: 0.04em !important; box-shadow: 0 2px 10px #00000030 !important;
+    flex-shrink: 0 !important; font-family: 'Georgia','Songti SC',serif !important;
+}
+#btn-new:hover { filter: brightness(1.08) !important; }
+
+.side-heading {
+    color: #c9a86a; font-size: 0.82em; letter-spacing: 0.12em;
+    margin: 26px 4px 12px; display: flex; align-items: center; gap: 7px;
+    border-bottom: 1px solid #2a3a55; padding-bottom: 10px;
+}
+
+/* 历史列表 */
+#history-list {
+    flex: 1 1 auto !important; overflow-y: auto !important; min-height: 0 !important;
+    margin: 0 -6px; padding: 0 6px;
+}
+#history-list::-webkit-scrollbar { width: 5px; }
+#history-list::-webkit-scrollbar-thumb { background: #334764; border-radius: 3px; }
+.hist-btn {
+    display: flex !important; width: 100% !important; align-items: center !important;
+    justify-content: flex-start !important; gap: 10px !important;
+    background: transparent !important; border: none !important;
+    color: #b9c4d6 !important; border-radius: 8px !important;
+    padding: 11px 12px !important; margin-bottom: 3px !important;
+    font-size: 0.9em !important; text-align: left !important; cursor: pointer !important;
+    box-shadow: none !important; white-space: nowrap !important; overflow: hidden !important;
+    font-family: 'Georgia','Songti SC',serif !important; transition: background 0.15s !important;
+    min-width: 0 !important;
+}
+.hist-btn:hover { background: #23344f !important; color: #eef2f8 !important; }
+.hist-btn.active { background: #2b3e5c !important; color: #fff !important; }
+
+/* 用户卡 */
+#user-card {
+    flex-shrink: 0 !important; margin-top: 14px !important;
+    background: #121f33 !important;
+    border: 1px solid #2a3a55 !important; border-radius: 12px !important;
+    padding: 12px 14px !important; display: flex !important; align-items: center !important; gap: 12px !important;
+}
+#user-card .u-avatar {
+    width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid #c9a86a; display: flex; align-items: center; justify-content: center;
+    background: #1b2b45; overflow: hidden;
+}
+#user-card .u-avatar svg { width: 30px; height: 30px; }
+#user-card .u-name { color: #eef2f8; font-weight: bold; font-size: 0.98em; }
+#user-card .u-level { color: #8fa0ba; font-size: 0.78em; margin-top: 2px; }
+
+/* ══════════════ 右侧主区（米白） ══════════════ */
+#main-col {
+    flex: 1 1 0 !important; min-width: 0 !important; height: 100vh !important;
+    display: flex !important; flex-direction: column !important;
+    background: #f4efe4 !important; overflow: hidden !important; position: relative;
+}
+/* 右下角哥特式建筑水印（内联 SVG data URI，避免相对路径解析失败） */
+#main-col::after {
+    content: ""; position: absolute; right: 30px; bottom: 0;
+    width: 300px; height: 440px; pointer-events: none; opacity: 0.045; z-index: 0;
+    background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 150"><g fill="none" stroke="%232a3a52" stroke-width="1.2"><path d="M50 5 L58 30 L42 30 Z"/><rect x="42" y="30" width="16" height="115"/><path d="M30 55 L38 78 L22 78 Z"/><rect x="22" y="78" width="16" height="67"/><path d="M70 55 L78 78 L62 78 Z"/><rect x="62" y="78" width="16" height="67"/><circle cx="50" cy="52" r="7"/><path d="M46 90 a4 6 0 0 1 8 0 v20 h-8 Z"/><path d="M28 100 a3 5 0 0 1 6 0 v14 h-6 Z"/><path d="M66 100 a3 5 0 0 1 6 0 v14 h-6 Z"/></g></svg>') right bottom / contain no-repeat;
+}
+#top-bar, #welcome, #chatbot, #input-bar, #disclaimer { position: relative; z-index: 1; }
+
+/* 顶部标题栏（对话态用） */
+#top-bar {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    position: relative; padding: 18px 26px 14px; min-height: 74px;
+}
+#top-bar .tb-emblem { width: 40px; height: 40px; margin-right: 14px; flex-shrink: 0; }
+#top-bar .tb-titles { text-align: center; }
+#top-bar .tb-title {
+    font-size: 1.35em; font-weight: bold; color: #2a3a52; letter-spacing: 0.04em;
+    display: flex; align-items: center; gap: 12px; justify-content: center;
+}
+#top-bar .tb-title .flr { color: #c2a15e; font-size: 0.7em; }
+#top-bar .tb-sub { font-size: 0.76em; color: #b0873f; letter-spacing: 0.22em; margin-top: 4px; }
+#btn-clear {
+    position: absolute !important; right: 26px !important; top: 20px !important;
+    background: #ffffff !important; border: 1px solid #d8cdb5 !important;
+    color: #7a6a4c !important; border-radius: 8px !important;
+    font-size: 0.82em !important; height: 38px !important; min-width: 96px !important;
+    box-shadow: 0 1px 3px #00000010 !important; flex-shrink: 0 !important;
+}
+#btn-clear:hover { border-color: #c2a15e !important; color: #a5762a !important; }
+
+/* ── 欢迎态 ── */
+#welcome {
+    flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 20px 40px 40px; text-align: center;
+}
+#welcome .w-emblem { width: 96px; height: 96px; margin-bottom: 22px; }
+#welcome .w-title {
+    font-size: 2.35em; font-weight: bold; color: #2a3a52; letter-spacing: 0.05em;
+    display: flex; align-items: center; gap: 20px; margin-bottom: 10px;
+}
+#welcome .w-title .flr { color: #c2a15e; font-size: 0.5em; }
+#welcome .w-sub { font-size: 1.02em; color: #b0873f; letter-spacing: 0.35em; margin-bottom: 26px; }
+#welcome .w-divider {
+    width: 220px; height: 1px; background: linear-gradient(90deg,transparent,#c9a86a,transparent);
+    position: relative; margin-bottom: 30px;
+}
+#welcome .w-divider::after {
+    content: "❖"; color: #c9a86a; position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%,-50%); background: #f4efe4; padding: 0 10px; font-size: 0.9em;
+}
+#welcome .w-greeting { font-size: 1.28em; color: #3a4a62; margin-bottom: 12px; }
+#welcome .w-hint { font-size: 0.98em; color: #7a8296; margin-bottom: 40px; }
+
+/* 示例卡网格 */
+#cards-row {
+    display: flex !important; flex-wrap: nowrap !important; gap: 22px !important;
+    justify-content: center !important; width: 100% !important; max-width: 1000px !important;
+}
+.scene-card {
+    flex: 1 1 0 !important; min-width: 0 !important; max-width: 220px !important;
+    height: 190px !important; background: #faf6ec !important;
+    border: 1px solid #e0d5bd !important; border-radius: 14px !important;
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: flex-start !important;
+    padding: 26px 18px 20px !important; cursor: pointer !important;
+    box-shadow: none !important; transition: all 0.18s !important;
+    font-family: 'Georgia','Songti SC',serif !important; white-space: normal !important;
+}
+.scene-card:hover {
+    border-color: #c2a15e !important; box-shadow: 0 6px 20px #b18e4222 !important;
+    transform: translateY(-3px) !important; background: #fdfaf2 !important;
+}
+.scene-card::before {
+    content: ""; display: block; width: 66px; height: 66px; border-radius: 50%;
+    border: 2px solid #d8c59a; margin: 0 auto 18px; flex-shrink: 0;
+    background-size: cover; background-position: center;
+    filter: sepia(0.35) saturate(0.85);
+}
+/* 每张卡的缩略图由 app.py 动态注入 #card-N::before { background-image } */
+
+/* ── 对话态：聊天区 ── */
+#chatbot {
+    flex: 1 1 0 !important; min-height: 0 !important; overflow: auto !important;
+    background: transparent !important; border: none !important;
+    padding: 0 clamp(20px, 6vw, 120px) !important;
+}
+#chatbot > div { height: 100% !important; }
+#chatbot .message-row { max-width: 100% !important; }
+/* 助手气泡 */
+.message-wrap .bot > div, [data-testid="bot"] .prose, .bot .message {
+    background: #faf6ec !important; color: #2f3f57 !important;
+    border: 1px solid #e4dac4 !important; border-radius: 4px 16px 16px 16px !important;
+    box-shadow: 0 1px 4px #00000008 !important; line-height: 1.7 !important;
+}
+/* 用户气泡 */
+.message-wrap .user > div, [data-testid="user"] .prose, .user .message {
+    background: #eee6d5 !important; color: #3a4a62 !important;
+    border: 1px solid #e0d5bd !important; border-radius: 16px 4px 16px 16px !important;
+    box-shadow: 0 1px 4px #00000008 !important;
+}
+
+/* 折叠：Agent 思考过程（决策链） */
+.think-box {
+    border: 1px solid #e0d5bd; border-radius: 8px; background: #f2ecdd;
+    margin-bottom: 12px; overflow: hidden;
+}
+.think-box > summary {
+    cursor: pointer; list-style: none; padding: 8px 13px;
+    font-size: 0.85em; color: #9a7f45; font-weight: bold;
+    display: flex; align-items: center; gap: 7px; user-select: none;
+}
+.think-box > summary::-webkit-details-marker { display: none; }
+.think-box > summary::before { content: "🧠"; }
+.think-box > summary::after { content: "▸"; margin-left: auto; transition: transform 0.2s; }
+.think-box[open] > summary::after { transform: rotate(90deg); }
+.think-box[open] > summary { border-bottom: 1px solid #e4dac4; }
+.think-body { padding: 12px 15px 6px; }
+/* 折叠内的决策链步骤 */
+.chain-step { position: relative; padding: 0 0 13px 20px; border-left: 2px solid #ddd0b3; margin-left: 5px; }
+.chain-step:last-child { border-left: 2px solid transparent; padding-bottom: 2px; }
+.chain-dot {
+    position: absolute; left: -8px; top: 1px; width: 13px; height: 13px; border-radius: 50%;
+    background: #c2a15e; border: 3px solid #f2ecdd; box-shadow: 0 0 0 1px #c2a15e;
+}
+.chain-dot.pending { background: #d8cbab; box-shadow: 0 0 0 1px #d8cbab;
+    animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.chain-name { font-size: 0.83em; font-weight: bold; color: #2a3a52; }
+.chain-detail { font-size: 0.76em; color: #77839a; margin-top: 2px; line-height: 1.45; }
+.chain-detail .hl { color: #a5762a; font-weight: bold; }
+
+/* 内联配图网格（对话气泡内） */
+.aw-grid { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
+.aw-card { width: 150px; text-align: center; }
+.aw-card img {
+    width: 150px; height: 150px; object-fit: cover; border-radius: 8px;
+    border: 1px solid #ddd0b3; display: block;
+}
+.aw-cap { font-size: 0.8em; color: #6a7488; margin-top: 6px; line-height: 1.4; }
+.aw-cap b { color: #2a3a52; display: block; }
+
+/* ── 输入栏 ── */
+#input-bar {
+    flex-shrink: 0; padding: 14px clamp(20px, 6vw, 120px) 10px;
+    display: flex; align-items: flex-end; gap: 12px;
+}
+#msg-box { flex: 1 1 auto !important; }
+#msg-box textarea {
+    background: #ffffff !important; border: 1px solid #ddd0b3 !important;
+    color: #2a3a52 !important; border-radius: 14px !important; font-size: 0.98em !important;
+    padding: 14px 18px !important; resize: none !important;
+    box-shadow: 0 1px 6px #00000010 !important; font-family: 'Georgia','Songti SC',serif !important;
+}
+#msg-box textarea:focus {
+    border-color: #c2a15e !important; box-shadow: 0 0 0 3px #c2a15e22 !important; outline: none !important;
+}
+#msg-box textarea::placeholder { color: #a89f8c !important; }
+#btn-send {
+    background: linear-gradient(180deg, #cba766 0%, #b18e42 100%) !important;
+    color: #fff !important; border: none !important; border-radius: 50% !important;
+    width: 52px !important; min-width: 52px !important; height: 52px !important;
+    font-size: 1.3em !important; box-shadow: 0 2px 8px #b18e4240 !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
+    flex-shrink: 0 !important; padding: 0 !important;
+}
+#btn-send:hover { filter: brightness(1.08) !important; }
+
+/* 底部免责声明 */
+#disclaimer {
+    flex-shrink: 0; text-align: center; font-size: 0.76em; color: #a89880;
+    padding: 4px 20px 12px; letter-spacing: 0.04em;
+}
+
+/* 显隐切换：Gradio 用 .hide 类隐藏组件；因 #welcome 用了 id+!important 的
+   display:flex，需同等特异性的 #welcome.hide 才能压过，否则隐藏失效。 */
+#welcome.hide { display: none !important; }
+.is-hidden { display: none !important; }
+
+
+
