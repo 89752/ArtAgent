@@ -1,0 +1,37 @@
+# ── Secrets（务必排除，切勿提交 API key） ──
+.env
+
+# ── 数据集与向量索引（体积大，不入库；README 说明如何获取/重建） ──
+SemArt/
+data/
+*.db
+
+# ── Claude Code 本地配置 ──
+.claude/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── 虚拟环境 ──
+.venv/
+venv/
+env/
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Gradio / 运行时产物 ──
+*.log
+flagged/
+gradio_cached_examples/
