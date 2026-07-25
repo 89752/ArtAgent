@@ -8,8 +8,11 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from langchain_core.messages import HumanMessage
+
 from src.agent.state import AgentState
 from src.agent.prompts import (
+    CONTEXTUALIZE_PROMPT,
     INTENT_CLASSIFIER_PROMPT,
     REFLECTION_PROMPT,
     WEB_FALLBACK_SYNTHESIZE_PROMPT,
@@ -64,6 +67,37 @@ def collect_artworks(docs_by_group: dict[str, list[dict]], limit: int = 8) -> li
             if len(flat) >= limit:
                 return flat
     return flat
+
+
+# ── 多轮指代消解 ────────────────────────────────────────────────
+def contextualize(state: AgentState) -> dict:
+    """
+    用对话历史把带指代的追问改写成独立问题，写回 user_query。
+    下游所有节点都读 user_query，所以在此一处消解即可全局生效。
+    首轮（无历史）直接跳过，不额外调用 LLM。
+    """
+    # 收集本轮之前的人类/助手消息（当前 HumanMessage 是最后一条）
+    prior = [
+        m for m in state.messages[:-1]
+        if isinstance(m, (HumanMessage, AIMessage)) and getattr(m, "content", "")
+    ]
+    if not prior:
+        return {"current_step": "contextualize"}
+
+    def _role(m) -> str:
+        return "用户" if isinstance(m, HumanMessage) else "助手"
+
+    history = "\n".join(
+        f"{_role(m)}：{str(m.content)[:280]}" for m in prior[-6:]
+    )
+    prompt = CONTEXTUALIZE_PROMPT.format(history=history, query=state.user_query)
+    rewritten = get_deterministic_llm().invoke(prompt).content.strip().strip('"').strip()
+
+    if not rewritten or rewritten == state.user_query:
+        return {"current_step": "contextualize"}
+
+    log_event(logger, "contextualize", original=state.user_query, rewritten=rewritten)
+    return {"user_query": rewritten, "current_step": "contextualize"}
 
 
 # ── 意图路由 ────────────────────────────────────────────────────

@@ -82,7 +82,7 @@ graph TD;
 | 长期记忆 | SQLite（标准库，无额外依赖） |
 | 数据集 | SemArt（21,384 幅欧洲绘画，8–19 世纪，含艺术评论文本） |
 | 联网搜索 | Tavily（可选，未配置时优雅降级） |
-| Web UI | Gradio |
+| Web UI | FastAPI + SSE + 原生前端（Gradio 作兜底） |
 
 ---
 
@@ -106,7 +106,11 @@ Agent 在 `general` 分支可自主调用以下 7 个工具，显式管线则按
 
 ```
 ArtAgent/
-├── app.py                      # Gradio Web 界面（三栏布局）
+├── api.py                      # FastAPI 后端（SSE 流式，主入口）
+├── app.py                      # Gradio 旧界面（兜底）
+├── web/                        # 服务层：LangGraph 推理与渲染，UI 无关
+│   └── service.py
+├── static/                     # 自研前端：index.html + app.css + app.js + 徽标/饰线 SVG
 ├── requirements.txt
 ├── .env                        # API key、路径配置
 ├── scripts/
@@ -172,10 +176,13 @@ python scripts/build_index.py
 ### 4. 启动 Web 界面
 
 ```bash
-python app.py
+python api.py
 ```
 
 浏览器打开 `http://localhost:7860` 即可对话。
+
+> 界面为自研前端（FastAPI + SSE 流式 + 原生 HTML/CSS/JS），逐节点展示思考链、内联配图、会话持久化。
+> 旧版 Gradio 界面仍保留：`python app.py`（同端口，作兜底）。
 
 ---
 

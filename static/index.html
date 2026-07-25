@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>西方艺术智能助手</title>
+  <link rel="icon" href="/static/emblem.svg"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Noto+Serif+SC:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="/static/app.css?v=4"/>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <div id="app">
+    <!-- ══════════ 侧栏 ══════════ -->
+    <aside id="sidebar">
+      <div class="brand">
+        <img class="brand-mark" src="/static/emblem.svg" alt=""/>
+        <div class="brand-name">西方艺术智能助手</div>
+      </div>
+
+      <button id="btn-new" class="btn-new">
+        <span class="plus">＋</span> 新建对话
+      </button>
+
+      <div class="side-heading"><span>历史对话</span></div>
+      <nav id="history" class="history"></nav>
+
+      <div id="user-card" class="user-card">
+        <div class="u-avatar">
+          <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <g fill="none" stroke="currentColor" stroke-width="4">
+              <circle cx="50" cy="36" r="18"/>
+              <path d="M18 88 C18 64 34 56 50 56 C66 56 82 64 82 88"/>
+            </g>
+          </svg>
+        </div>
+        <div class="u-meta">
+          <div class="u-name">学者</div>
+          <div class="u-level" id="u-level">Lv.3 学徒</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ══════════ 主区 ══════════ -->
+    <main id="main">
+      <!-- 对话态顶栏 -->
+      <header id="topbar" class="topbar is-hidden">
+        <img class="tb-mark" src="/static/emblem.svg" alt=""/>
+        <div class="tb-title">
+          <span class="flr flr-l"></span>
+          <span>西方艺术智能助手</span>
+          <span class="flr flr-r"></span>
+        </div>
+        <button id="btn-clear" class="btn-clear">清除对话</button>
+      </header>
+
+      <!-- 欢迎态 -->
+      <section id="welcome" class="welcome">
+        <div class="w-inner">
+          <img class="w-mark" src="/static/emblem.svg" alt="天使徽标"/>
+          <h1 class="w-title">
+            <span class="flr flr-l"></span>
+            <span>西方艺术智能助手</span>
+            <span class="flr flr-r"></span>
+          </h1>
+          <div class="w-divider"></div>
+          <p class="w-greeting">您好，我是您的西方艺术智能助手。</p>
+          <p class="w-hint">向我提问关于艺术作品、艺术家、风格流派与历史背景的一切。</p>
+          <div id="cards" class="cards"></div>
+        </div>
+      </section>
+
+      <!-- 对话态消息流 -->
+      <section id="chat" class="chat is-hidden"></section>
+
+      <!-- 输入栏 -->
+      <div class="composer">
+        <div class="composer-inner">
+          <textarea id="msg" rows="1" placeholder="输入您的问题或想法…"></textarea>
+          <button id="btn-send" class="btn-send" aria-label="发送">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 12h15M13 6l6 6-6 6"/>
+            </svg>
+          </button>
+        </div>
+        <div class="disclaimer">内容由 AI 生成，仅供学习参考，请结合权威资料深入研究。</div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js?v=4"></script>
+</body>
+</html>

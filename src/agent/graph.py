@@ -3,7 +3,8 @@ ArtAgent 混合架构 LangGraph。
 
   START
     └─► load_memory            读取用户长期偏好（S5）
-          └─► classify         意图路由
+          └─► contextualize    多轮指代消解（把"他/这幅"改写成具体对象）
+                └─► classify   意图路由
                 ├─ comparison ──► comp_decompose → comp_retrieve → comp_synthesize ─┐
                 ├─ timeline ────► tl_subject → tl_periods → tl_synthesize ───────────┤
                 ├─ recommendation► rec_extract → rec_search → rec_filter → rec_synth ┤
@@ -56,6 +57,7 @@ def build_graph():
 
     # 公共节点
     add("load_memory", N.load_memory)
+    add("contextualize", N.contextualize)
     add("classify", N.classify_intent)
     add("reflection", N.reflection)
     add("web_fallback", N.web_fallback)
@@ -83,7 +85,8 @@ def build_graph():
 
     # ── 连线 ──
     builder.add_edge(START, "load_memory")
-    builder.add_edge("load_memory", "classify")
+    builder.add_edge("load_memory", "contextualize")
+    builder.add_edge("contextualize", "classify")
 
     builder.add_conditional_edges(
         "classify",

@@ -1,6 +1,7 @@
 """ArtAgent 节点集合（混合架构）。"""
 
 from src.agent.nodes.common import (
+    contextualize,
     classify_intent,
     load_memory,
     reflection,
@@ -32,6 +33,7 @@ from src.agent.nodes.general import (
 )
 
 __all__ = [
+    "contextualize",
     "classify_intent",
     "load_memory",
     "reflection",
