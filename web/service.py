@@ -249,6 +249,7 @@ def stream_answer(message: str, sid: str) -> Iterator[dict]:
                 "user_query": message,
                 "user_id": WEB_USER_ID,
                 "intent": "",
+                "dataset_id": "semart",  # Stage 2：每轮重置当前生效数据源
                 "subjects": [],
                 "sub_queries": [],
                 "extracted_features": "",

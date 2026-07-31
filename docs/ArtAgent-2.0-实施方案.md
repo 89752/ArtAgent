@@ -1,7 +1,7 @@
 # ArtAgent 2.0 实施方案（完善版 · 开发用）
 
-> 本文档 = 原《ArtAgent-2.0-设计方案》+ 2026-07-31 代码级评估的 8 项补充 + Stage 1 实施记录。
-> 是 Stage 2–7 后续开发的**唯一事实来源**；每个新会话开工前先读「§1 当前状态」和「§13 陷阱速查」。
+> 本文档 = 原《ArtAgent-2.0-设计方案》+ 2026-07-31 代码级评估的 8 项补充 + Stage 1/2 实施记录。
+> 是 Stage 3–7 后续开发的**唯一事实来源**；每个新会话开工前先读「§1 当前状态」和「§13 陷阱速查」。
 >
 > 原方案中的架构判断（三层结构、确定性编排 vs 真工具调用、collection 级隔离不做物理合并、
 > 页级自适应路由、结构化/非结构化检索统一抽象）经代码核验全部成立，本文不再重复论证，只记结论。
@@ -26,14 +26,16 @@ $PY tests/test_access.py       # 纯单测，无 LLM，秒级
 $PY tests/test_tools.py        # 工具冒烟（真实 API）
 $PY tests/test_multi_tool.py   # 多工具链
 $PY tests/test_pipelines.py    # 四分支端到端
-$PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%）
+$PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%；64.0% 为 n=25 口径，默认 n=20 为 70.0%，两者非回归关系）
 ```
 
 ---
 
-## 1. 当前状态：Stage 1 已完成 ✅（commits `a08bda1`、`1aaf48c`）
+## 1. 当前状态：Stage 1 / Stage 2 已完成 ✅
 
-### 1.1 已落地的改动
+> Stage 1：commits `a08bda1`、`1aaf48c`；Stage 2：见 §1.4。
+
+### 1.1 已落地的改动（Stage 1）
 
 - **数据访问层 `src/data/access.py`**：`fuzzy_match`（精确→去冠词→分词包含 三级递进）、`row_to_artwork_dict`（兼容 DataFrame 行与 Chroma metadata）、`format_evidence_block`（模板化 + 空字段清理）、`EVIDENCE_SNIPPET_LEN=200`。配套 `tests/test_access.py` 17 个纯单测。
 - **工具 7 → 5**：`semantic_search` / `exact_lookup` / `query_painter_knowledge`（去 LLM 化，返回结构化统计）/ `image_lookup`（吸收 analyze_image，`analyze=True` 触发视觉分析）/ `web_search`。`compare_artwork_styles` 已删除。`GENERAL_TOOLS` 与 `SYSTEM_PROMPT` 已同步。
@@ -50,6 +52,32 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 
 - 每个新模块配**纯单测**（参照 `tests/test_access.py`：不加载数据集、不调 LLM、不联网、断言式 + `__main__` 直跑）。
 - 验收标准用**无显著回归**（eval 指标波动 ≤ 2 个百分点），不用"完全一致"——意图分类走 LLM，存在天然波动。
+
+### 1.4 Stage 2 实施记录（RAG 抽象层）✅
+
+**已落地的改动：**
+
+- **`src/retrieval/` 新包**：
+  - `base.py`：`RetrievalResult(content/source/score/metadata/image_refs)`，source 枚举含 `semart/user_table/user_pdf_text/user_pdf_image/met_museum/rijksmuseum`（后两者 Stage 7 预留）；`BaseRetriever` Protocol（`search(query, top_k, filters)`）。
+  - `structured_retriever.py`：`TableSchema`（entity_col/group_axis_col/description_col/image_col，`supports_timeline`/`supports_recommendation` 自动推出）+ `SEMART_SCHEMA` 配置化；`StructuredTableRetriever` 提供 `group_by_axis`（timeline）、`exclude_by_entity`/`exclude_from_results`（recommendation）、`search`；数据源注册表 `register_structured_dataset`/`get_structured_retriever`，SemArt 懒注册为 `dataset_id="semart"`。
+  - `hybrid.py`：`HybridRetriever.search(query, top_k, sources, dataset_id)`——多源扇出 → RRF（k=60）按源内排名融合 → page_id/doc_id 去重；BGE/Chroma 单例从 `tools/retrieval.py` 迁入（`get_chroma_collection(name)` 参数化，为 Stage 3 多 collection 预留）；`get_hybrid_retriever()` 全局单例自动注册 SemArt。
+- **集成点**（§3.2 三项全部落实）：`AgentState.dataset_id="semart"`；`web/service.py` 重置清单同步；`semantic_search` 改走 HybridRetriever 且返回形状不变（`title/author/date/technique/school/timeframe/image_file/description_snippet/relevance_score`）。
+- **节点改造**：`timeline_gather_periods` 改用 `get_structured_retriever(state.dataset_id).group_by_axis(subject)`；`recommendation_feature_search` 的排除逻辑改用 `exclude_from_results`；路由层 `_route_by_intent` 加能力开关（只读 schema，SemArt 恒 True 不触发降级）。
+
+**实施中的关键决策（对原方案的细化，后续 Stage 需知晓）：**
+
+1. **注册全懒加载**：注册只落 schema + 若干 loader，df/Chroma/BGE 模型首次实际使用才解析——能力开关挂在意图路由上，不能让每次分类都付出数据集加载代价。
+2. **`exclude_by_entity` vs `exclude_from_results`**：原方案签名是前者（返回 DataFrame），但 recommendation 的排除实际发生在 `semantic_search` 的结果字典上（向量检索走 Chroma 不过 DataFrame）。两者都实现、共享同一套分词逻辑，节点用后者；行为与 Stage 1 内联逻辑逐字一致（长度 >2 的词小写化做包含匹配）。
+3. **RRF 只定序不改分**：各源原生 `score`（SemArt 为 `1 - distance`）原样保留，`relevance_score` 形状不变；Python sort 稳定，单源时 RRF 严格保持原顺序——这是 Recall@5 逐位持平的关键。
+4. **去重只作用于带 page_id/doc_id 的结果**：SemArt 行无此二键，不参与去重；Stage 3 双路线页面共享 page_id 时该逻辑才生效。
+5. **`StructuredTableRetriever.search` 双路径**：挂了向量集合走 BGE 向量检索（SemArt）；无索引表走 `fuzzy_match` 实体列 → 描述列包含的兜底路径（Stage 5 预览），支持 `{列: 值}` 等值 filters。
+
+**验收数据（2026-08-01 全量跑完）：**
+
+- 纯单测 53 个全绿：`test_structured_retriever.py` 23 + `test_hybrid.py` 13 + `test_access.py` 17（秒级，无 LLM）。
+- `tests/test_tools.py` / `test_pipelines.py` / `test_multi_tool.py` 全绿，四分支与多工具链行为不回归。
+- eval 意图分类 **98.0%**（49/50，基线 96.0%，波动在 ±2pp 内）。
+- eval Recall@5：**新旧路径 25 条 query 逐位对比 0 不一致**（`tests/verify_recall_parity.py`，标题/顺序/条数完全相同）；**n=25 复现基线恰为 64.0%**（16/25）。注意口径：基线 64.0% 来自 n=25，`run_eval.py` 默认 `--retrieval-n 20` 跑出 70.0%（14/20）是同一样本种子下的不同口径，非行为变化。`verify_recall_parity.py` 留作永久校验工具，Stage 3/4 改动检索层后应复跑。
 
 ---
 
@@ -73,7 +101,7 @@ Agent 编排层（graph.py，路由基本不变）
 
 ---
 
-## 3. Stage 2：RAG 抽象层
+## 3. Stage 2：RAG 抽象层 ✅（已完成，实施记录见 §1.4）
 
 **目标**：SemArt 从硬编码变成"第一个注册的数据源"；`timeline`/`recommendation` 依赖 `TableSchema` 抽象而非 SemArt 字段名。
 
@@ -95,6 +123,7 @@ Agent 编排层（graph.py，路由基本不变）
 
 - `structured_retriever` 纯单测（构造小 DataFrame，不依赖 SemArt）。
 - `test_pipelines.py` 全绿；eval 无显著回归（检索 Recall@5 应恰好 64.0%——固定种子、本地 BGE，无 LLM 波动借口）。
+- ✅ 已验收（§1.4）：**Recall@5 基线口径为 n=25（16/25=64.0%）**；`run_eval.py` 默认 n=20 跑出 70.0% 是同一 seed=42 下的不同样本量，不是回归。判据应是"新旧路径逐位一致"，用 `tests/verify_recall_parity.py` 验证。
 
 ---
 
@@ -250,3 +279,6 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 6. **工具返回形状的隐形消费者**：`_parse_artworks_from_messages` 认 `title/author/date/image_file`；各合成节点认 `description_snippet`。改 RetrievalResult/工具输出时对齐。
 7. **测试全是真实 API 调用**：全量验证约 25–35 分钟且有 API 成本；开发期优先跑纯单测，验收再跑全量。
 8. **工具内不许藏 LLM 调用**：结构化数据进、结构化数据出，组织语言是 general_agent 的事。
+9. **BGE/Chroma 单例已迁到 `src/retrieval/hybrid.py`**（`get_chroma_collection(name)` / `get_bge_embed_fn()`）；`tools/retrieval.py` 不再有 `_get_collection`/`_get_embedding_model`，Stage 3 新增 collection 直接调前者。
+10. **数据源注册表全懒加载**：`get_structured_retriever("semart")` 只注册 schema + loader，不读 CSV/不开 Chroma/不加载 BGE——能力开关可以挂在每次意图路由上零成本调用；但别在纯单测里访问 `.df` 或 `search`（会真加载 SemArt）。
+11. **跨源排序只信 RRF 排名**：各源 `score` 绝对值不可比（SemArt 是 1-cosine distance，未来 museum API 无相似度分数），HybridRetriever 融合时不得对 score 做跨源比较；`relevance_score=1-distance` 是 SemArt 专属形状，仅在其结果上成立。

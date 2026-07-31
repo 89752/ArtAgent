@@ -61,6 +61,7 @@ def recommendation_extract_features(state: AgentState) -> dict:
 
 def recommendation_feature_search(state: AgentState) -> dict:
     """用提炼的特征检索，排除用户已喜欢的画家。"""
+    from src.retrieval.structured_retriever import get_structured_retriever
     from src.tools.retrieval import semantic_search
 
     try:
@@ -71,17 +72,10 @@ def recommendation_feature_search(state: AgentState) -> dict:
         logger.warning("[feature_search] semantic_search failed: %s", e)
         results = []
 
-    # 排除用户已喜欢的画家本人的作品
-    exclude_tokens = []
-    for a in state.subjects:
-        exclude_tokens.extend(t.lower() for t in a.split() if len(t) > 2)
-
-    filtered = []
-    for r in results:
-        author_lower = r.get("author", "").lower()
-        if any(tok in author_lower for tok in exclude_tokens):
-            continue
-        filtered.append(r)
+    # 排除用户已喜欢的画家本人的作品——实体排除逻辑委托给当前数据源的
+    # StructuredTableRetriever（Stage 2），节点不再自己分词匹配 AUTHOR 字段
+    retriever = get_structured_retriever(state.dataset_id)
+    filtered = retriever.exclude_from_results(results, state.subjects)
 
     log_event(
         logger, "feature_search",

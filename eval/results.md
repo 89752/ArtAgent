@@ -1,34 +1,33 @@
 # ArtAgent 评估结果
 
-> 生成时间：2026-07-24 14:21:40
+> 生成时间：2026-08-01 01:34:56
 
 ## 1. 意图分类
 
-**准确率 96.0%**（48/50） · Macro-F1 0.962
+**准确率 98.0%**（49/50） · Macro-F1 0.982
 
 | 意图 | Precision | Recall | F1 | 样本数 |
 |---|---|---|---|---|
 | comparison | 1.00 | 1.00 | 1.00 | 11 |
-| timeline | 1.00 | 1.00 | 1.00 | 12 |
-| recommendation | 0.83 | 1.00 | 0.91 | 10 |
-| general | 1.00 | 0.88 | 0.94 | 17 |
+| timeline | 1.00 | 0.92 | 0.96 | 12 |
+| recommendation | 1.00 | 1.00 | 1.00 | 10 |
+| general | 0.94 | 1.00 | 0.97 | 17 |
 
 **混淆矩阵**（行=真实，列=预测）
 
 | gold \ pred | comparison | timeline | recommendation | general |
 |---|---|---|---|---|
 | **comparison** | 11 | 0 | 0 | 0 |
-| **timeline** | 0 | 12 | 0 | 0 |
+| **timeline** | 0 | 11 | 0 | 1 |
 | **recommendation** | 0 | 0 | 10 | 0 |
-| **general** | 0 | 0 | 2 | 15 |
+| **general** | 0 | 0 | 0 | 17 |
 
 **误分类样本**
 
-- `general` → `recommendation`：推荐一本介绍伦勃朗的书
-- `general` → `recommendation`：喜欢梵高的人一般也喜欢莫奈吗
+- `timeline` → `general`：莫奈晚年为什么画风变得更抽象
 
 ## 2. 已知项检索
 
-**Recall@5 = 64.0%**（16/25）
+**Recall@5 = 70.0%**（14/20）
 
 > 从 SemArt 随机抽画作，用其描述中段片段作 query，检验原画能否命中 semantic_search 的 top-5。全自动标注，衡量向量检索质量。

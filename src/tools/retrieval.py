@@ -5,60 +5,30 @@ Tool 1: Artwork Retrieval Tools
   - semantic_search: 语义向量检索（用于模糊查询、主题检索）
   - exact_lookup:    精确字段查询（用于按画家/标题/年代精确查找）
 
+Stage 2 起 semantic_search 改走检索抽象层（HybridRetriever），Agent 工具层
+无感知升级——返回形状保持现状（title/author/date/.../description_snippet/
+relevance_score），web/service.py 的 ToolMessage 解析与各合成节点不受影响。
 数据过滤/格式化统一走 src/data/access.py 数据访问层。
 """
 
-import os
-from pathlib import Path
-from functools import lru_cache
 from typing import Optional
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 
 from src.data.access import fuzzy_match, row_to_artwork_dict
+from src.retrieval.base import RetrievalResult
 
 load_dotenv()
 
-CHROMA_DIR = Path(os.getenv("INDEX_DIR", "./data/index")) / "chroma"
-EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_TOP_K = 5
 
 
-# ------------------------------------------------------------------ #
-# 单例：Chroma collection + embedding model                           #
-# ------------------------------------------------------------------ #
-
-
-@lru_cache(maxsize=1)
-def _get_collection():
-    """加载持久化的 Chroma collection（全局单例）。"""
-    import chromadb
-
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    return client.get_collection("semart")
-
-
-@lru_cache(maxsize=1)
-def _get_embedding_model():
-    """加载 BGE embedding 模型（全局单例）。"""
-    from sentence_transformers import SentenceTransformer
-
-    return SentenceTransformer(EMBEDDING_MODEL)
-
-
-def _embed(text: str) -> list[float]:
-    """将文本转为归一化向量。"""
-    model = _get_embedding_model()
-    return model.encode(text, normalize_embeddings=True).tolist()
-
-
-def _format_result(meta: dict, distance: Optional[float] = None) -> dict:
-    """格式化单条 Chroma 检索结果，供 Agent 消费。"""
-    result = row_to_artwork_dict(meta)
-    if distance is not None:
-        result["relevance_score"] = round(1 - distance, 4)
-    return result
+def _format_result(result: RetrievalResult) -> dict:
+    """格式化单条检索结果，供 Agent 消费（返回形状与 Stage 1 保持一致）。"""
+    artwork = row_to_artwork_dict(result.metadata)
+    artwork["relevance_score"] = round(result.score, 4)
+    return artwork
 
 
 # ------------------------------------------------------------------ #
@@ -83,19 +53,10 @@ def semantic_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     Returns:
         匹配画作列表，每项包含标题、画家、年代、技法、流派、图片路径、描述摘要
     """
-    collection = _get_collection()
-    query_embedding = _embed(query)
+    from src.retrieval.hybrid import get_hybrid_retriever
 
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(top_k, collection.count()),
-        include=["metadatas", "distances"],
-    )
-
-    metadatas = results["metadatas"][0]
-    distances = results["distances"][0]
-
-    return [_format_result(meta, dist) for meta, dist in zip(metadatas, distances)]
+    results = get_hybrid_retriever().search(query, top_k=top_k)
+    return [_format_result(r) for r in results]
 
 
 @tool

@@ -6,16 +6,17 @@ extract_subject → gather_periods → synthesize
   - gather_periods:  按 timeframe 分组，收集每个时期的评论证据 + 代表作配图
   - synthesize:      按时间顺序组织连贯叙述，点名各时期代表作
 
-数据访问统一走 src/data/access.py：gather 用 fuzzy_match 定位画家作品、
-row_to_artwork_dict 产出证据字典（含 description_snippet），synthesize 用
-format_evidence_block 拼证据文本——同一批画作记录只查一次、只拼一次。
+数据访问：Stage 2 起 gather 通过当前数据源的 StructuredTableRetriever
+定位并分组画家作品（内部走 access.fuzzy_match），row_to_artwork_dict
+产出证据字典（含 description_snippet），synthesize 用 format_evidence_block
+拼证据文本——同一批画作记录只查一次、只拼一次。
 """
 
 from langchain_core.messages import AIMessage
 
 from src.agent.state import AgentState
 from src.agent.prompts import TIMELINE_SUBJECT_PROMPT, TIMELINE_SYNTHESIZE_PROMPT
-from src.data.access import fuzzy_match, format_evidence_block, row_to_artwork_dict
+from src.data.access import format_evidence_block, row_to_artwork_dict
 from src.utils.llm import get_llm, get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
 
@@ -38,40 +39,35 @@ def timeline_extract_subject(state: AgentState) -> dict:
 
 def timeline_gather_periods(state: AgentState) -> dict:
     """
-    按 timeframe 分组画家作品，收集每个时期的证据与配图。
-    直接用数据集（比逐时期语义检索更可靠地拿到时期覆盖）。
+    按分组轴（SemArt 为 timeframe）分组画家作品，收集每个时期的证据与配图。
+
+    数据访问走当前生效数据源的 StructuredTableRetriever（Stage 2）：
+    本节点依赖的不再是 SemArt 字段名，而是 schema 声明的实体列与分组轴。
     """
-    from src.data.loader import get_dataset
+    from src.retrieval.structured_retriever import get_structured_retriever
     from src.tools.image_lookup import lookup_images
 
     subject = state.subjects[0] if state.subjects else state.user_query
-    dataset = get_dataset()
-    works = fuzzy_match(dataset.all, "AUTHOR", subject)
-    log_event(logger, "gather_periods", subject=subject, works_found=len(works))
+    retriever = get_structured_retriever(state.dataset_id)
+    groups = retriever.group_by_axis(subject)
+    log_event(
+        logger, "gather_periods",
+        subject=subject, dataset_id=state.dataset_id,
+        works_found=sum(len(g) for g in groups.values()),
+    )
 
     images: list[dict] = []
     docs_by_period: dict[str, list[dict]] = {}
 
-    if works.empty:
+    if not groups:
         return {
             "retrieved_docs": {},
             "images": [],
             "current_step": "timeline_gather_periods",
         }
 
-    # 按 timeframe 排序分组
-    def _period_key(tf: str) -> str:
-        return tf if tf else "Unknown"
-
-    works = works.copy()
-    works["_TF"] = works["TIMEFRAME"].fillna("").map(_period_key)
-    # 按时期字符串排序（形如 "1851-1900" 天然可排序）
-    periods = sorted([p for p in works["_TF"].unique() if p and p != "Unknown"])
-    if not periods:
-        periods = ["Unknown"]
-
-    for period in periods[:_MAX_PERIODS]:
-        subset = works[works["_TF"] == period]
+    # groups 按分组轴值升序（形如 "1851-1900" 天然可按时间排序）
+    for period, subset in list(groups.items())[:_MAX_PERIODS]:
         # 证据：取该时期若干条评论（row_to_artwork_dict 直接产出含
         # description_snippet 的字典，不再自己 iterrows() 拼第二遍）
         docs_by_period[period] = [
@@ -85,7 +81,7 @@ def timeline_gather_periods(state: AgentState) -> dict:
 
     log_event(
         logger, "gather_periods",
-        periods=periods[:_MAX_PERIODS], images=images,
+        periods=list(groups.keys())[:_MAX_PERIODS], images=images,
     )
     return {
         "retrieved_docs": docs_by_period,

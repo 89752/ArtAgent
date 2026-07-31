@@ -1,0 +1,310 @@
+"""
+结构化表检索器（Stage 2）：TableSchema + StructuredTableRetriever。
+
+核心思想：timeline / recommendation 依赖的不再是"SemArt"这个具体名字，
+而是"当前数据源的 schema 声明了它有实体列 / 分组轴列 / 描述列"这个抽象。
+SemArt 只是第一个满足该抽象、被注册的数据源（dataset_id="semart"）；
+Stage 5 用户上传的 CSV/Excel 将以同样方式注册复用同一套能力。
+
+懒加载设计：注册时只落 schema 与若干 loader，不真正读 CSV / 开 Chroma /
+加载 BGE 模型——路由层能力开关只查 schema，不能让每次意图分类都付出
+数据集加载代价。各资源在首次实际使用时才解析并缓存。
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Optional
+
+import pandas as pd
+from pydantic import BaseModel
+
+from src.data.access import fuzzy_match
+from src.retrieval.base import RetrievalResult, RetrievalSource
+from src.utils.logging_config import get_logger
+
+logger = get_logger("retrieval.structured")
+
+
+# ------------------------------------------------------------------ #
+# TableSchema：结构化表的"角色声明"                                     #
+# ------------------------------------------------------------------ #
+
+
+class TableSchema(BaseModel):
+    """声明一张结构化表中各列扮演的角色（SemArt 的 AUTHOR/TIMEFRAME/... 搬进配置）。"""
+
+    entity_col: str  # 实体名列，如 SemArt 的 AUTHOR
+    group_axis_col: Optional[str] = None  # 分组/时间轴列，如 TIMEFRAME；没有则 None
+    description_col: str  # 描述文本列，如 DESCRIPTION
+    image_col: Optional[str] = None  # 图片引用列，如 IMAGE_FILE
+
+    @property
+    def supports_timeline(self) -> bool:
+        """是否有分组轴可支撑 timeline 管线（由 group_axis_col 是否存在推出）。"""
+        return bool(self.group_axis_col)
+
+    @property
+    def supports_recommendation(self) -> bool:
+        """是否有实体列+描述列可支撑 recommendation 管线。"""
+        return bool(self.entity_col and self.description_col)
+
+
+# SemArt 的 schema 配置：现有硬编码字段名的配置化归宿
+SEMART_SCHEMA = TableSchema(
+    entity_col="AUTHOR",
+    group_axis_col="TIMEFRAME",
+    description_col="DESCRIPTION",
+    image_col="IMAGE_FILE",
+)
+
+
+def _entity_tokens(names: list[str]) -> list[str]:
+    """实体排除名单的分词：长度 > 2 的词转小写（与 Stage 1 前 recommendation
+    节点内联的排除逻辑完全一致，"Van Gogh" → ["van", "gogh"]）。"""
+    tokens: list[str] = []
+    for name in names:
+        tokens.extend(t.lower() for t in str(name).split() if len(t) > 2)
+    return tokens
+
+
+# ------------------------------------------------------------------ #
+# StructuredTableRetriever                                            #
+# ------------------------------------------------------------------ #
+
+
+class StructuredTableRetriever:
+    """一张结构化表的统一访问入口：结构化操作 + 可选向量语义检索。
+
+    - group_by_axis / exclude_by_entity：给确定性管线（timeline/recommendation）用
+    - search：BaseRetriever 协议实现，接入 HybridRetriever。
+      挂了向量集合（SemArt）时走 BGE 向量检索；否则退化走 access.fuzzy_match
+      （Stage 5 无索引表格的兜底路径）。
+    """
+
+    def __init__(
+        self,
+        dataset_id: str,
+        schema: TableSchema,
+        *,
+        source: RetrievalSource = "user_table",
+        df: Optional[pd.DataFrame] = None,
+        df_loader: Optional[Callable[[], pd.DataFrame]] = None,
+        collection_loader: Optional[Callable[[], Any]] = None,
+        embed_fn_loader: Optional[Callable[[], Callable[[str], list[float]]]] = None,
+    ):
+        self.dataset_id = dataset_id
+        self.schema = schema
+        self.source = source
+        self._df = df
+        self._df_loader = df_loader
+        self._collection: Any = None
+        self._collection_loader = collection_loader
+        self._embed_fn: Optional[Callable[[str], list[float]]] = None
+        self._embed_fn_loader = embed_fn_loader
+
+    # ── 懒加载资源 ────────────────────────────────────────────────
+    @property
+    def df(self) -> pd.DataFrame:
+        if self._df is None:
+            if self._df_loader is None:
+                raise RuntimeError(f"数据源 {self.dataset_id} 未提供 DataFrame")
+            self._df = self._df_loader()
+        return self._df
+
+    def _get_collection(self) -> Any:
+        if self._collection is None and self._collection_loader is not None:
+            self._collection = self._collection_loader()
+        return self._collection
+
+    def _get_embed_fn(self) -> Optional[Callable[[str], list[float]]]:
+        if self._embed_fn is None and self._embed_fn_loader is not None:
+            self._embed_fn = self._embed_fn_loader()
+        return self._embed_fn
+
+    # ── 结构化操作：timeline ──────────────────────────────────────
+    def group_by_axis(self, entity: str) -> dict[str, pd.DataFrame]:
+        """按分组轴列对某个实体的记录分组（给 timeline 用）。
+
+        返回 {分组值: 子 DataFrame}，分组值按字符串升序（SemArt 的
+        "1851-1900" 形式天然可按时间排序）。分组轴为空的记录归入 "Unknown"：
+        存在真实分组时 Unknown 组被丢弃；完全没有真实分组时返回
+        {"Unknown": 全部}。行为与 Stage 1 前 timeline 节点内联逻辑一致。
+        """
+        if not self.schema.group_axis_col:
+            return {}
+        works = fuzzy_match(self.df, self.schema.entity_col, entity)
+        if works.empty:
+            return {}
+
+        works = works.copy()
+        axis = self.schema.group_axis_col
+        works["_AXIS"] = works[axis].fillna("").map(lambda v: v if v else "Unknown")
+        keys = sorted(k for k in works["_AXIS"].unique() if k and k != "Unknown")
+        if not keys:
+            keys = ["Unknown"]
+        return {k: works[works["_AXIS"] == k] for k in keys}
+
+    # ── 结构化操作：recommendation ────────────────────────────────
+    def entity_matches(self, value: str, names: list[str]) -> bool:
+        """判断某实体字段值是否命中排除名单（分词包含，忽略大小写）。"""
+        value_lower = (value or "").lower()
+        return any(tok in value_lower for tok in _entity_tokens(names))
+
+    def exclude_by_entity(self, names: list[str]) -> pd.DataFrame:
+        """返回排除命中实体后的 DataFrame（实体列分词包含匹配）。"""
+        tokens = _entity_tokens(names)
+        if not tokens:
+            return self.df
+        col = self.schema.entity_col
+        mask = self.df[col].astype(str).str.lower().map(
+            lambda v: not any(tok in v for tok in tokens)
+        )
+        return self.df[mask]
+
+    def exclude_from_results(
+        self, results: list[dict], names: list[str]
+    ) -> list[dict]:
+        """从检索结果字典列表中排除命中实体的条目（recommendation 实际使用）。
+
+        结果字典来自 row_to_artwork_dict 归一化形状（小写 key），实体字段
+        按 schema.entity_col 小写定位（SemArt：AUTHOR → author）。
+        """
+        if not names:
+            return list(results)
+        key = self.schema.entity_col.lower()
+        return [r for r in results if not self.entity_matches(r.get(key, ""), names)]
+
+    # ── BaseRetriever 协议：HybridRetriever 融合入口 ───────────────
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        filters: dict | None = None,
+    ) -> list[RetrievalResult]:
+        """语义检索：挂了向量集合走 BGE 向量检索，否则走 fuzzy_match 兜底。"""
+        collection = self._get_collection()
+        embed_fn = self._get_embed_fn()
+        if collection is not None and embed_fn is not None:
+            return self._vector_search(collection, embed_fn, query, top_k)
+        return self._fuzzy_search(query, top_k, filters)
+
+    def _vector_search(
+        self, collection: Any, embed_fn: Callable[[str], list[float]],
+        query: str, top_k: int,
+    ) -> list[RetrievalResult]:
+        """BGE 向量空间检索（SemArt 路径，与原 semantic_search 行为一致）。"""
+        results = collection.query(
+            query_embeddings=[embed_fn(query)],
+            n_results=min(top_k, collection.count()),
+            include=["metadatas", "distances"],
+        )
+        out: list[RetrievalResult] = []
+        for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
+            meta = dict(meta)
+            meta["dataset_id"] = self.dataset_id
+            out.append(
+                RetrievalResult(
+                    content=str(meta.get("description") or meta.get("title") or ""),
+                    source=self.source,
+                    score=1 - dist,
+                    metadata=meta,
+                    image_refs=[meta["file"]] if meta.get("file") else [],
+                )
+            )
+        return out
+
+    def _fuzzy_search(
+        self, query: str, top_k: int, filters: dict | None
+    ) -> list[RetrievalResult]:
+        """无向量索引表的兜底检索：实体列 fuzzy_match → 描述列包含匹配。
+
+        filters（可选）：{列名: 值} 等值过滤，作用于命中的 DataFrame。
+        """
+        hits = fuzzy_match(self.df, self.schema.entity_col, query)
+        if hits.empty:
+            desc_col = self.schema.description_col
+            if desc_col in self.df.columns:
+                mask = (
+                    self.df[desc_col]
+                    .astype(str)
+                    .str.lower()
+                    .str.contains(str(query).lower(), na=False, regex=False)
+                )
+                hits = self.df[mask]
+
+        if not hits.empty and filters:
+            for col, value in filters.items():
+                if col in hits.columns:
+                    hits = hits[hits[col].astype(str) == str(value)]
+
+        out: list[RetrievalResult] = []
+        for _, row in hits.head(top_k).iterrows():
+            meta = {
+                str(c).lower(): ("" if pd.isna(row[c]) else str(row[c]))
+                for c in self.df.columns
+            }
+            meta["dataset_id"] = self.dataset_id
+            image = ""
+            if self.schema.image_col and self.schema.image_col in self.df.columns:
+                image = str(row.get(self.schema.image_col) or "")
+            out.append(
+                RetrievalResult(
+                    content=str(row.get(self.schema.description_col, "") or ""),
+                    source=self.source,
+                    score=1.0,
+                    metadata=meta,
+                    image_refs=[image] if image else [],
+                )
+            )
+        return out
+
+
+# ------------------------------------------------------------------ #
+# 数据源注册表（SemArt 为第一个注册实例）                                #
+# ------------------------------------------------------------------ #
+
+_REGISTRY: dict[str, StructuredTableRetriever] = {}
+
+
+def register_structured_dataset(
+    dataset_id: str,
+    schema: TableSchema,
+    **kwargs: Any,
+) -> StructuredTableRetriever:
+    """注册一个结构化数据源，返回其 StructuredTableRetriever 实例。"""
+    retriever = StructuredTableRetriever(dataset_id, schema, **kwargs)
+    _REGISTRY[dataset_id] = retriever
+    logger.info(
+        "[register] dataset_id=%s source=%s timeline=%s recommendation=%s",
+        dataset_id, retriever.source,
+        schema.supports_timeline, schema.supports_recommendation,
+    )
+    return retriever
+
+
+def get_structured_retriever(dataset_id: str = "semart") -> StructuredTableRetriever:
+    """按 dataset_id 取已注册的结构化检索器；semart 首次访问时懒注册。
+
+    懒注册等价于"系统启动时自动注册 SemArt"，但只在真正用到时才付出
+    资源代价（且 schema 立即可用，df/向量集合仍保持懒加载）。
+    """
+    if dataset_id not in _REGISTRY:
+        if dataset_id != "semart":
+            raise KeyError(f"未注册的数据源：{dataset_id}")
+        _register_semart()
+    return _REGISTRY[dataset_id]
+
+
+def _register_semart() -> None:
+    """把 SemArt 注册为第一个结构化数据源（df / Chroma / BGE 全部懒加载）。"""
+    from src.data.loader import get_dataset
+    from src.retrieval.hybrid import get_bge_embed_fn, get_chroma_collection
+
+    register_structured_dataset(
+        "semart",
+        SEMART_SCHEMA,
+        source="semart",
+        df_loader=lambda: get_dataset().all,
+        collection_loader=lambda: get_chroma_collection("semart"),
+        embed_fn_loader=get_bge_embed_fn,
+    )

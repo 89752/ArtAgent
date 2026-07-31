@@ -27,18 +27,51 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.agent.state import AgentState
 from src.agent import nodes as N
-from src.utils.logging_config import traced
+from src.utils.logging_config import get_logger, log_event, traced
+
+logger = get_logger("graph")
 
 
 # ── 路由函数 ────────────────────────────────────────────────────
+def _capability_supported(intent: str, dataset_id: str) -> bool:
+    """
+    路由层能力开关（Stage 2）：进入 timeline / recommendation 前，检查当前
+    生效数据源的 schema 是否声明了对应能力（分组轴 / 实体+描述列）。
+
+    不支持则降级 general，而不是硬跑一个不成立的 groupby。只读 schema，
+    不触发数据集加载。Stage 2 阶段 SemArt 恒为 True，暂不会触发降级；
+    Stage 5 用户表格接入后真正生效。
+    """
+    from src.retrieval.structured_retriever import get_structured_retriever
+
+    try:
+        schema = get_structured_retriever(dataset_id).schema
+    except Exception as e:
+        logger.warning("[capability] 数据源 %s 不可用，降级 general：%s", dataset_id, e)
+        return False
+    if intent == "timeline":
+        return schema.supports_timeline
+    if intent == "recommendation":
+        return schema.supports_recommendation
+    return True
+
+
 def _route_by_intent(
     state: AgentState,
 ) -> Literal["comparison", "timeline", "recommendation", "general"]:
-    return state.intent if state.intent in (
-        "comparison",
-        "timeline",
-        "recommendation",
-    ) else "general"
+    intent = state.intent
+    if intent not in ("comparison", "timeline", "recommendation"):
+        return "general"
+    # 能力开关：数据源 schema 不支持该管线能力时降级 general
+    if intent in ("timeline", "recommendation") and not _capability_supported(
+        intent, state.dataset_id
+    ):
+        log_event(
+            logger, "capability_gate",
+            intent=intent, dataset_id=state.dataset_id, action="downgrade→general",
+        )
+        return "general"
+    return intent
 
 
 def _route_after_reflection(state: AgentState) -> Literal["web_fallback", "save_memory"]:

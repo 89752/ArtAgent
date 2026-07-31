@@ -29,6 +29,12 @@ class AgentState(BaseModel):
     # 当前执行到的节点（便于 UI 展示 Agent 决策链）
     current_step: str = ""
 
+    # ── 数据源（Stage 2） ───────────────────────────────────────
+    # 当前生效的结构化数据源（对应 StructuredTableRetriever 注册表 key）。
+    # timeline / recommendation 据此访问数据，路由层据此做能力开关判断；
+    # Stage 5 用户上传表格接入后可切换，Stage 2 恒为 "semart"。
+    dataset_id: str = "semart"
+
     # ── 规划 / 拆解 ────────────────────────────────────────────
     # 对比/推荐场景抽取出的对象，如 ["Claude Monet", "Vincent van Gogh"]
     subjects: list[str] = Field(default_factory=list)
