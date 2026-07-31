@@ -42,9 +42,6 @@ def _get_collection():
 @lru_cache(maxsize=1)
 def _get_embedding_model():
     """加载 BGE embedding 模型（全局单例）。"""
-    # 环境规避：当前环境中 sklearn+datasets 与 pyarrow 存在原生 DLL 冲突，
-    # pyarrow 必须先于 sentence_transformers 完成加载，否则进程直接段错误退出。
-    import pyarrow  # noqa: F401
     from sentence_transformers import SentenceTransformer
 
     return SentenceTransformer(EMBEDDING_MODEL)
