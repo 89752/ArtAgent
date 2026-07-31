@@ -82,22 +82,20 @@ graph TD;
 | 长期记忆 | SQLite（标准库，无额外依赖） |
 | 数据集 | SemArt（21,384 幅欧洲绘画，8–19 世纪，含艺术评论文本） |
 | 联网搜索 | Tavily（可选，未配置时优雅降级） |
-| Web UI | FastAPI + SSE + 原生前端（Gradio 作兜底） |
+| Web UI | FastAPI + SSE + 原生前端 |
 
 ---
 
 ## 🧰 工具（Tools）
 
-Agent 在 `general` 分支可自主调用以下 7 个工具，显式管线则按需内部调用：
+Agent 在 `general` 分支可自主调用以下 5 个工具，显式管线则按需内部调用：
 
 | 工具 | 用途 |
 |---|---|
 | `semantic_search` | 语义向量检索（主题/风格/描述类模糊查询） |
 | `exact_lookup` | 结构化精确查询（按画家/标题/年代/画派） |
-| `query_painter_knowledge` | 画家生平/风格/地位问答（数据集统计 + LLM 知识） |
-| `compare_artwork_styles` | 两幅画作的结构化风格对比 |
-| `analyze_image` | 视觉模型分析画作（构图/色彩/笔触） |
-| `image_lookup` | 从本地图库定位代表作配图（不做视觉分析） |
+| `query_painter_knowledge` | 画家结构化统计（作品数/流派/时期/技法/代表作），由 Agent 组织成回答 |
+| `image_lookup` | 从本地图库定位代表作配图；`analyze=True` 时触发视觉模型看图分析 |
 | `web_search` | 联网兜底搜索（本地查不到时） |
 
 ---
@@ -107,7 +105,6 @@ Agent 在 `general` 分支可自主调用以下 7 个工具，显式管线则按
 ```
 ArtAgent/
 ├── api.py                      # FastAPI 后端（SSE 流式，主入口）
-├── app.py                      # Gradio 旧界面（兜底）
 ├── web/                        # 服务层：LangGraph 推理与渲染，UI 无关
 │   └── service.py
 ├── static/                     # 自研前端：index.html + app.css + app.js + 徽标/饰线 SVG
@@ -126,10 +123,11 @@ ArtAgent/
 │   │       ├── timeline.py     # 场景② 时间线管线
 │   │       ├── recommendation.py # 场景③ 推荐管线（核心亮点）
 │   │       └── general.py      # ReAct 工具循环分支
-│   ├── tools/                  # 7 个工具实现
+│   ├── tools/                  # 5 个工具实现
 │   ├── memory/
 │   │   └── store.py            # SQLite 长期偏好存储（场景⑤）
 │   ├── data/
+│   │   ├── access.py           # 数据访问层（模糊匹配/行转字典/证据格式化）
 │   │   └── loader.py           # SemArt 数据加载/清洗
 │   └── utils/
 │       └── llm.py              # LLM 客户端封装
@@ -182,14 +180,14 @@ python api.py
 浏览器打开 `http://localhost:7860` 即可对话。
 
 > 界面为自研前端（FastAPI + SSE 流式 + 原生 HTML/CSS/JS），逐节点展示思考链、内联配图、会话持久化。
-> 旧版 Gradio 界面仍保留：`python app.py`（同端口，作兜底）。
 
 ---
 
 ## 🧪 测试
 
 ```bash
-python tests/test_tools.py       # 4 个工具单测
+python tests/test_access.py      # 数据访问层单测（无 LLM/无网络，秒级）
+python tests/test_tools.py       # 工具单测
 python tests/test_pipelines.py   # 四分支端到端冒烟测试（对比/推荐/时间线/general + 记忆）
 python tests/test_multi_turn.py  # 多轮对话记忆
 python tests/test_multi_tool.py  # 多工具链式调用
@@ -210,7 +208,7 @@ python tests/test_multi_tool.py  # 多工具链式调用
 ```
 
 ```bash
-ARTAGENT_LOG_LEVEL=DEBUG ARTAGENT_LOG_FILE=run.log python app.py
+ARTAGENT_LOG_LEVEL=DEBUG ARTAGENT_LOG_FILE=run.log python api.py
 ```
 
 ## 📊 效果评估

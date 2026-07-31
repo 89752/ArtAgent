@@ -4,16 +4,19 @@ Tool 1: Artwork Retrieval Tools
 提供两种检索方式：
   - semantic_search: 语义向量检索（用于模糊查询、主题检索）
   - exact_lookup:    精确字段查询（用于按画家/标题/年代精确查找）
+
+数据过滤/格式化统一走 src/data/access.py 数据访问层。
 """
 
 import os
-import pickle
 from pathlib import Path
 from functools import lru_cache
 from typing import Optional
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
+
+from src.data.access import fuzzy_match, row_to_artwork_dict
 
 load_dotenv()
 
@@ -39,6 +42,9 @@ def _get_collection():
 @lru_cache(maxsize=1)
 def _get_embedding_model():
     """加载 BGE embedding 模型（全局单例）。"""
+    # 环境规避：当前环境中 sklearn+datasets 与 pyarrow 存在原生 DLL 冲突，
+    # pyarrow 必须先于 sentence_transformers 完成加载，否则进程直接段错误退出。
+    import pyarrow  # noqa: F401
     from sentence_transformers import SentenceTransformer
 
     return SentenceTransformer(EMBEDDING_MODEL)
@@ -51,21 +57,8 @@ def _embed(text: str) -> list[float]:
 
 
 def _format_result(meta: dict, distance: Optional[float] = None) -> dict:
-    """格式化单条检索结果，供 Agent 消费。"""
-    result = {
-        "title": meta.get("title", ""),
-        "author": meta.get("author", ""),
-        "date": meta.get("date", ""),
-        "technique": meta.get("technique", ""),
-        "school": meta.get("school", ""),
-        "timeframe": meta.get("timeframe", ""),
-        "image_file": meta.get("file", ""),
-        "description_snippet": (
-            meta.get("description", "")[:200] + "..."
-            if len(meta.get("description", "")) > 200
-            else meta.get("description", "")
-        ),
-    }
+    """格式化单条 Chroma 检索结果，供 Agent 消费。"""
+    result = row_to_artwork_dict(meta)
     if distance is not None:
         result["relevance_score"] = round(1 - distance, 4)
     return result
@@ -137,40 +130,13 @@ def exact_lookup(
     """
     from src.data.loader import get_dataset
 
-    dataset = get_dataset()
-    df = dataset.all
+    df = get_dataset().all
 
-    # 逐条件过滤
+    # 标题/作者走统一的三级模糊匹配；枚举字段（年代段/流派）保持简单包含
     if author:
-        # 拆词匹配：取最长的词（通常是姓）优先匹配
-        # "Vincent van Gogh" → ["Vincent", "van", "Gogh"] → 按长度排序 → 先试 "Gogh"
-        # 这样能处理 "Van Gogh" / "Vincent van Gogh" / "gogh" 等各种格式
-        tokens = [
-            t for t in author.strip().split() if len(t) > 2
-        ]  # 过滤掉 "van", "de", "di" 等介词
-        tokens_sorted = sorted(tokens, key=len, reverse=True)  # 最长词（姓）优先
-        mask = None
-        for token in tokens_sorted:
-            candidate = (
-                df["AUTHOR"]
-                .str.lower()
-                .str.contains(token.lower(), na=False, regex=False)
-            )
-            if candidate.any():
-                mask = candidate
-                break  # 找到匹配就停止，优先用最长词
-        if mask is None:
-            # 所有词都没匹配到，fallback 用原始输入
-            mask = (
-                df["AUTHOR"]
-                .str.lower()
-                .str.contains(author.lower(), na=False, regex=False)
-            )
-        df = df[mask]
+        df = fuzzy_match(df, "AUTHOR", author)
     if title:
-        df = df[
-            df["TITLE"].str.lower().str.contains(title.lower(), na=False, regex=False)
-        ]
+        df = fuzzy_match(df, "TITLE", title)
     if timeframe:
         df = df[
             df["TIMEFRAME"]
@@ -185,20 +151,4 @@ def exact_lookup(
     if df.empty:
         return [{"message": "No artworks found matching the given criteria."}]
 
-    results = []
-    for _, row in df.head(top_k).iterrows():
-        desc = str(row.get("DESCRIPTION", ""))
-        results.append(
-            {
-                "title": row["TITLE"],  # ← 统一用小写key
-                "author": row["AUTHOR"],
-                "date": str(row.get("DATE", "")),
-                "technique": str(row.get("TECHNIQUE", "")),
-                "school": str(row.get("SCHOOL", "")),
-                "timeframe": str(row.get("TIMEFRAME", "")),
-                "image_file": str(row.get("IMAGE_FILE", "")),
-                "description_snippet": desc[:200] + "..." if len(desc) > 200 else desc,
-            }
-        )
-
-    return results
+    return [row_to_artwork_dict(row) for _, row in df.head(top_k).iterrows()]

@@ -18,6 +18,7 @@ from src.agent.prompts import (
     RECOMMENDATION_SYNTHESIZE_PROMPT,
 )
 from src.agent.nodes.common import parse_json, collect_artworks
+from src.data.access import format_evidence_block
 from src.utils.llm import get_llm, get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
 
@@ -96,9 +97,9 @@ def recommendation_feature_search(state: AgentState) -> dict:
 def recommendation_relevance_filter(state: AgentState) -> dict:
     """LLM 判定候选画家是否真的匹配偏好特征。"""
     candidates = state.retrieved_docs.get("candidates", [])
-    cand_text = "\n".join(
-        f"- {c.get('author','')} | {c.get('title','')}: {c.get('description_snippet','')}"
-        for c in candidates
+    # 证据格式化统一走数据访问层
+    cand_text = format_evidence_block(
+        candidates, "- {author} | {title}: {description_snippet}"
     ) or "(无候选)"
 
     prompt = RECOMMENDATION_FILTER_PROMPT.format(

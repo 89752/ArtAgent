@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage
 from src.agent.state import AgentState
 from src.agent.prompts import COMPARISON_DECOMPOSE_PROMPT, COMPARISON_SYNTHESIZE_PROMPT
 from src.agent.nodes.common import parse_json, collect_artworks
+from src.data.access import format_evidence_block
 from src.utils.llm import get_llm, get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
 
@@ -72,16 +73,11 @@ def comparison_retrieve(state: AgentState) -> dict:
 
 def comparison_synthesize(state: AgentState) -> dict:
     """逐维度组织对比，引用检索到的评论。"""
-    # 构造分组证据文本
+    # 构造分组证据文本（证据格式化统一走数据访问层）
     blocks = []
     for subject, docs in state.retrieved_docs.items():
-        lines = [f"【{subject}】"]
-        for d in docs:
-            snippet = d.get("description_snippet", "")
-            lines.append(
-                f"  - {d.get('title', '')} ({d.get('date', '')}): {snippet}"
-            )
-        blocks.append("\n".join(lines))
+        block = format_evidence_block(docs, "  - {title} ({date}): {description_snippet}")
+        blocks.append(f"【{subject}】\n{block}" if block else f"【{subject}】")
     grouped_evidence = "\n\n".join(blocks) if blocks else "(无检索结果)"
 
     prompt = COMPARISON_SYNTHESIZE_PROMPT.format(

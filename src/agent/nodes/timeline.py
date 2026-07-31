@@ -5,12 +5,17 @@ extract_subject → gather_periods → synthesize
   - extract_subject: 抽取要梳理的画家/流派（英文）
   - gather_periods:  按 timeframe 分组，收集每个时期的评论证据 + 代表作配图
   - synthesize:      按时间顺序组织连贯叙述，点名各时期代表作
+
+数据访问统一走 src/data/access.py：gather 用 fuzzy_match 定位画家作品、
+row_to_artwork_dict 产出证据字典（含 description_snippet），synthesize 用
+format_evidence_block 拼证据文本——同一批画作记录只查一次、只拼一次。
 """
 
 from langchain_core.messages import AIMessage
 
 from src.agent.state import AgentState
 from src.agent.prompts import TIMELINE_SUBJECT_PROMPT, TIMELINE_SYNTHESIZE_PROMPT
+from src.data.access import fuzzy_match, format_evidence_block, row_to_artwork_dict
 from src.utils.llm import get_llm, get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
 
@@ -41,10 +46,9 @@ def timeline_gather_periods(state: AgentState) -> dict:
 
     subject = state.subjects[0] if state.subjects else state.user_query
     dataset = get_dataset()
-    works = dataset.get_by_author(subject)
+    works = fuzzy_match(dataset.all, "AUTHOR", subject)
     log_event(logger, "gather_periods", subject=subject, works_found=len(works))
 
-    period_evidence_blocks = []
     images: list[dict] = []
     docs_by_period: dict[str, list[dict]] = {}
 
@@ -68,24 +72,12 @@ def timeline_gather_periods(state: AgentState) -> dict:
 
     for period in periods[:_MAX_PERIODS]:
         subset = works[works["_TF"] == period]
-        # 证据：取该时期若干条评论
-        docs = []
-        lines = [f"时期 {period}："]
-        for _, row in subset.head(_EVIDENCE_PER_PERIOD).iterrows():
-            desc = str(row.get("DESCRIPTION", ""))[:250]
-            title = row.get("TITLE", "")
-            lines.append(f"  - {title}: {desc}")
-            docs.append(
-                {
-                    "title": title,
-                    "author": row.get("AUTHOR", ""),
-                    "date": str(row.get("DATE", "")),
-                    "image_file": str(row.get("IMAGE_FILE", "")),
-                    "description_snippet": desc,
-                }
-            )
-        docs_by_period[period] = docs
-        period_evidence_blocks.append("\n".join(lines))
+        # 证据：取该时期若干条评论（row_to_artwork_dict 直接产出含
+        # description_snippet 的字典，不再自己 iterrows() 拼第二遍）
+        docs_by_period[period] = [
+            row_to_artwork_dict(row)
+            for _, row in subset.head(_EVIDENCE_PER_PERIOD).iterrows()
+        ]
 
         # 配图：该时期取代表作
         imgs = lookup_images(author=subject, timeframe=period, top_k=_IMAGES_PER_PERIOD)
@@ -128,13 +120,8 @@ def timeline_synthesize(state: AgentState) -> dict:
         }
 
     period_evidence = "\n\n".join(
-        "\n".join(
-            [f"时期 {period}："]
-            + [
-                f"  - {d.get('title','')}: {d.get('description_snippet','')}"
-                for d in docs
-            ]
-        )
+        f"时期 {period}：\n"
+        + format_evidence_block(docs, "  - {title}: {description_snippet}")
         for period, docs in state.retrieved_docs.items()
     )
     image_list = "\n".join(

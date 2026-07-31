@@ -81,22 +81,20 @@ graph TD;
 | Long-term memory | SQLite (standard library, no extra dependency) |
 | Dataset | SemArt (21,384 European paintings, 8th–19th c., with art-commentary text) |
 | Web search | Tavily (optional, degrades gracefully when unset) |
-| Web UI | Gradio |
+| Web UI | FastAPI + SSE + custom frontend |
 
 ---
 
 ## 🧰 Tools
 
-The agent can autonomously call these 7 tools in the `general` branch; explicit pipelines call them internally as needed:
+The agent can autonomously call these 5 tools in the `general` branch; explicit pipelines call them internally as needed:
 
 | Tool | Purpose |
 |---|---|
 | `semantic_search` | Semantic vector retrieval (fuzzy topic/style/description queries) |
 | `exact_lookup` | Structured exact lookup (by artist/title/date/school) |
-| `query_painter_knowledge` | Painter biography/style/status Q&A (dataset stats + LLM knowledge) |
-| `compare_artwork_styles` | Structured style comparison of two artworks |
-| `analyze_image` | Vision-model analysis of a painting (composition/color/brushwork) |
-| `image_lookup` | Locate representative works from the local image library (no vision analysis) |
+| `query_painter_knowledge` | Structured painter stats (works count/school/timeframes/techniques/samples); the agent writes the answer itself |
+| `image_lookup` | Locate representative works from the local image library; `analyze=True` triggers vision-model analysis |
 | `web_search` | Web fallback search (when local can't answer) |
 
 ---
@@ -105,7 +103,10 @@ The agent can autonomously call these 7 tools in the `general` branch; explicit 
 
 ```
 ArtAgent/
-├── app.py                      # Gradio web UI (three-column layout)
+├── api.py                      # FastAPI backend (SSE streaming, main entry)
+├── web/                        # service layer: LangGraph inference & rendering, UI-agnostic
+│   └── service.py
+├── static/                     # custom frontend: index.html + app.css + app.js + ornaments
 ├── requirements.txt
 ├── .env                        # API key & path config
 ├── scripts/
@@ -121,10 +122,11 @@ ArtAgent/
 │   │       ├── timeline.py     # S② timeline pipeline
 │   │       ├── recommendation.py # S③ recommendation pipeline (key highlight)
 │   │       └── general.py      # ReAct tool-loop branch
-│   ├── tools/                  # 7 tool implementations
+│   ├── tools/                  # 5 tool implementations
 │   ├── memory/
 │   │   └── store.py            # SQLite long-term preference store (S⑤)
 │   ├── data/
+│   │   ├── access.py           # data-access layer (fuzzy match / row-to-dict / evidence formatting)
 │   │   └── loader.py           # SemArt loading/cleaning
 │   └── utils/
 │       └── llm.py              # LLM client wrapper
@@ -171,7 +173,7 @@ First run takes ~5–10 min (downloads the embedding model + vectorizes ~21k row
 ### 4. Launch the web UI
 
 ```bash
-python app.py
+python api.py
 ```
 
 Open `http://localhost:7860` in your browser to chat.
@@ -181,7 +183,8 @@ Open `http://localhost:7860` in your browser to chat.
 ## 🧪 Tests
 
 ```bash
-python tests/test_tools.py       # 4 tool unit tests
+python tests/test_access.py      # data-access layer unit tests (no LLM/network, instant)
+python tests/test_tools.py       # tool unit tests
 python tests/test_pipelines.py   # four-branch end-to-end smoke (comparison/recommendation/timeline/general + memory)
 python tests/test_multi_turn.py  # multi-turn conversation memory
 python tests/test_multi_tool.py  # multi-tool chained calls
@@ -202,7 +205,7 @@ A multi-step agent fires several LLM calls per turn; without logs you can't answ
 ```
 
 ```bash
-ARTAGENT_LOG_LEVEL=DEBUG ARTAGENT_LOG_FILE=run.log python app.py
+ARTAGENT_LOG_LEVEL=DEBUG ARTAGENT_LOG_FILE=run.log python api.py
 ```
 
 ## 📊 Evaluation

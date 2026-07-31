@@ -29,39 +29,32 @@ def test_exact_lookup():
 
 
 def test_knowledge():
-    print("\n=== Test 3: Painter Knowledge ===")
+    print("\n=== Test 3: Painter Knowledge（结构化统计，去 LLM 化） ===")
     from src.tools.knowledge import query_painter_knowledge
 
-    result = query_painter_knowledge.invoke(
-        {
-            "painter_name": "Vincent van Gogh",
-            "question": "What are the main characteristics of his painting style?",
-        }
-    )
-    print(f"  Painter: {result['painter']}")
-    print(f"  Answer (first 200 chars): {result['answer'][:200]}...")
+    result = query_painter_knowledge.invoke({"painter_name": "Vincent van Gogh"})
+    print(f"  Painter: {result['painter']} | found={result['found']}")
+    print(f"  Works: {result['works_count']} | Schools: {result['main_schools']}")
+    print(f"  Timeframes: {result['active_timeframes']}")
+    print(f"  Sample: {result['sample_works'][:2]}")
+    assert result["found"] and result["works_count"] > 0
     print("✅ query_painter_knowledge OK")
 
 
-def test_style_comparison():
-    print("\n=== Test 4: Style Comparison ===")
-    from src.tools.style_comparison import compare_artwork_styles
+def test_image_lookup():
+    print("\n=== Test 4: Image Lookup（查找模式，不调视觉模型） ===")
+    from src.tools.image_lookup import image_lookup
 
-    result = compare_artwork_styles.invoke(
-        {
-            "artwork1_title": "The Starry Night",
-            "artwork2_title": "Sunflowers",
-            "comparison_aspects": "style",
-        }
-    )
-    print(f"  Comparing: {result['artwork1']} vs {result['artwork2']}")
-    print(f"  Comparison (first 200 chars): {result['comparison'][:200]}...")
-    print("✅ compare_artwork_styles OK")
+    results = image_lookup.invoke({"author": "Turner", "top_k": 2})
+    for r in results:
+        print(f"  - {r['title']} by {r['author']} → {r['image_path']}")
+    assert results and all("image_path" in r for r in results)
+    print("✅ image_lookup OK")
 
 
 if __name__ == "__main__":
     test_semantic_search()
     test_exact_lookup()
     test_knowledge()
-    test_style_comparison()
+    test_image_lookup()
     print("\n🎉 All tools passed!")

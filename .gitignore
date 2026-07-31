@@ -2,8 +2,10 @@
 .env
 
 # ── 数据集与向量索引（体积大，不入库；README 说明如何获取/重建） ──
+# 注意：/data/ 只匹配仓库根目录的数据目录；若写成 data/ 会把 src/data/ 里的
+# 源代码也一并忽略（已踩坑：src/data/pdf_loader.py 曾因此游离在版本管理之外）。
 SemArt/
-data/
+/data/
 *.db
 
 # ── AI 工具本地配置/产物（不入库） ──

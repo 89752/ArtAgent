@@ -1,81 +1,58 @@
 """
 Tool 3: Painter Knowledge Query Tool
 
-结合 SemArt 数据集统计信息 + DeepSeek LLM 知识，
-回答关于画家的专业问题。
+返回画家在 SemArt 数据集中的结构化统计信息。
+
+设计原则（Stage 1 起）：工具只返回结构化数据，不在内部再调一次 LLM
+把结果包装成一段话——组织自然语言回答的活儿留给外层 general_agent，
+由它把统计数据与自己的艺术史知识结合后统一生成。
 """
 
 from langchain_core.tools import tool
 from dotenv import load_dotenv
 
+from src.data.access import fuzzy_match
+
 load_dotenv()
 
 
 @tool
-def query_painter_knowledge(
-    painter_name: str,
-    question: str,
-) -> dict:
+def query_painter_knowledge(painter_name: str) -> dict:
     """
-    查询画家的详细知识，结合数据集统计与 LLM 知识。
+    查询画家在 SemArt 数据集中的结构化统计信息。
 
     适用场景：
-      - 询问画家的生平、风格、历史地位
-      - 询问画家的代表作品
-      - 询问画家所属流派、时代背景
+      - 需要某画家的作品数量、所属流派、活跃时期、常用技法、代表作清单
+      - 回答画家生平/风格/地位类问题时，先用本工具取数据依据，
+        再结合你自己的艺术史知识组织回答
 
     Args:
-        painter_name: 画家姓名
-        question:     关于该画家的具体问题
+        painter_name: 画家姓名（支持部分匹配，如 "Gogh"、"Monet"）
 
     Returns:
-        包含数据集统计信息和 LLM 分析的综合回答
+        结构化统计：found / matched_author / works_count / main_schools /
+        active_timeframes / common_techniques / sample_works
     """
     from src.data.loader import get_dataset
-    from src.utils.llm import get_llm
 
-    dataset = get_dataset()
+    df = get_dataset().all
+    works = fuzzy_match(df, "AUTHOR", painter_name)
 
-    # 1. 从数据集中获取统计信息
-    painter_works = dataset.get_by_author(painter_name)
-    dataset_context = ""
-
-    if not painter_works.empty:
-        works_count = len(painter_works)
-        techniques = painter_works["TECHNIQUE"].value_counts().head(3).to_dict()
-        timeframes = painter_works["TIMEFRAME"].value_counts().head(3).index.tolist()
-        schools = painter_works["SCHOOL"].value_counts().head(1).index.tolist()
-        sample_titles = painter_works["TITLE"].head(5).tolist()
-
-        dataset_context = f"""
-Dataset statistics for {painter_name}:
-- Works in database: {works_count}
-- Main school/origin: {', '.join(schools) if schools else 'Unknown'}
-- Active timeframes: {', '.join(timeframes)}
-- Common techniques: {', '.join([f"{k} ({v})" for k, v in techniques.items()])}
-- Sample works: {', '.join(sample_titles)}
-"""
-    else:
-        dataset_context = f"No works found for '{painter_name}' in the SemArt database."
-
-    # 2. 调用 LLM 综合回答
-    llm = get_llm(temperature=0.3)
-    prompt = f"""You are an expert art historian. Answer the following question about the painter.
-
-Painter: {painter_name}
-Question: {question}
-
-{dataset_context}
-
-Please provide a comprehensive, accurate answer drawing on both the dataset information above 
-and your art history knowledge. Be specific and informative.
-"""
-
-    response = llm.invoke(prompt)
+    if works.empty:
+        return {
+            "painter": painter_name,
+            "found": False,
+            "works_count": 0,
+            "note": "SemArt 数据集中未收录该画家的作品，请基于自身知识回答或考虑 web_search。",
+        }
 
     return {
         "painter": painter_name,
-        "question": question,
-        "dataset_stats": dataset_context.strip(),
-        "answer": response.content,
+        "found": True,
+        "matched_author": works["AUTHOR"].value_counts().index[0],
+        "works_count": len(works),
+        "main_schools": works["SCHOOL"].value_counts().head(3).index.tolist(),
+        "active_timeframes": works["TIMEFRAME"].value_counts().head(3).index.tolist(),
+        "common_techniques": works["TECHNIQUE"].value_counts().head(3).to_dict(),
+        "sample_works": works["TITLE"].head(5).tolist(),
     }

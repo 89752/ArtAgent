@@ -19,6 +19,7 @@ from src.agent.prompts import (
 )
 from src.utils.llm import get_llm, get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
+from src.data.access import format_evidence_block
 from src.memory.store import load_preferences, upsert_preference
 
 logger = get_logger("nodes")
@@ -153,9 +154,8 @@ def web_fallback(state: AgentState) -> dict:
 
     results = _search_impl(state.user_query)
     log_event(logger, "web_fallback", query=state.user_query, results=results)
-    web_text = "\n".join(
-        f"- {r['title']}: {r['snippet']} ({r.get('url', '')})" for r in results
-    )
+    # 证据格式化统一走数据访问层
+    web_text = format_evidence_block(results, "- {title}: {snippet} ({url})")
     prompt = WEB_FALLBACK_SYNTHESIZE_PROMPT.format(
         user_query=state.user_query,
         prev_answer=state.final_answer or "(无)",

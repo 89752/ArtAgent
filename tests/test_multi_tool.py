@@ -62,7 +62,7 @@ if __name__ == "__main__":
         question="找几幅印象派的风景画，并介绍其中一位画家的艺术特点",
     )
 
-    # 场景2：找画 + 对比（需要 exact_lookup + compare_artwork_styles）
+    # 场景2：找画 + 对比（exact_lookup 取元数据，Agent 自行组织对比）
     test_case(
         graph,
         thread_id="multi-tool-002",
