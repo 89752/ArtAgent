@@ -26,14 +26,14 @@ $PY tests/test_access.py       # 纯单测，无 LLM，秒级
 $PY tests/test_tools.py        # 工具冒烟（真实 API）
 $PY tests/test_multi_tool.py   # 多工具链
 $PY tests/test_pipelines.py    # 四分支端到端
-$PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%；64.0% 为 n=25 口径，默认 n=20 为 70.0%，两者非回归关系）
+$PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%；64.0% 为 n=25 粗排口径，默认 n=20 为 70.0%；Stage 4 起默认开精排，n=25 为 76.0%——两个口径别混，A/B 用 RERANK_ENABLED=0 跑对照）
 ```
 
 ---
 
-## 1. 当前状态：Stage 1 / 2 / 3 已完成 ✅
+## 1. 当前状态：Stage 1 / 2 / 3 / 4 已完成 ✅
 
-> Stage 1：commits `a08bda1`、`1aaf48c`；Stage 2：见 §1.4；Stage 3：见 §1.5。
+> Stage 1：commits `a08bda1`、`1aaf48c`；Stage 2：见 §1.4；Stage 3：见 §1.5；Stage 4：见 §1.6。
 
 ### 1.1 已落地的改动（Stage 1）
 
@@ -111,6 +111,29 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 - eval（补跑完成，glm-4.7）：意图分类 **96.0%**（48/50，基线 96.0%，达标）；Recall@5 n=20 口径 70.0%（锁 semart 源；n=25 口径 64.0% 已于上午验证持平）。
 - 事故与修复：全量回归曾两次在 `rec_filter` 节点卡死——DashScope 偶发连接挂起不返回（额度耗尽前兆），而 LLM 客户端未设超时导致无限等待。已在 `src/utils/llm.py` 与 `image_lookup.py` 加 `request_timeout=180` + `max_retries=2`（修复后同一调用 161s 正常完成）。**教训：任何外部 API 客户端必须显式设超时。**
 - **模型切换（2026-08-01 下午）**：原对话模型 glm-5 免费额度耗尽（403 FreeTierOnly），切换为 **glm-4.7**（百炼 GLM 系列各有独立 100 万 token 免费额度；glm-4.6 亦可作后备，glm-4.5 仅支持 stream 模式不可用于 invoke）。`DEEPSEEK_MODEL` 环境变量名已是误称——它只是 DashScope 模型 ID 的槽位，改值即换模型，后续 Stage 留意评测口径以 glm-4.7 为准。实测 glm-4.7 工具调用正常、意图分类比 glm-5 快约 40%。
+
+### 1.6 Stage 4 实施记录（检索质量层）✅
+
+**已落地的改动：**
+
+- **上下文头（context header）**：`pipeline.py::_context_header`——PDF 文字 chunk 向量化时拼 `《文档》 | 章节` 头（只影响向量与展示，不改存储：documents 仍是原始 content，header 落 `metadata.context_header`）；SemArt/结构化表不加。展示侧 `tools/retrieval.py` 把章节并进标题（`《画册》第3页 · 章节名`，旧文档无此字段自动跳过）。方案的"实体"位无确定性来源（NER/LLM 抽取留 Phase 2），Phase 1 为文档名 + MinerU 标题层级两档。新索引的文档即生效；旧文档需 Stage 6 重解析才补头。
+- **Rerank（qwen3-rerank 精排）**：`src/retrieval/reranker.py`（DashScope 兼容端点，显式 30s 超时 + 2 次重试，任何失败返回 None 由调用方降级）；`hybrid.py::_rerank_fused`——RRF 粗排后取池 `RERANK_POOL=40` 送精排，文本候选按槽位重排、`user_pdf_image` 整页图保持原槽位（文本精排器读不懂图，占位标签只会被打低分错误压底）；`rerank_score` 写 metadata（原生 score 不动，跨源不可比纪律不变）；开关 env `RERANK_ENABLED`（默认开）/ `search(rerank=False)`（eval A/B 用）。
+- **相关性校正通用化**：`src/retrieval/relevance.py::llm_relevance_filter`——rec_filter 思路的通用轻量版：编号候选 → 确定性 LLM 选相关编号 → **只删不重排**；任何失败返回原列表；LLM 过度过滤时按原序兜底补足 `min_keep`（永不返回空证据）。挂在编排层两处：`comparison_retrieve`（每对象检索后过滤再进合成）与 `general_tools` 节点（ToolNode 包成普通节点，对 semantic_search 的 ToolMessage 过滤后重序列化，query 取自 tool_call args；节点名不变，service.py 标签无需同步）。recommendation 保留专用 rec_filter（特征匹配+排除+理由生成，不止相关性）；timeline 无向量检索不适用。开关 env `RELEVANCE_FILTER_ENABLED`（默认开）。
+
+**实施中的关键决策（后续 Stage 需知晓）：**
+
+1. **精排候选池取 40 而非方案的 15–20**：实测（n=25 口径）pool=20 池召回 68.0%、pool=40 76.0%，精排两次都 100% 兑现池内召回——瓶颈在池召回不在排序。代价是每次检索各源多取候选 + 精排文档数翻倍（仍在单次 500 文档限额内）。
+2. **精排 API 部分响应必须整体回退**：按槽位重排时若响应条数少于候选数，被移动的文档会在原槽位复制一份（同一文档占两位）——已加守卫 `len(ranked) != len(text_slots)` 时回粗排原序（test_reranker 覆盖）。
+3. **semantic_search 工具保持无 LLM**：相关性过滤放图节点层而非工具内部——工具是 eval Recall@5 与 test_tools 的直接消费者，必须确定性可测；LLM 判断留编排层且每次过滤日志可观测（`relevance_filter` 事件含 in/kept/dropped）。与"工具内不偷藏 LLM 调用"纪律一致。
+4. **过滤器只删不重排、永不返回空**：顺序已由 RRF+精排决定，LLM 只剔除噪声（提示词写明"拿不准的保留"）；`min_keep=2` 兜底防合成端拿到空证据答非所问。超过 `max_candidates=12` 的尾部候选不参与过滤、原样透传。
+5. **延迟/成本上升是设计内开销**：每次 semantic_search 现在 = BGE 编码 + 40 候选 + 1 次 qwen3-rerank +（编排层）1 次 glm 过滤调用；一轮全量回归时长约为 Stage 3 的 1.5–2 倍。怀疑卡死时先看日志——只要 `rerank`/`relevance_filter` 事件在滚动就是正常的（180s 超时兜底）。
+6. **UI 顺带收益**：过滤后 ToolMessage 重序列化仍为 list[dict]，`_parse_artworks_from_messages` 无感知——无关画作不再进配图卡片。
+
+**验收数据（2026-08-01，glm-4.7）：**
+
+- 纯单测累计 **132 个全绿**：+`test_reranker` 15（mock API：解析/截断/重试/开关/槽位保持/部分响应回退）、+`test_relevance` 15（fake LLM：过滤/兜底/降级 + general_tools 消息重写）。
+- **eval（锁 semart 源，n=25 基线口径）**：意图分类 **98.0%**（49/50）；**Recall@5 = 76.0%（19/25），较 64.0% 基线 +12pp**——逐条 A/B（`RERANK_ENABLED=0` vs 默认开）：3 条被精排救回、0 条由命中变未命中，纯增益。
+- 回归：`verify_recall_parity`（`RERANK_ENABLED=0`）25 条逐位 0 不一致、n=25 复现 64.0% 基线；`test_tools` / `test_multi_tool` / `test_pipelines` 全绿（13 分钟）。
 
 ---
 
@@ -208,7 +231,7 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 
 ---
 
-## 5. Stage 4：检索质量层
+## 5. Stage 4：检索质量层 ✅（已完成，实施记录见 §1.6）
 
 1. **上下文头（context header）**：向量化前给 PDF 文字 chunk 拼接 `[文档 | 章节 | 实体]` 头（只影响向量与展示，不改存储）；SemArt/结构化表不加。
 2. **Rerank**：RRF 粗排 → top 15–20 → **qwen3-rerank** 精排 → top 5–8。已核实：DashScope OpenAI 兼容端点 `POST https://dashscope.aliyuncs.com/compatible-api/v1/reranks`，单次 ≤500 文档、单文档 ≤4000 token，支持 `instruct` 参数；gte-rerank-v2 已下线勿用。彩蛋：`qwen3-vl-rerank` 可给多模态整页图做精排，可选。
@@ -322,3 +345,5 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 16. **视觉/对话是两套模型**：glm-4.7（纯文本大脑，工具决策）与 qwen3.5-omni-plus（唯一"眼睛"）分工——需要看图的场景只能走视觉工具（`image_lookup analyze` / `read_page_image`），别指望对话模型读图；视觉客户端统一用 `utils/llm.py::get_vision_llm`。
 17. **`read_page_image` 只放行 `data/uploads/` 下的图片路径**（防路径穿越）：SemArt 图片的分析走 `image_lookup analyze=True`，不要混用。
 18. **MinerU quota 按整份文档页数计**：`mineru_parser.parse_pages` 是整份上传、按页过滤——`page_ranges` 参数的 page_idx 语义（原页码 vs 重排序）未实测前勿用（Phase 2 省 quota 优化点）；每日 2000 页高优额度，批量灌库前先算页数。Token 在 `.env` 的 `MINERU_TOKEN`，空着自动降级 pdfplumber。
+19. **Recall@5 有两个口径，别混**：`RERANK_ENABLED=0`（粗排）复现 64.0% 基线；Stage 4 起默认开精排是 76.0%（均 n=25 锁 semart 源）。跑 `verify_recall_parity` 必须关精排——开着跑出的"不一致"是精排改序的设计行为，不是 bug；它证明粗排路径无回归的唯一姿势是 `RERANK_ENABLED=0`。
+20. **相关性过滤只在编排层，工具里没有**：`semantic_search` 工具与 eval 检索路径不含 LLM 过滤（保确定性）；过滤在 `comparison_retrieve` 与 `general_tools` 节点。改工具返回形状时保住 `title`/`description_snippet` 两键——过滤器靠它们拼候选清单，键没了过滤静默失效（降级回原列表，不报错）。

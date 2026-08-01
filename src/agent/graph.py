@@ -22,7 +22,6 @@ ArtAgent 混合架构 LangGraph。
 from typing import Literal
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.agent.state import AgentState
@@ -114,7 +113,10 @@ def build_graph():
 
     # general 分支（ReAct）
     add("general_agent", N.general_agent)
-    builder.add_node("general_tools", ToolNode(N.GENERAL_TOOLS))  # ToolNode 非普通函数，不包 traced
+    # Stage 4：ToolNode 包成普通节点——执行后对 semantic_search 结果做相关性
+    # 过滤（节点名不变，service.py 的"执行工具"标签无需同步）；包成普通函数
+    # 后也自然获得 traced 节点耗时观测
+    add("general_tools", N.general_tools)
 
     # ── 连线 ──
     builder.add_edge(START, "load_memory")

@@ -4,8 +4,9 @@ PDF 入库流水线编排（Stage 3）。
 流程：页级路由 → 文字路线解析分块入 BGE 库 / 多模态路线整页图入 DashScope 库
      → 写解析结果元数据（路由分布/chunk 数/耗时/状态）。
 
-解析器选择：MinerU 为主力（未接入前），pdfplumber 兜底；公式密集页
-（force_mineru）在 MinerU 不可用时退到多模态整页图，不用 pdfplumber 硬解。
+解析器选择：MinerU 精准解析 API 为主力（MINERU_TOKEN 配置时启用），
+pdfplumber 兜底；公式密集页（force_mineru）在 MinerU 不可用/调用失败时
+退到多模态整页图，不用 pdfplumber 硬解。
 
 状态存储：Phase 1 用 JSON 文件（data/index/doc_status.json）支撑上传进度
 轮询；Stage 6 换 SQLite documents_store 时整体替换本模块的状态部分。
@@ -22,9 +23,11 @@ from typing import Callable, Optional
 from dotenv import load_dotenv
 
 from src.ingestion.chunker import chunk_blocks
+from src.ingestion.mineru_parser import mineru_available
+from src.ingestion.mineru_parser import parse_pages as mineru_parse_pages
 from src.ingestion.multimodal_indexer import index_page_images
-from src.ingestion.page_classifier import classify_document
-from src.ingestion.pdfplumber_fallback import parse_pages
+from src.ingestion.page_classifier import DocRoutePlan, classify_document
+from src.ingestion.pdfplumber_fallback import parse_pages as pdfplumber_parse_pages
 from src.retrieval.hybrid import _get_bge_model, get_or_create_chroma_collection
 from src.retrieval.userdoc_text_retriever import COLLECTION_NAME as TEXT_COLLECTION
 from src.utils.logging_config import get_logger, log_event
@@ -80,12 +83,30 @@ def list_doc_status() -> list[dict]:
 
 
 def _mineru_available() -> bool:
-    try:
-        import mineru  # noqa: F401
+    """MinerU 精准解析 API：MINERU_TOKEN 配置即可用（调用失败走降级链）。"""
+    return mineru_available()
 
-        return True
-    except ImportError:
-        return False
+
+def _parse_text_route(
+    pdf_path: str, text_pages: list[int], plan: DocRoutePlan, work_dir: Path
+) -> tuple[list, set[int]]:
+    """
+    文字路线解析，返回 (blocks, 需转多模态整页图的页码集合)。
+
+    MinerU 优先（MINERU_TOKEN 配置时）；不可用或调用失败时降级 pdfplumber，
+    公式密集页（force_mineru）不接受 pdfplumber 硬解，转多模态整页图。
+    """
+    if not text_pages:
+        return [], set()
+    forced = {p.page_no for p in plan.pages if p.force_mineru} & set(text_pages)
+    if _mineru_available():
+        try:
+            return mineru_parse_pages(pdf_path, text_pages, work_dir=work_dir), set()
+        except Exception as e:  # noqa: BLE001 — 云解析失败不拖垮整个入库
+            logger.warning("[ingest] MinerU 解析失败，降级 pdfplumber：%s", e)
+    rest = [p for p in text_pages if p not in forced]
+    blocks = pdfplumber_parse_pages(pdf_path, rest) if rest else []
+    return blocks, forced
 
 
 # ------------------------------------------------------------------ #
@@ -93,20 +114,42 @@ def _mineru_available() -> bool:
 # ------------------------------------------------------------------ #
 
 
+def _context_header(doc_name: str, section: str) -> str:
+    """上下文头（Stage 4）：[文档 | 章节]——向量化与展示用，不写入原始 chunk。
+
+    方案里的"实体"位无确定性来源（NER/LLM 抽取留给 Phase 2），
+    Phase 1 用文档名 + MinerU 标题层级（section）两档。
+    """
+    parts = [f"《{doc_name}》"] if doc_name else []
+    if section:
+        parts.append(section)
+    return " | ".join(parts)
+
+
 def index_text_chunks(chunks, doc_name: str = "") -> int:
-    """BGE 批量编码 chunk 并写入 user_pdf_text collection。"""
+    """BGE 批量编码 chunk 并写入 user_pdf_text collection。
+
+    Stage 4 上下文头：向量化时拼接 [文档 | 章节] 头（只影响向量与展示，
+    不改存储——documents 仍是原始 content，header 落 metadata 供展示复用；
+    旧文档无 context_header 字段，展示端兼容缺省，Stage 6 重解析时覆盖）。
+    """
     if not chunks:
         return 0
     collection = get_or_create_chroma_collection(TEXT_COLLECTION)
     model = _get_bge_model()
-    vectors = model.encode(
-        [c.content for c in chunks], normalize_embeddings=True
-    ).tolist()
+    headers = [_context_header(doc_name, c.section) for c in chunks]
+    embed_inputs = [
+        f"{h}\n{c.content}" if h else c.content for h, c in zip(headers, chunks)
+    ]
+    vectors = model.encode(embed_inputs, normalize_embeddings=True).tolist()
     collection.upsert(
         ids=[c.chroma_id() for c in chunks],
         embeddings=vectors,
         documents=[c.content for c in chunks],
-        metadatas=[c.metadata(doc_name=doc_name) for c in chunks],
+        metadatas=[
+            {**c.metadata(doc_name=doc_name), "context_header": h}
+            for c, h in zip(chunks, headers)
+        ],
     )
     logger.info("[text_index] doc_id=%s 文字 chunk 入库 %d 条", chunks[0].doc_id, len(chunks))
     return len(chunks)
@@ -149,16 +192,11 @@ def ingest_pdf(
         text_pages = [p.page_no for p in plan.pages if p.route in ("text", "dual")]
         mm_pages = [p.page_no for p in plan.pages if p.route in ("multimodal", "dual")]
 
-        # 公式密集页：MinerU 不可用时退到多模态（不硬用 pdfplumber 解公式）
-        if not _mineru_available():
-            forced = {p.page_no for p in plan.pages if p.force_mineru}
-            if forced:
-                text_pages = [p for p in text_pages if p not in forced]
-                mm_pages = sorted(set(mm_pages) | forced)
-                logger.info("[ingest] 公式密集页退多模态：%s", sorted(forced))
-
-        # 2. 文字路线：解析 → 分块 → BGE 入库
-        blocks = parse_pages(pdf_path, text_pages) if text_pages else []
+        # 2. 文字路线：MinerU 优先、pdfplumber 兜底（公式密集页退多模态）
+        blocks, extra_mm = _parse_text_route(pdf_path, text_pages, plan, work_dir)
+        if extra_mm:
+            mm_pages = sorted(set(mm_pages) | extra_mm)
+            logger.info("[ingest] 公式密集页退多模态：%s", sorted(extra_mm))
         chunks = chunk_blocks(blocks, doc_id, kb_id=kb_id)
         n_chunks = index_text_chunks(chunks, doc_name=doc_name)
 

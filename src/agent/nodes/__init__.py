@@ -29,6 +29,7 @@ from src.agent.nodes.recommendation import (
 from src.agent.nodes.general import (
     general_agent,
     general_should_continue,
+    general_tools,
     GENERAL_TOOLS,
 )
 
@@ -53,5 +54,6 @@ __all__ = [
     "recommendation_synthesize",
     "general_agent",
     "general_should_continue",
+    "general_tools",
     "GENERAL_TOOLS",
 ]

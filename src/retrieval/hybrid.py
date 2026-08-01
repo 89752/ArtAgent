@@ -7,13 +7,16 @@ collection 级隔离、不做物理合并。当前实际存在两个异构向量
   BGE 文本向量空间      SemArt + （Stage 3）PDF 文字 chunk + （Stage 5）表格描述列
   DashScope 多模态空间  （Stage 3）PDF 整页图——维度/语义分布不同，不可混库
 
-search 流程：
+search 流程:
   1. 扇出：各数据源独立检索（BGE 空间数据源各自用共享 BGE 编码 query；
      Stage 3 起多模态数据源走 DashScope 编码另查一路）
   2. RRF（Reciprocal Rank Fusion）按源内排名融合多路结果——
      跨数据源的 score 绝对值不可比，排名可比
   3. 按 page_id/doc_id 去重（应对 Stage 3 双路线页面被多路命中）；
      无 page_id/doc_id 的结果（如 SemArt 行）不参与去重
+  4. （Stage 4）qwen3-rerank 精排：粗排 top 15–20 重排后取 top_k；
+     整页图等非文本候选不参与精排、保持原槽位；精排失败降级粗排原序；
+     RERANK_ENABLED=0 或 search(rerank=False) 可关闭（eval A/B 用）
 """
 
 from __future__ import annotations
@@ -37,6 +40,15 @@ EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 # RRF 平滑常数（常用经验值 60）
 _RRF_K = 60
+
+# Stage 4 精排：RRF 粗排后送 qwen3-rerank 重排的候选池大小。
+# 实测（2026-08-01，n=25 基线口径）：pool=20 时池召回 68.0%、pool=40 时
+# 76.0%，精排两次都 100% 兑现池内召回——瓶颈在池召回不在排序，取 40。
+RERANK_POOL = 40
+
+# 不参与文本精排的源：整页图 content 只是占位标签，精排打分无意义且会
+# 把多模态高相似页错误压底——它们保持粗排原槽位
+_NON_RERANK_SOURCES = {"user_pdf_image"}
 
 
 # ------------------------------------------------------------------ #
@@ -122,6 +134,49 @@ def _dedup(hits: list[RetrievalResult]) -> list[RetrievalResult]:
 
 
 # ------------------------------------------------------------------ #
+# Stage 4：qwen3-rerank 精排                                            #
+# ------------------------------------------------------------------ #
+
+
+def _rerank_enabled(override: Optional[bool]) -> bool:
+    """精排开关：search 参数显式覆盖 > env RERANK_ENABLED（默认开）。"""
+    if override is not None:
+        return override
+    return os.getenv("RERANK_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _rerank_fused(query: str, fused: list[RetrievalResult], top_k: int) -> list[RetrievalResult]:
+    """
+    粗排结果送 qwen3-rerank 精排。
+
+    文本候选（semart/user_pdf_text 等）重排，rerank_score 写入 metadata
+    （原生 score 不动，跨源不可比的纪律不变）；非文本候选（整页图）保持
+    原槽位——文本精排器读不懂图，占位标签只会被打低分错误压底。
+    精排失败或候选不足时返回粗排原序。
+    """
+    pool = fused[:RERANK_POOL]
+    if len(pool) <= top_k:
+        return pool  # 无排可重，省一次 API 调用
+    text_slots = [i for i, h in enumerate(pool) if h.source not in _NON_RERANK_SOURCES]
+    if not text_slots:
+        return pool
+    from src.retrieval.reranker import rerank
+
+    ranked = rerank(query, [pool[i].content for i in text_slots], top_n=len(text_slots))
+    if ranked is None or len(ranked) != len(text_slots):
+        # 降级：精排是增强不是依赖。部分响应按槽位重排会把被移动的文档
+        # 在原槽位复制一份（同一文档占两位），宁可整体回退粗排原序
+        return pool
+    reordered = list(pool)
+    for slot, (doc_idx, score) in zip(text_slots, ranked):
+        hit = pool[text_slots[doc_idx]]
+        hit.metadata["rerank_score"] = round(score, 4)
+        reordered[slot] = hit
+    log_event(logger, "hybrid_rerank", pool=len(pool), text=len(text_slots))
+    return reordered
+
+
+# ------------------------------------------------------------------ #
 # HybridRetriever                                                     #
 # ------------------------------------------------------------------ #
 
@@ -146,6 +201,7 @@ class HybridRetriever:
         top_k: int = 5,
         sources: Optional[list[str]] = None,
         dataset_id: Optional[str] = None,
+        rerank: Optional[bool] = None,
     ) -> list[RetrievalResult]:
         """
         统一检索入口。
@@ -153,7 +209,13 @@ class HybridRetriever:
         sources:    只查指定 source 标签的数据源；None 表示全部已注册源。
         dataset_id: 限定当前生效的结构化数据源（Stage 5 用户表格接入后，
                     同一 source 标签下按 dataset_id 选具体表）；None 不限。
+        rerank:     Stage 4 精排开关；None 取 env RERANK_ENABLED（默认开），
+                    显式 False 跳过精排（eval A/B 用）。
         """
+        use_rerank = _rerank_enabled(rerank)
+        # 精排开启时各源多取候选（池化后再重排）；否则保持原样按需取
+        fetch_k = RERANK_POOL if use_rerank else top_k
+
         per_source: list[list[RetrievalResult]] = []
         for name, retriever in self._retrievers.items():
             if sources is not None and name not in sources:
@@ -162,7 +224,7 @@ class HybridRetriever:
             if dataset_id is not None and r_dataset is not None and r_dataset != dataset_id:
                 continue
             try:
-                hits = retriever.search(query, top_k=top_k, filters=None)
+                hits = retriever.search(query, top_k=fetch_k, filters=None)
             except Exception as e:  # 单源失败不拖垮整体检索
                 logger.warning("[hybrid] source=%s 检索失败：%s", name, e)
                 hits = []
@@ -170,6 +232,8 @@ class HybridRetriever:
             log_event(logger, "hybrid_source", source=name, hits=len(hits))
 
         fused = _dedup(_rrf_fuse(per_source))
+        if use_rerank:
+            fused = _rerank_fused(query, fused, top_k)
         return fused[:top_k]
 
 

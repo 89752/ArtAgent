@@ -47,6 +47,7 @@ def comparison_decompose(state: AgentState) -> dict:
 
 def comparison_retrieve(state: AgentState) -> dict:
     """对每个对象分别语义检索，按对象分组存储。"""
+    from src.retrieval.relevance import llm_relevance_filter
     from src.tools.retrieval import semantic_search
 
     docs_by_subject: dict[str, list[dict]] = {}
@@ -56,7 +57,9 @@ def comparison_retrieve(state: AgentState) -> dict:
         except Exception as e:
             logger.warning("[retrieve] semantic_search failed for %s: %s", subject, e)
             results = []
-        docs_by_subject[subject] = results
+        # Stage 4 相关性校正：剔除"形似而答非所问"的噪声候选再进合成 prompt
+        # （确定性管线没有自救机会；过滤失败自动降级原列表）
+        docs_by_subject[subject] = llm_relevance_filter(query, results, min_keep=2)
 
     artworks = collect_artworks(docs_by_subject)
     log_event(

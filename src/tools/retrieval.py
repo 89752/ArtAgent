@@ -35,6 +35,9 @@ def _format_result(result: RetrievalResult) -> dict:
     # 用户文档（PDF）：title 形如"《画册》第3页"，供证据模板与溯源引用
     meta = result.metadata
     title = f"《{meta.get('doc_name') or '用户文档'}》第{meta.get('page', '?')}页"
+    section = str(meta.get("section") or "").strip()
+    if section:  # Stage 4 上下文头展示侧：章节进标题（旧文档无此字段自动跳过）
+        title += f" · {section[:40]}"
     snippet = result.content
     if len(snippet) > EVIDENCE_SNIPPET_LEN:
         snippet = snippet[:EVIDENCE_SNIPPET_LEN] + "..."
