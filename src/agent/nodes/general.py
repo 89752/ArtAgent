@@ -14,6 +14,7 @@ from src.agent.prompts import SYSTEM_PROMPT
 from src.tools.retrieval import semantic_search, exact_lookup
 from src.tools.knowledge import query_painter_knowledge
 from src.tools.image_lookup import image_lookup
+from src.tools.page_reader import read_page_image
 from src.tools.web_search import web_search
 from src.utils.llm import get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
@@ -22,12 +23,14 @@ logger = get_logger("general")
 
 # general 分支可用的全部工具（Stage 1 精简：7 → 5。
 # compare_artwork_styles 删除——外层 Agent 拿到两幅画的元数据后可自行组织对比；
-# analyze_image 并入 image_lookup 的 analyze 参数）
+# analyze_image 并入 image_lookup 的 analyze 参数。
+# Stage 3 补：read_page_image——Qwen-VL 读取用户上传 PDF 整页图）
 GENERAL_TOOLS = [
     semantic_search,
     exact_lookup,
     query_painter_knowledge,
     image_lookup,
+    read_page_image,
     web_search,
 ]
 

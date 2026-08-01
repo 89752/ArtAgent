@@ -97,7 +97,7 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 **实施中的关键决策（对原方案的修订/细化）：**
 
 1. **MinerU 未接入（遗留项）**。MinerU v3 依赖重（~4GB 模型 + 可能拉入与 pyarrow 冲突的 `datasets` 包），本 Stage 先以 pdfplumber 兜底跑通全链路，解析器接口已按可插拔设计。**遗留：真实画册 PDF 验证 MinerU 短板后再决定接入策略**（开放问题 §12 素材仍缺）。
-2. **Qwen-VL 读图作答未接入（遗留项）**。整页图命中目前只以 `[整页图]` 占位+图片路径呈现给 LLM/前端；ToolMessage 多模态化（image_url block）改动 ReAct 循环，放到后续单独做。
+2. **Qwen-VL 读图作答（2026-08-01 已闭环 ✅）**。落地方式为 **`read_page_image` 工具**而非 ToolMessage 多模态化：对话模型 glm-4.7 是纯文本大脑，继续负责工具决策；命中整页图（`source=user_pdf_image`，结果带 `image_path` + `read_hint`）时 Agent 自主调用 `read_page_image`，由 `qwen3.5-omni-plus` 读图返回文字描述。这保留了"工具内不偷藏 LLM 调用"的纪律（该工具的存在意义就是视觉读取，与 `image_lookup analyze=True` 同类），且每次读图调用在日志中可观测（正是"命中图片路线的生成开销"度量点）。路径安全校验：只放行 `data/uploads/` 下的图片文件。已实测：含纯图版页的测试画册 → Agent 依次调 `semantic_search` → `read_page_image` → 准确答出《星夜》画面内容（旋转星空/柏树/村庄/厚涂笔触）。视觉客户端统一收敛到 `utils/llm.py::get_vision_llm`（`image_lookup` 同步复用）。
 3. **去重从"page_id/doc_id 塌缩"改为路线感知**：Stage 2 的朴素 page_id 去重会把同页多个文字 chunk 误杀——同页多 chunk 内容不同必须全保留；只抑制"同页整页图 vs 文字 chunk"的冗余命中。
 4. **eval 与 parity 校验锁定 semart 源**：`semantic_search` 融合用户 PDF 后，`eval/run_eval.py` 的 Recall@5 与 `verify_recall_parity.py` 一律 `sources=["semart"]`，保证 64.0% 基线口径不被开发库里的测试文档污染。
 5. **测试文档级联清理已验证**：`collection.get(where={"doc_id": ...}) → delete(ids=...)` 两个 collection 各清一遍即可（Stage 6 删除按钮复用此流程）。沙箱环境下 `shutil.rmtree` 被 safe-delete 拦截，工作目录残留文件需用户手动清理（`data/uploads/default/`，已被 gitignore）。
@@ -319,3 +319,5 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 13. **带 `source` 键的是用户文档片段**：`collect_artworks`/`_parse_artworks_from_messages` 靠这个键跳过它们防止配图卡片污染；新增工具返回形状时注意画作字典**不要**带 source 键。
 14. **Chroma 用户 collection 用 `get_or_create`**：用户文档未上传前 collection 不存在，检索器对空集合短路返回（尤其 user_pdf_image，避免白调 DashScope 编码 API）。
 15. **pdfminer 警告已压制在 ERROR**（`pdfplumber_fallback.py` 顶部）：中文字体缺 FontBBox 会逐条刷屏，别再全局调回 WARNING。
+16. **视觉/对话是两套模型**：glm-4.7（纯文本大脑，工具决策）与 qwen3.5-omni-plus（唯一"眼睛"）分工——需要看图的场景只能走视觉工具（`image_lookup analyze` / `read_page_image`），别指望对话模型读图；视觉客户端统一用 `utils/llm.py::get_vision_llm`。
+17. **`read_page_image` 只放行 `data/uploads/` 下的图片路径**（防路径穿越）：SemArt 图片的分析走 `image_lookup analyze=True`，不要混用。

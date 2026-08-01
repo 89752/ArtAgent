@@ -112,18 +112,10 @@ _ANALYSIS_FOCUS_PROMPTS = {
 
 
 def _get_vision_llm() -> ChatOpenAI:
-    """返回支持视觉的模型实例。"""
-    return ChatOpenAI(
-        model="qwen3.5-omni-plus",
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url=os.getenv(
-            "DEEPSEEK_BASE_URL",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        ),
-        temperature=0.3,
-        request_timeout=180,  # 同 get_llm：防 DashScope 挂起连接无限等待
-        max_retries=2,
-    )
+    """返回支持视觉的模型实例（统一走 utils.llm 的共享实例）。"""
+    from src.utils.llm import get_vision_llm
+
+    return get_vision_llm()
 
 
 def _find_image_file(artwork_query: str) -> Optional[str]:
