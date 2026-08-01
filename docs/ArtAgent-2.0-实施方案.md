@@ -319,7 +319,7 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 | 多模态 embedding 选型 | ✅ 已定策略：默认 tongyi-embedding-vision-plus（便宜 3 倍），qwen3-vl-embedding 对照，小规模测试后定稿 |
 | 测试 PDF 素材 | ⏳ 待准备：2–3 份美术图文 PDF（**至少 1 份真实画册**，验 MinerU 短板）+ 1 份含公式技术 PDF |
 | 页级路由阈值 | ⏳ 200字符/30%/80% 为起始值，真实 PDF 跑后微调 |
-| 测试表格素材 | ⏳ 待准备：支持 timeline+recommendation 的完整表 ×1、不支持的纯列表 ×1 |
+| 测试表格素材 | ✅ 已定三件套（2026-08-01）：SemArt 分层子集 CSV（正样本，Stage 5 开工时脚本生成：3–5 个跨多时期画家全作品 + 噪声行共 100–300 行，AUTHOR 倒序格式顺带压测 fuzzy_match）+ `tests/fixtures/plain_list_books.csv`（负样本：有实体列、无时间轴、无自由文本描述，已入库）+ 用户的学习计划 xlsx（刁难样本：有"天数/阶段"日期类列但语义无关，专测 schema 人工纠正交互 + 多 sheet 选择，文件在用户桌面，开工时直接读） |
 | schema 确认交互形式 | ⏳ 随 Stage 5 Web 设计定稿 |
 | Rijksmuseum / 高德 key | ⏳ 用户自备免费 key（Met/Wikidata 无需 key） |
 
