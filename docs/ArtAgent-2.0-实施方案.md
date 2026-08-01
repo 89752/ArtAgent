@@ -14,7 +14,7 @@
 |---|---|---|
 | Python 环境 | `C:\Users\86188\anaconda3\envs\artagent\python.exe`（3.10.20） | 旧 `llm` 环境已弃用；PATH 里的 python 均无项目依赖 |
 | 关键依赖 | langchain 1.3.14 / langgraph 1.2.10 / chromadb 1.5.9 / sentence-transformers 5.6.1 / pyarrow 25.0.0 | **勿随意安装 HF `datasets` 包**：旧环境曾因 sklearn+datasets+pyarrow 三方 DLL 冲突导致 `import sentence_transformers` 段错误；新环境未装 datasets 才正常。若必须安装，装完先测该导入 |
-| LLM/视觉/检索 API | DashScope（`.env` 中 `DEEPSEEK_API_KEY` 一把 key 通用） | 视觉模型 `qwen3.5-omni-plus`；联网兜底 Tavily |
+| LLM/视觉/检索 API | DashScope（`.env` 中 `DEEPSEEK_API_KEY` 一把 key 通用） | **对话模型现为 `glm-4.7`**（2026-08-01 切换：glm-5 免费额度耗尽；GLM 系列各有独立 100 万 token 免费额度，glm-4.6 可作后备）；视觉模型 `qwen3.5-omni-plus`；联网兜底 Tavily |
 | 向量模型 | BGE `bge-small-en-v1.5`，本地缓存 | `api.py` 已设 `HF_HUB_OFFLINE=1`；测试脚本不设也可跑（缓存命中） |
 | 数据/索引 | SemArt（21,384 幅）+ `data/index/chroma/`（217MB，collections: `semart` + 遗留 `user_pdfs`） | `user_pdfs` 与 `data/uploads/` 是旧 PDF 实验遗产，**Stage 3/6 处置** |
 
@@ -108,8 +108,9 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 - 纯单测累计 **81 个全绿**：access 17 + structured_retriever 23 + hybrid 14 + page_classifier 15 + chunker 12。
 - 端到端（真实服务）：上传百度百科 RAG PDF（5页：4 文字路线+1 双路线 → 21 chunks + 1 整页图）与 Renaissance 测试 PDF（3页全双路线 → 6 chunks + 3 整页图），混合检索来源标签正确、双路线页面文字命中时整页图被抑制、提问回答正确声明"上传文档讨论的是 RAG 技术"并溯源。
 - 回归：`verify_recall_parity` 锁 semart 源 25 条 query 逐位 0 不一致；`test_pipelines` 5 问全过；`test_tools` 4 工具全过。
-- eval：意图分类跑到 38/38 全对（100%）后 **DashScope 免费额度耗尽（403 FreeTierOnly）中断**；Recall@5 已锁源验证 64.0% 持平（纯本地 BGE 无 API 依赖）。**待额度恢复后补跑 `eval/run_eval.py` 全程**（意图分类代码路径自 Stage 2（98.0%）起未改动）。
+- eval（补跑完成，glm-4.7）：意图分类 **96.0%**（48/50，基线 96.0%，达标）；Recall@5 n=20 口径 70.0%（锁 semart 源；n=25 口径 64.0% 已于上午验证持平）。
 - 事故与修复：全量回归曾两次在 `rec_filter` 节点卡死——DashScope 偶发连接挂起不返回（额度耗尽前兆），而 LLM 客户端未设超时导致无限等待。已在 `src/utils/llm.py` 与 `image_lookup.py` 加 `request_timeout=180` + `max_retries=2`（修复后同一调用 161s 正常完成）。**教训：任何外部 API 客户端必须显式设超时。**
+- **模型切换（2026-08-01 下午）**：原对话模型 glm-5 免费额度耗尽（403 FreeTierOnly），切换为 **glm-4.7**（百炼 GLM 系列各有独立 100 万 token 免费额度；glm-4.6 亦可作后备，glm-4.5 仅支持 stream 模式不可用于 invoke）。`DEEPSEEK_MODEL` 环境变量名已是误称——它只是 DashScope 模型 ID 的槽位，改值即换模型，后续 Stage 留意评测口径以 glm-4.7 为准。实测 glm-4.7 工具调用正常、意图分类比 glm-5 快约 40%。
 
 ---
 
