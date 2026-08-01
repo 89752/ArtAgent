@@ -223,7 +223,7 @@ dom.send.addEventListener("click", () => send(dom.msg.value));
 $("#btn-new").addEventListener("click", newSession);
 $("#btn-clear").addEventListener("click", clearSession);
 
-/* ── 文档上传与入库进度（Stage 3）── */
+/* ── 文档上传与入库进度（Stage 3 PDF / Stage 5 表格）── */
 const docDom = { upload: $("#btn-upload"), file: $("#file-input"), list: $("#doc-list") };
 let docPollTimer = null;
 
@@ -231,7 +231,7 @@ async function loadDocuments() {
   try {
     const list = await (await fetch("/api/documents")).json();
     renderDocuments(list);
-    // 有解析中的文档 → 3s 轮询；全部落定 → 停止
+    // 有解析中的文档 → 3s 轮询；全部落定 → 停止（待确认 schema 不算解析中）
     const pending = list.some((d) => d.status === "processing" || d.status === "pending");
     if (pending && !docPollTimer) {
       docPollTimer = setInterval(loadDocuments, 3000);
@@ -250,10 +250,27 @@ function renderDocuments(list) {
   for (const d of list) {
     const item = el("div", "doc-item");
     const name = el("div", "doc-name");
-    name.textContent = d.doc_name || "未命名";
+    name.textContent = (d.kind === "table" ? "📊 " : "") + (d.doc_name || "未命名");
     name.title = d.doc_name || "";
     const badge = el("span", `doc-badge ${d.status || ""}`);
-    if (d.status === "done") {
+    if (d.kind === "table") {
+      if (d.status === "pending_confirm") {
+        badge.textContent = "待确认 schema";
+        badge.classList.add("actionable");
+        badge.title = "点击确认/纠正列角色后启用";
+        badge.onclick = () => openSchemaModal(d);
+      } else if (d.status === "active") {
+        const caps = [d.supports_timeline ? "时间线" : null, d.supports_recommendation ? "推荐" : null]
+          .filter(Boolean).join("/") || "仅检索";
+        badge.textContent = `${d.rows || 0} 行`;
+        badge.title = `已启用 · 支持：${caps}`;
+      } else if (d.status === "failed") {
+        badge.textContent = "失败";
+        badge.title = d.error || "";
+      } else {
+        badge.textContent = "解析中…";
+      }
+    } else if (d.status === "done") {
       badge.textContent = `${d.text_chunks || 0} 片段`;
       badge.title = `${d.pages || 0} 页 · 路由 ${JSON.stringify(d.route_distribution || {})}`;
     } else if (d.status === "failed") {
@@ -267,7 +284,7 @@ function renderDocuments(list) {
   }
 }
 
-async function uploadPdf(file) {
+async function uploadDoc(file) {
   if (!file) return;
   docDom.upload.disabled = true;
   try {
@@ -286,10 +303,121 @@ async function uploadPdf(file) {
 }
 
 docDom.upload.addEventListener("click", () => docDom.file.click());
-docDom.file.addEventListener("change", () => uploadPdf(docDom.file.files[0]));
+docDom.file.addEventListener("change", () => uploadDoc(docDom.file.files[0]));
+
+/* ── schema 确认弹窗（Stage 5）── */
+const schemaDom = {
+  modal: $("#schema-modal"), meta: $("#schema-meta"), reason: $("#schema-reason"),
+  entity: $("#schema-entity"), axis: $("#schema-axis"), desc: $("#schema-desc"),
+  image: $("#schema-image"), display: $("#schema-display"),
+  ok: $("#schema-ok"), cancel: $("#schema-cancel"),
+};
+let schemaDocId = null;
+
+function fillRoleSelect(select, columns, proposed, allowEmpty) {
+  select.innerHTML = "";
+  if (allowEmpty) {
+    const none = el("option"); none.value = ""; none.textContent = "（无）";
+    select.appendChild(none);
+  }
+  for (const c of columns) {
+    const opt = el("option"); opt.value = c; opt.textContent = c;
+    select.appendChild(opt);
+  }
+  select.value = proposed || "";
+  if (select.value !== (proposed || "")) select.selectedIndex = 0; // 推断列已不存在时兜底
+}
+
+function openSchemaModal(d) {
+  schemaDocId = d.doc_id;
+  const cols = d.columns || [];
+  const p = d.proposed_schema || {};
+  schemaDom.meta.textContent =
+    `${d.doc_name} · ${d.sheet_name ? `子表「${d.sheet_name}」 · ` : ""}${d.rows || 0} 行 × ${d.cols || cols.length} 列`;
+  fillRoleSelect(schemaDom.entity, cols, p.entity_col, false);
+  fillRoleSelect(schemaDom.axis, cols, p.group_axis_col, true);
+  fillRoleSelect(schemaDom.desc, cols, p.description_col, true);
+  fillRoleSelect(schemaDom.image, cols, p.image_col, true);
+  schemaDom.display.value = p.display_name || (d.doc_name || "").replace(/\.[^.]+$/, "");
+  schemaDom.reason.textContent = p.reasoning ? `推断依据：${p.reasoning}` : "";
+  schemaDom.modal.classList.remove("is-hidden");
+}
+
+function closeSchemaModal() {
+  schemaDom.modal.classList.add("is-hidden");
+  schemaDocId = null;
+}
+
+schemaDom.cancel.addEventListener("click", closeSchemaModal);
+schemaDom.ok.addEventListener("click", async () => {
+  if (!schemaDocId) return;
+  schemaDom.ok.disabled = true;
+  try {
+    const res = await fetch(`/api/documents/${schemaDocId}/schema`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        entity_col: schemaDom.entity.value,
+        group_axis_col: schemaDom.axis.value || null,
+        description_col: schemaDom.desc.value || null,
+        image_col: schemaDom.image.value || null,
+        display_name: schemaDom.display.value,
+      }),
+    });
+    const j = await res.json();
+    if (!j.ok) { alert(j.error || "确认失败"); return; }
+    closeSchemaModal();
+    loadDocuments();
+    loadDatasets();            // 新数据源入列
+  } catch (e) {
+    alert("确认失败：" + e.message);
+  } finally {
+    schemaDom.ok.disabled = false;
+  }
+});
+
+/* ── 数据源切换器（Stage 5）── */
+const dsDom = { select: $("#dataset-select"), hint: $("#dataset-hint") };
+
+async function loadDatasets() {
+  try {
+    const data = await (await fetch("/api/datasets")).json();
+    dsDom.select.innerHTML = "";
+    for (const item of (data.items || [])) {
+      const opt = el("option");
+      opt.value = item.dataset_id;
+      opt.textContent = item.kind === "table" ? `📊 ${item.name}` : item.name;
+      dsDom.select.appendChild(opt);
+    }
+    dsDom.select.value = data.active;
+    updateDatasetHint(data);
+  } catch (e) { console.error(e); }
+}
+
+function updateDatasetHint(data) {
+  const cur = (data.items || []).find((i) => i.dataset_id === dsDom.select.value);
+  if (!cur) { dsDom.hint.textContent = ""; return; }
+  dsDom.hint.textContent = cur.kind === "table"
+    ? `${cur.rows || 0} 行 · 支持：${[cur.supports_timeline && "时间线", cur.supports_recommendation && "推荐"].filter(Boolean).join("/") || "仅检索"}`
+    : "21,384 幅西方画作（8–19 世纪）";
+}
+
+dsDom.select.addEventListener("change", async () => {
+  try {
+    const res = await fetch("/api/dataset/active", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset_id: dsDom.select.value }),
+    });
+    const j = await res.json();
+    if (!j.ok) { alert(j.error || "切换失败"); }
+  } catch (e) { alert("切换失败：" + e.message); }
+  loadDatasets();
+});
 
 /* ── 启动 ── */
 if (window.marked) marked.setOptions({ breaks: true, gfm: true });
 bootstrap();
 loadSessions();
 loadDocuments();
+loadDatasets();

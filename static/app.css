@@ -376,8 +376,59 @@ body {
 .doc-badge.processing { background: #b98f4722; color: #8a6526; }
 .doc-badge.done { background: #4e7c4e22; color: #3c623c; }
 .doc-badge.failed { background: #a9444222; color: #8c3833; }
+.doc-badge.pending_confirm { background: #b98f4722; color: #8a6526; }
+.doc-badge.active { background: #4e7c4e22; color: #3c623c; }
+.doc-badge.actionable { cursor: pointer; border: 1px dashed #8a6526; }
+.doc-badge.actionable:hover { background: #b98f4740; }
 .doc-meta { flex-shrink: 0; font-size: 0.72rem; color: var(--ink-faint); }
 .doc-empty { font-size: 0.8rem; color: var(--ink-faint); padding: 6px 8px; }
+
+/* ══════════════ 数据源切换器（Stage 5） ══════════════ */
+.dataset-panel { padding: 0 14px; }
+.dataset-select {
+  width: 100%; border: 1px solid var(--line); border-radius: 10px;
+  background: transparent; color: var(--ink-soft); font-family: var(--serif-cn);
+  font-size: 0.86rem; padding: 7px 8px; cursor: pointer; outline: none;
+}
+.dataset-select:focus { border-color: var(--gold); }
+.dataset-hint { font-size: 0.72rem; color: var(--ink-faint); padding: 4px 4px 0; }
+
+/* ══════════════ schema 确认弹窗（Stage 5） ══════════════ */
+.schema-modal {
+  position: fixed; inset: 0; z-index: 60; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(30, 25, 18, 0.42); backdrop-filter: blur(2px);
+}
+.schema-modal.is-hidden { display: none; }
+.schema-card {
+  width: min(480px, 92vw); max-height: 88vh; overflow-y: auto;
+  background: var(--paper, #faf6ee); border: 1px solid var(--line);
+  border-radius: 16px; padding: 22px 24px; box-shadow: 0 18px 50px rgba(40, 30, 10, 0.22);
+}
+.schema-title { font-family: var(--serif-cn); font-size: 1.06rem; font-weight: 600; color: var(--ink, #2d2620); }
+.schema-meta { font-size: 0.78rem; color: var(--ink-faint); margin: 6px 0 14px; }
+.schema-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.schema-grid label, .schema-name-label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 0.78rem; color: var(--ink-soft); font-family: var(--serif-cn);
+}
+.schema-grid select, .schema-name-label input {
+  border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  font-size: 0.84rem; padding: 6px 8px; color: var(--ink, #2d2620); outline: none;
+}
+.schema-grid select:focus, .schema-name-label input:focus { border-color: var(--gold); }
+.schema-name-label { margin-top: 12px; }
+.schema-reason { font-size: 0.74rem; color: var(--ink-faint); margin-top: 12px; line-height: 1.5; }
+.schema-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.btn-schema-cancel, .btn-schema-ok {
+  border-radius: 10px; padding: 8px 18px; font-size: 0.86rem; cursor: pointer;
+  font-family: var(--serif-cn); transition: all 0.25s var(--ease);
+}
+.btn-schema-cancel { border: 1px solid var(--line); background: transparent; color: var(--ink-soft); }
+.btn-schema-cancel:hover { border-color: var(--ink-faint); }
+.btn-schema-ok { border: 1px solid var(--gold); background: var(--gold); color: #fff; }
+.btn-schema-ok:hover { background: var(--gold-deep, #b98f47); }
+.btn-schema-ok:disabled { opacity: 0.5; cursor: default; }
 
 /* ══════════════ 响应式 / 缩放兜底 ══════════════ */
 @media (max-width: 880px) {

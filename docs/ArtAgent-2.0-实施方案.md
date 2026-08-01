@@ -31,9 +31,9 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 
 ---
 
-## 1. 当前状态：Stage 1 / 2 / 3 / 4 已完成 ✅
+## 1. 当前状态：Stage 1 / 2 / 3 / 4 / 5 已完成 ✅
 
-> Stage 1：commits `a08bda1`、`1aaf48c`；Stage 2：见 §1.4；Stage 3：见 §1.5；Stage 4：见 §1.6。
+> Stage 1：commits `a08bda1`、`1aaf48c`；Stage 2：见 §1.4；Stage 3：见 §1.5；Stage 4：见 §1.6；Stage 5：见 §1.7。
 
 ### 1.1 已落地的改动（Stage 1）
 
@@ -135,6 +135,36 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 - **eval（锁 semart 源，n=25 基线口径）**：意图分类 **98.0%**（49/50）；**Recall@5 = 76.0%（19/25），较 64.0% 基线 +12pp**——逐条 A/B（`RERANK_ENABLED=0` vs 默认开）：3 条被精排救回、0 条由命中变未命中，纯增益。
 - 回归：`verify_recall_parity`（`RERANK_ENABLED=0`）25 条逐位 0 不一致、n=25 复现 64.0% 基线；`test_tools` / `test_multi_tool` / `test_pipelines` 全绿（13 分钟）。
 
+### 1.7 Stage 5 实施记录（结构化表格上传）✅
+
+**已落地的改动：**
+
+- **文件类型路由与加载（`src/ingestion/table_loader.py`，零模型调用）**：`classify_upload` 按扩展名分通道（.pdf → Stage 3，.csv/.xlsx/.xls → 表格）；CSV 编码兜底 utf-8→gb18030→latin1（中文 Excel 导出常是 GBK）；xlsx/xls 多 sheet 确定性选择——`有效列数×数据行数`打分（有效列=非 `Unnamed:N` 且非全空），学习计划首表是说明页也能选对「每日打卡表」。新增依赖 openpyxl/xlrd（纯 Python）。
+- **Schema 推断（`src/ingestion/schema_inference.py`）**：LLM 看表头（含 dtype）+ 前 4 行猜 4 个列角色 + 显示名；输出逐列与真实表头校验，幻觉列置空告警（宁可少判不可错判）；任何失败返回全空建议（用户仍可手填）。`SCHEMA_INFER_PROMPT` 明确 **entity_col 是"归属主体"而非记录标题**（画作表取 AUTHOR 不取 TITLE——初版提示词实测踩坑：取 TITLE 时 capability 门显示支持、管线却按画名查作者静默查空，正是方案§6.2 要防的静默出错；提示词加"作品-创作者结构取创作者"规则与反例后修正）。
+- **确认注册流程（`src/ingestion/table_pipeline.py`）**：状态机 `processing → pending_confirm → active/failed`（与 PDF 共用 doc_status.json，kind 字段区分）；确认时 `entity_col` 必填+逐列校验→注册 `StructuredTableRetriever`（df 懒加载，首访才读盘）+ 挂进 HybridRetriever（source 名=dataset_id=`table_{doc_id}`）；`restore_active_tables()` 在 api lifespan 启动时从状态存储重建（注册表/Hybrid 是内存单例）；`unregister_table()` 为 Stage 6 删除级联预留。
+- **数据源切换**：`HybridRetriever.active_dataset`（默认 semart，`set_active_dataset` 校验已注册）；`semantic_search` 工具按它过滤（选表时 SemArt 不参与、选 semart 时表不参与；用户 PDF 两路无 dataset_id 属性不受切换影响）；`service.stream_answer` 每轮从单例读进 `state.dataset_id`（重置清单纪律不变）；端点 `GET /api/datasets`（清单+当前项）/ `POST /api/dataset/active`（切换，未注册 404）。
+- **能力开关真正生效**：graph 层 `_capability_supported` 无需改动（Stage 2 预留）——无轴表 timeline 意图、无描述表 recommendation 意图自动降级 general；未注册 dataset_id 同样降级。
+- **表格检索第三级兜底（`structured_retriever._fuzzy_search` 扩展）**：实体 fuzzy → 描述整串包含 → **词重叠打分**（长 query 按内容词在实体+描述列的命中率排序，≤20 词、>3 字母、确定性无模型）。没有第三级时，recommendation 的 30–60 词 extracted_features 整串包含必空、推荐管线在用户表上必瘫。
+- **user_table 结果形状（`tools/retrieval.py::_format_result` 第三形状）**：原始列全带上（小写键，`exclude_from_results` 按 `entity_col.lower()` 定位靠它）+ 通用 `title/description_snippet`（证据模板与 Stage 4 相关性过滤拼候选靠它）+ `source` 键（不进 UI 配图卡片，陷阱#13）。
+- **Web UI 切片**：上传按钮泛化 PDF/CSV/XLSX/XLS；文档列表表格徽标（待确认 schema 可点击/已启用 N 行+能力）；**schema 确认弹窗**（4 个角色下拉映射列名、显示名输入、推断依据展示——§12 确认交互形式定稿为字段映射下拉 UI）；侧栏**数据源切换器**（含能力提示）。新端点 `POST /api/documents/{doc_id}/schema`（确认/纠正）。
+
+**实施中的关键决策（后续 Stage 需知晓）：**
+
+1. **确认前不注册**：推断完成只落 pending_confirm 状态与建议 schema，用户确认/纠正才进注册表——方案§6.2"猜错 entity_col 会静默出错"的防线；active 状态也允许重确认改 schema。
+2. **表格 Phase 1 不入向量库**：注册即走 Stage 2 预留的 fuzzy 兜底路径；词重叠打分是长 query 的救命路径。向量化用户表格（description 列入 BGE 库）留 Phase 2。
+3. **active_dataset 三处口径**：工具读 `hybrid.active_dataset`（semantic_search 无状态）、节点读 `state.dataset_id`、service 每轮从单例同步进 state——切换只改单例一处，三处自然一致；eval/test_tools 默认 semart 不受影响。
+4. **正样本的现实约束**：SemArt 名画家 TIMEFRAME 全部单桶（50 年桶 > 个人生涯），多组 group_by_axis 只有跨世纪集合实体可验——子集含 ROMANESQUE PAINTER, Italian（8 时期 29 幅）专验多组；4 名画家×50 幅验指名查询与推荐排除。
+5. **刁难样本的真实价值**：学习计划推断实测猜 entity=学习主题、axis=阶段（过度猜测的典型），确认 UI 纠正为无轴+desc=具体内容后 timeline=False/recommendation=True——人工纠正确实是必需品不是摆设。
+6. **多 sheet 选择不需要 LLM**：`有效列×行数`打分在学习计划上 98:22:16:4 碾压性区分，零模型调用原则守住。
+
+**验收数据（2026-08-01，glm-4.7）：**
+
+- 纯单测累计 **156 个全绿**：+`test_table_ingest` 21（路由/sheet 选择/编码兜底/推断 5 例/确认注册/恢复/能力门/空角色守卫/结果形状/词重叠 2 例）、+`test_reranker` 3（双端点主备接力，见下）。
+- **HTTP e2e 三件套全过**（`scripts/e2e_stage5_http.py`，真实服务+真实推断）：正样本推断全中（AUTHOR/TIMEFRAME/DESCRIPTION/IMAGE_FILE，双能力 True）；负样本无轴无描述（双 False）；刁难样本 sheet 选对+纠正确认生效；清单/切换/404 正常。
+- **对话 e2e 全过**（`scripts/e2e_stage5_chat.py`，真实 graph）：timeline 全管线在画作集上运行（梵高单时期）；recommendation 全管线在画作集运行（词重叠喂候选、梵高排除）；书单 timeline 意图降级 general（无 tl_* 节点）；`restore_active_tables` 重启恢复 3 表验证。
+- 回归：parity（关精排）25 条逐位 0 不一致、复现 64.0%；test_tools/test_multi_tool/test_pipelines 全绿（日志 `logs/stage5_regression.log`）；eval 意图分类 94.0%（47/50，基线 96.0% 的 ±2pp 容差内达标）、Recall@5 76.0% 持平。
+- **精排额度事故与双端点接力（当日插曲）**：回归跑到一半 qwen3-rerank 免费额度耗尽（17:29 起连续 403）。当日已先知先觉把 `reranker.py` 重写为**双端点主备接力**——按模型名自动选端点（gte-rerank-v2/qwen3-vl-rerank 走原生 `services/rerank` 报文；其余走兼容报文），`RERANK_MODEL`/`RERANK_FALLBACK_MODEL` env 槽位，主模型重试耗尽自动接力后备、双失败才降级粗排；事故发生时**热备 gte-rerank-v2 一次调用即接管**，回归全程无感知。事后实测 gte-rerank-v2 主力口径 **Recall@5 = 76.0%（19/25），与 qwen3-rerank 逐条一致**——满额 100 万免费额度，`.env` 已切其为新主力（跳过死模型重试税）。**订正旧记载："gte-rerank-v2 已下线"为误传**（混淆了 gte-rerank v1 的 2026-05-30 停服）；兼容端点仅 qwen3-rerank 一个文本精排，vl-rerank 在其上 404 属正常（走原生端点）。按量付费价约 0.5 元/百万 token（国际站 $0.1/1M）。
+
 ---
 
 ## 2. 目标架构（三层）
@@ -234,7 +264,7 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 ## 5. Stage 4：检索质量层 ✅（已完成，实施记录见 §1.6）
 
 1. **上下文头（context header）**：向量化前给 PDF 文字 chunk 拼接 `[文档 | 章节 | 实体]` 头（只影响向量与展示，不改存储）；SemArt/结构化表不加。
-2. **Rerank**：RRF 粗排 → top 15–20 → **qwen3-rerank** 精排 → top 5–8。已核实：DashScope OpenAI 兼容端点 `POST https://dashscope.aliyuncs.com/compatible-api/v1/reranks`，单次 ≤500 文档、单文档 ≤4000 token，支持 `instruct` 参数；gte-rerank-v2 已下线勿用。彩蛋：`qwen3-vl-rerank` 可给多模态整页图做精排，可选。
+2. **Rerank**：RRF 粗排 → top 15–20 → **qwen3-rerank** 精排 → top 5–8。已核实：DashScope OpenAI 兼容端点 `POST https://dashscope.aliyuncs.com/compatible-api/v1/reranks`，单次 ≤500 文档、单文档 ≤4000 token，支持 `instruct` 参数。~~gte-rerank-v2 已下线勿用~~（**2026-08-01 实测订正：gte-rerank-v2 未下线**——它不在兼容端点、走原生 `services/rerank` 端点但服务正常，免费额度与 qwen3-rerank 各自独立 100 万，已落地为精排后备模型，见 §1.7 末尾接力设计）。彩蛋：`qwen3-vl-rerank`（同原生端点，文本兼容）可给多模态整页图做精排，Phase 2 可选。
 3. **结果相关性校正通用化**：把 `recommendation` 的 `rec_filter` 思路提炼为 HybridRetriever 后的通用轻量 LLM 过滤步骤，所有分支受益。
 4. 不做（Phase 2 再说）：BM25/关键词混合、结果压缩；永不做：向量数值量化。
 
@@ -242,7 +272,7 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 
 ---
 
-## 6. Stage 5：结构化表格上传
+## 6. Stage 5：结构化表格上传 ✅（已完成，实施记录见 §1.7）
 
 依托 Stage 2 的 `StructuredTableRetriever` + `TableSchema`：
 
@@ -320,7 +350,7 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 | 测试 PDF 素材 | ⏳ 待准备：2–3 份美术图文 PDF（**至少 1 份真实画册**，验 MinerU 短板）+ 1 份含公式技术 PDF |
 | 页级路由阈值 | ⏳ 200字符/30%/80% 为起始值，真实 PDF 跑后微调 |
 | 测试表格素材 | ✅ 已定三件套（2026-08-01）：SemArt 分层子集 CSV（正样本，Stage 5 开工时脚本生成：3–5 个跨多时期画家全作品 + 噪声行共 100–300 行，AUTHOR 倒序格式顺带压测 fuzzy_match）+ `tests/fixtures/plain_list_books.csv`（负样本：有实体列、无时间轴、无自由文本描述，已入库）+ 用户的学习计划 xlsx（刁难样本：有"天数/阶段"日期类列但语义无关，专测 schema 人工纠正交互 + 多 sheet 选择，文件在用户桌面，开工时直接读） |
-| schema 确认交互形式 | ⏳ 随 Stage 5 Web 设计定稿 |
+| schema 确认交互形式 | ✅ 已定（2026-08-01）：字段映射下拉 UI——确认弹窗内 4 个角色各一个下拉框（列名+「无」），预填推断值，用户改后确认；显示名可编辑 |
 | Rijksmuseum / 高德 key | ⏳ 用户自备免费 key（Met/Wikidata 无需 key） |
 
 ---
@@ -347,3 +377,7 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 18. **MinerU quota 按整份文档页数计**：`mineru_parser.parse_pages` 是整份上传、按页过滤——`page_ranges` 参数的 page_idx 语义（原页码 vs 重排序）未实测前勿用（Phase 2 省 quota 优化点）；每日 2000 页高优额度，批量灌库前先算页数。Token 在 `.env` 的 `MINERU_TOKEN`，空着自动降级 pdfplumber。
 19. **Recall@5 有两个口径，别混**：`RERANK_ENABLED=0`（粗排）复现 64.0% 基线；Stage 4 起默认开精排是 76.0%（均 n=25 锁 semart 源）。跑 `verify_recall_parity` 必须关精排——开着跑出的"不一致"是精排改序的设计行为，不是 bug；它证明粗排路径无回归的唯一姿势是 `RERANK_ENABLED=0`。
 20. **相关性过滤只在编排层，工具里没有**：`semantic_search` 工具与 eval 检索路径不含 LLM 过滤（保确定性）；过滤在 `comparison_retrieve` 与 `general_tools` 节点。改工具返回形状时保住 `title`/`description_snippet` 两键——过滤器靠它们拼候选清单，键没了过滤静默失效（降级回原列表，不报错）。
+21. **schema 推断的 entity_col 是"归属主体"不是记录标题**：画作表必须取 AUTHOR 而不是 TITLE——取 TITLE 时 capability 门照常显示"支持"，管线却按画名匹配作者**静默查空**（比报错危险）。`SCHEMA_INFER_PROMPT` 已写明"作品-创作者结构取创作者"规则与反例，改提示词时别把这个区分改没；推断结果必须过人工确认才注册。
+22. **精排双端点与主备接力**：qwen3-rerank 走兼容端点（唯一），gte-rerank-v2 / qwen3-vl-rerank 走原生 `services/rerank` 端点（报文不同，**未下线**——2026-08-01 实测，各模型免费额度独立 100 万）。`reranker.py` 按模型名自动选端点，主模型失败自动接力 `RERANK_FALLBACK_MODEL`（默认 gte-rerank-v2），双失败才降级粗排——换模型只改 env（`RERANK_MODEL`/`RERANK_FALLBACK_MODEL`），别把端点 URL 写死在某一个调用里。
+23. **用户表格检索是三级兜底**：实体 fuzzy → 描述整串包含 → 词重叠打分。recommendation 的长特征 query（30–60 词）只有第三级能命中——改动时别把第三级砍了，否则推荐管线在用户表上必瘫。表格 Phase 1 无向量索引是刻意设计（Phase 2 才考虑入 BGE 库）。
+24. **注册表/Hybrid 是内存单例，active_dataset 三处口径**：重启必须 `restore_active_tables()`（已挂 api lifespan；改 doc_status.json 结构时同步它）。工具读 `hybrid.active_dataset`、节点读 `state.dataset_id`、service 每轮从单例同步——切换数据源只改单例一处；注销表用 `unregister_table()`（两注册表都要清）。

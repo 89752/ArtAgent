@@ -14,7 +14,8 @@ sentence-transformers>=3.0.0
 # Data Processing
 pandas>=2.0.0
 numpy>=1.26.0
-openpyxl>=3.1.0  # Stage 5 结构化表格上传（.xlsx/.xls 读取）；纯 Python 无 DLL 风险
+openpyxl>=3.1.0  # Stage 5 结构化表格上传（.xlsx 读取）；纯 Python 无 DLL 风险
+xlrd>=2.0.1  # Stage 5 结构化表格上传（旧格式 .xls 读取）；纯 Python
 
 # Image Processing
 Pillow>=10.0.0

@@ -33,6 +33,8 @@ for _k in ("NO_PROXY", "no_proxy"):
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+from contextlib import asynccontextmanager
+
 from fastapi import BackgroundTasks, FastAPI, Request, UploadFile
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -42,7 +44,15 @@ from web import service
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
-app = FastAPI(title="西方艺术智能助手", docs_url=None, redoc_url=None)
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """启动时恢复已确认的表格数据源（注册表/Hybrid 是内存单例，Stage 5）。"""
+    service.restore_tables()
+    yield
+
+
+app = FastAPI(title="西方艺术智能助手", docs_url=None, redoc_url=None, lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -103,21 +113,27 @@ async def chat(request: Request):
     )
 
 
-# ── 文档上传与入库（Stage 3） ──
+# ── 文档上传与入库（Stage 3 PDF / Stage 5 表格） ──
 _UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50MB
 
 
 @app.post("/api/documents/upload")
 async def upload_document(file: UploadFile, background: BackgroundTasks):
-    """上传 PDF：保存 → BackgroundTasks 后台解析入库 → 前端轮询进度。
+    """上传 PDF/表格：保存 → BackgroundTasks 后台处理 → 前端轮询进度。
 
+    文件类型路由（零模型调用）：.pdf → Stage 3 解析入库；
+    .csv/.xlsx/.xls → Stage 5 表格通道（加载 + schema 推断 → 待确认）。
     Phase 1 即采用后台任务而非同步阻塞（MinerU/大图文档解析耗时以分钟计，
     浏览器与 uvicorn 都会超时）。
     """
-    filename = file.filename or "document.pdf"
-    if not filename.lower().endswith(".pdf"):
+    from src.ingestion.table_loader import classify_upload
+
+    filename = file.filename or ""
+    kind = classify_upload(filename)
+    if kind is None:
         return JSONResponse(
-            {"ok": False, "error": "当前仅支持 PDF 文件"}, status_code=400
+            {"ok": False, "error": "仅支持 PDF / CSV / XLSX / XLS 文件"},
+            status_code=400,
         )
     data = await file.read()
     if not data:
@@ -128,13 +144,54 @@ async def upload_document(file: UploadFile, background: BackgroundTasks):
         )
 
     saved = service.save_upload(filename, data)
-    background.add_task(
-        service.ingest_document,
-        saved["doc_id"], saved["doc_name"], saved["pdf_path"], saved["kb_id"],
-    )
+    if kind == "table":
+        background.add_task(
+            service.ingest_table_doc,
+            saved["doc_id"], saved["doc_name"], saved["file_path"], saved["kb_id"],
+        )
+    else:
+        background.add_task(
+            service.ingest_document,
+            saved["doc_id"], saved["doc_name"], saved["file_path"], saved["kb_id"],
+        )
     return JSONResponse(
-        {"ok": True, "doc_id": saved["doc_id"], "doc_name": saved["doc_name"]}
+        {"ok": True, "doc_id": saved["doc_id"], "doc_name": saved["doc_name"],
+         "kind": kind}
     )
+
+
+@app.post("/api/documents/{doc_id}/schema")
+async def confirm_schema(doc_id: str, request: Request):
+    """确认/纠正表格 schema（Stage 5）：用户确认后注册数据源生效。
+
+    请求体：{entity_col, group_axis_col?, description_col?, image_col?, display_name?}
+    （空串/null 表示该角色无列；entity_col 必填）
+    """
+    roles = await request.json()
+    try:
+        result = service.confirm_table(doc_id, roles or {})
+    except KeyError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return JSONResponse({"ok": True, "doc": result})
+
+
+@app.get("/api/datasets")
+def get_datasets():
+    """数据源清单（semart + 已确认表格）+ 当前生效项（Stage 5 切换器用）。"""
+    return JSONResponse(service.datasets())
+
+
+@app.post("/api/dataset/active")
+async def switch_dataset(request: Request):
+    """切换当前生效数据源（Stage 5）。请求体：{dataset_id}。"""
+    body = await request.json()
+    dataset_id = (body or {}).get("dataset_id") or ""
+    try:
+        return JSONResponse(service.set_active_dataset(dataset_id))
+    except KeyError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
 
 
 @app.get("/api/documents")

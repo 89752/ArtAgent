@@ -13,6 +13,7 @@ Stage 5 用户上传的 CSV/Excel 将以同样方式注册复用同一套能力�
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Optional
 
 import pandas as pd
@@ -153,7 +154,7 @@ class StructuredTableRetriever:
     def exclude_by_entity(self, names: list[str]) -> pd.DataFrame:
         """返回排除命中实体后的 DataFrame（实体列分词包含匹配）。"""
         tokens = _entity_tokens(names)
-        if not tokens:
+        if not tokens or not self.schema.entity_col:
             return self.df
         col = self.schema.entity_col
         mask = self.df[col].astype(str).str.lower().map(
@@ -216,14 +217,25 @@ class StructuredTableRetriever:
     def _fuzzy_search(
         self, query: str, top_k: int, filters: dict | None
     ) -> list[RetrievalResult]:
-        """无向量索引表的兜底检索：实体列 fuzzy_match → 描述列包含匹配。
+        """无向量索引表的兜底检索（三级递进）：
+
+        1. 实体列 fuzzy_match（短查询/指名查询主路径）
+        2. 描述列整串包含（短语级查询）
+        3. 词重叠打分（长查询兜底——Stage 5 实测 recommendation 的
+           extracted_features 是 30–60 词特征描述，整串包含必空：
+           按内容词在"实体列+描述列"中的命中数打分排序，确定性、无模型）
 
         filters（可选）：{列名: 值} 等值过滤，作用于命中的 DataFrame。
+        用户表的 entity_col/description_col 可能为空（负样本表），
+        空角色列直接跳过对应路径，两路皆空则返回空结果而非抛 KeyError。
         """
-        hits = fuzzy_match(self.df, self.schema.entity_col, query)
+        scored: list[tuple[float, int, pd.Series]] | None = None
+        hits = pd.DataFrame()
+        if self.schema.entity_col and self.schema.entity_col in self.df.columns:
+            hits = fuzzy_match(self.df, self.schema.entity_col, query)
         if hits.empty:
             desc_col = self.schema.description_col
-            if desc_col in self.df.columns:
+            if desc_col and desc_col in self.df.columns:
                 mask = (
                     self.df[desc_col]
                     .astype(str)
@@ -231,14 +243,20 @@ class StructuredTableRetriever:
                     .str.contains(str(query).lower(), na=False, regex=False)
                 )
                 hits = self.df[mask]
+        if hits.empty:
+            scored = self._word_overlap_rows(query)
 
-        if not hits.empty and filters:
-            for col, value in filters.items():
-                if col in hits.columns:
-                    hits = hits[hits[col].astype(str) == str(value)]
+        if scored is not None:
+            rows_iter = [(row, score) for score, _, row in scored[:top_k]]
+        else:
+            if not hits.empty and filters:
+                for col, value in filters.items():
+                    if col in hits.columns:
+                        hits = hits[hits[col].astype(str) == str(value)]
+            rows_iter = [(row, 1.0) for _, row in hits.head(top_k).iterrows()]
 
         out: list[RetrievalResult] = []
-        for _, row in hits.head(top_k).iterrows():
+        for row, score in rows_iter:
             meta = {
                 str(c).lower(): ("" if pd.isna(row[c]) else str(row[c]))
                 for c in self.df.columns
@@ -247,16 +265,54 @@ class StructuredTableRetriever:
             image = ""
             if self.schema.image_col and self.schema.image_col in self.df.columns:
                 image = str(row.get(self.schema.image_col) or "")
+            content = ""
+            if self.schema.description_col and self.schema.description_col in self.df.columns:
+                content = str(row.get(self.schema.description_col) or "")
             out.append(
                 RetrievalResult(
-                    content=str(row.get(self.schema.description_col, "") or ""),
+                    content=content,
                     source=self.source,
-                    score=1.0,
+                    score=score,
                     metadata=meta,
                     image_refs=[image] if image else [],
                 )
             )
         return out
+
+    def _word_overlap_rows(
+        self, query: str, max_tokens: int = 20
+    ) -> list[tuple[float, int, pd.Series]]:
+        """第三级兜底：词重叠打分，返回 [(命中率, 原行序, row)] 降序。
+
+        命中文本 = 实体列 + 描述列拼接（小写）；查询取长度 >3 的内容词
+        （去重、上限 max_tokens）。命中率为 0 的行不返回。
+        """
+        text_cols = [
+            c
+            for c in (self.schema.entity_col, self.schema.description_col)
+            if c and c in self.df.columns
+        ]
+        if not text_cols:
+            return []
+        tokens = list(dict.fromkeys(
+            w for w in re.findall(r"[a-zA-Z]{4,}", str(query).lower())
+        ))[:max_tokens]
+        if not tokens:
+            return []
+        corpus = (
+            self.df[text_cols]
+            .astype(str)
+            .agg(" ".join, axis=1)
+            .str.lower()
+        )
+        scored: list[tuple[float, int, pd.Series]] = []
+        for idx, text in corpus.items():
+            n = sum(1 for t in tokens if t in text)
+            if n:
+                scored.append((n / len(tokens), idx, self.df.loc[idx]))
+        # 命中率降序；同分保持原行序（确定性）
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        return scored
 
 
 # ------------------------------------------------------------------ #

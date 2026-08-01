@@ -237,6 +237,12 @@ def stream_answer(message: str, sid: str) -> Iterator[dict]:
     steps: list[dict] = []
     yield {"type": "delta", "html": history[-1]["content"]}
 
+    # Stage 5：当前生效数据源由服务端单例持有（前端切换器调 /api/dataset/active
+    # 改变它）；每轮从单例读进 state，重置清单纪律不变
+    from src.retrieval.hybrid import get_hybrid_retriever
+
+    active_dataset = get_hybrid_retriever().active_dataset
+
     intent, final_answer = "", ""
     struct_artworks: list[dict] = []
     tool_artworks: list[dict] = []
@@ -250,7 +256,7 @@ def stream_answer(message: str, sid: str) -> Iterator[dict]:
                 "user_query": message,
                 "user_id": WEB_USER_ID,
                 "intent": "",
-                "dataset_id": "semart",  # Stage 2：每轮重置当前生效数据源
+                "dataset_id": active_dataset,  # Stage 2/5：每轮重置当前生效数据源
                 "subjects": [],
                 "sub_queries": [],
                 "extracted_features": "",
@@ -325,22 +331,32 @@ def reset_preferences() -> None:
     clear_preferences(WEB_USER_ID)
 
 
-# ── 文档上传与入库（Stage 3） ──
+# ── 文档上传与入库（Stage 3 PDF / Stage 5 表格） ──
 def save_upload(filename: str, data: bytes, kb_id: str = "default") -> dict:
-    """把上传的 PDF 存到 uploads/{kb_id}/{doc_id}/document.pdf。"""
+    """把上传文件存到 uploads/{kb_id}/{doc_id}/；按类型路由存储名。
+
+    PDF → document.pdf（Stage 3 路径不变）；表格 → table{原扩展名}（Stage 5）。
+    调用方须先用 classify_upload 判型，本函数不重复校验。
+    """
     import uuid
 
     from src.ingestion.pipeline import UPLOADS_DIR
+    from src.ingestion.table_loader import classify_upload
 
     doc_id = uuid.uuid4().hex[:12]
     work_dir = UPLOADS_DIR / kb_id / doc_id
     work_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = work_dir / "document.pdf"
-    pdf_path.write_bytes(data)
+    kind = classify_upload(filename)
+    if kind == "table":
+        file_path = work_dir / f"table{Path(filename).suffix.lower()}"
+    else:
+        file_path = work_dir / "document.pdf"
+    file_path.write_bytes(data)
     return {
         "doc_id": doc_id,
         "doc_name": filename,
-        "pdf_path": str(pdf_path),
+        "kind": kind,
+        "file_path": str(file_path),
         "kb_id": kb_id,
     }
 
@@ -353,6 +369,58 @@ def ingest_document(doc_id: str, doc_name: str, pdf_path: str, kb_id: str) -> No
         ingest_pdf(pdf_path, doc_id, doc_name=doc_name, kb_id=kb_id)
     except Exception:
         logger.exception("ingest_document failed: %s", doc_id)
+
+
+def ingest_table_doc(doc_id: str, doc_name: str, table_path: str, kb_id: str) -> None:
+    """表格后台任务入口（Stage 5）：加载 + schema 推断 → 待确认状态。"""
+    from src.ingestion.table_pipeline import ingest_table
+
+    try:
+        ingest_table(table_path, doc_id, doc_name=doc_name, kb_id=kb_id)
+    except Exception:
+        logger.exception("ingest_table_doc failed: %s", doc_id)
+
+
+def confirm_table(doc_id: str, roles: dict) -> dict:
+    """确认/纠正表格 schema（Stage 5）：注册生效。"""
+    from src.ingestion.table_pipeline import confirm_table_schema
+
+    return confirm_table_schema(doc_id, roles)
+
+
+def datasets() -> dict:
+    """数据源清单（Stage 5 前端切换器）：semart + 所有 active 表格。"""
+    from src.retrieval.hybrid import get_hybrid_retriever
+
+    hybrid = get_hybrid_retriever()
+    items = [{"dataset_id": "semart", "name": "SemArt 画作库（默认）", "kind": "builtin"}]
+    for st in documents():
+        if st.get("kind") == "table" and st.get("status") == "active":
+            items.append({
+                "dataset_id": st["dataset_id"],
+                "name": st.get("display_name") or st.get("doc_name") or st["dataset_id"],
+                "kind": "table",
+                "doc_id": st["doc_id"],
+                "rows": st.get("rows", 0),
+                "supports_timeline": st.get("supports_timeline", False),
+                "supports_recommendation": st.get("supports_recommendation", False),
+            })
+    return {"active": hybrid.active_dataset, "items": items}
+
+
+def set_active_dataset(dataset_id: str) -> dict:
+    """切换当前生效数据源（Stage 5）。"""
+    from src.retrieval.hybrid import get_hybrid_retriever
+
+    get_hybrid_retriever().set_active_dataset(dataset_id)
+    return {"ok": True, "active": dataset_id}
+
+
+def restore_tables() -> int:
+    """服务启动时恢复已确认的表格数据源（Stage 5）。"""
+    from src.ingestion.table_pipeline import restore_active_tables
+
+    return restore_active_tables()
 
 
 def documents() -> list[dict]:

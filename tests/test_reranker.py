@@ -37,15 +37,21 @@ class _FakeResp:
 
 
 class _PostRecorder:
-    """替换 requests.post：记录 payload，按预设行为返回/抛错。"""
+    """替换 requests.post：记录 payload，按预设行为返回/抛错（可按 URL 分流）。"""
 
-    def __init__(self, payload=None, error=None):
+    def __init__(self, payload=None, error=None, by_url=None):
         self.payload = payload or {"results": []}
         self.error = error
+        self.by_url = by_url or {}  # {url片段: payload 或 Exception}
         self.calls = []
 
     def __call__(self, url, headers=None, json=None, timeout=None):
         self.calls.append({"url": url, "json": json, "timeout": timeout})
+        for frag, behavior in self.by_url.items():
+            if frag in url:
+                if isinstance(behavior, Exception):
+                    raise behavior
+                return _FakeResp(behavior)
         if self.error:
             raise self.error
         return _FakeResp(self.payload)
@@ -134,11 +140,65 @@ def test_http_error_retries_then_returns_none():
     old_sleep = _patch(reranker_mod.time, "sleep", lambda s: None)
     try:
         assert reranker_mod.rerank("q", ["a"]) is None
-        # 首次 + MAX_RETRIES 次重试，全部失败才降级
+        # 主模型（首次+MAX_RETRIES 重试）+ 后备模型（同次数），双失败才降级
+        assert len(rec.calls) == (reranker_mod.MAX_RETRIES + 1) * 2
+    finally:
+        _patch(reranker_mod.requests, "post", old_post)
+        _patch(reranker_mod.time, "sleep", old_sleep)
+
+
+# ── 双端点与主备接力（2026-08-01：gte-rerank-v2 实测未下线）─────────
+def test_fallback_model_takes_over_on_primary_failure():
+    native_payload = {"output": {"results": [
+        {"index": 1, "relevance_score": 0.8},
+        {"index": 0, "relevance_score": 0.3},
+    ]}}
+    rec = _PostRecorder(by_url={
+        "compatible-api": RuntimeError("403 FreeTierOnly"),
+        "services/rerank": native_payload,
+    })
+    old_post = _patch(reranker_mod.requests, "post", rec)
+    old_sleep = _patch(reranker_mod.time, "sleep", lambda s: None)
+    try:
+        ranked = reranker_mod.rerank("q", ["a", "b"])
+        assert ranked == [(1, 0.8), (0, 0.3)]  # 原生端点结果解析并按分降序
+        urls = [c["url"] for c in rec.calls]
+        assert any("services/rerank" in u for u in urls)  # 确实接力到了原生端点
+    finally:
+        _patch(reranker_mod.requests, "post", old_post)
+        _patch(reranker_mod.time, "sleep", old_sleep)
+
+
+def test_native_model_routes_to_native_endpoint():
+    payload = {"output": {"results": [{"index": 0, "relevance_score": 1.0}]}}
+    rec = _PostRecorder(payload)
+    old_post = _patch(reranker_mod.requests, "post", rec)
+    old_model = _patch(reranker_mod, "RERANK_MODEL", "gte-rerank-v2")
+    try:
+        ranked = reranker_mod.rerank("q", ["a"])
+        assert ranked == [(0, 1.0)]
+        assert "services/rerank" in rec.calls[0]["url"]  # 按模型名自动选端点
+        # 原生报文形状：input 包 query/documents，parameters 包 top_n
+        assert rec.calls[0]["json"]["input"]["documents"] == ["a"]
+        assert rec.calls[0]["json"]["parameters"]["top_n"] == 1
+    finally:
+        _patch(reranker_mod.requests, "post", old_post)
+        _patch(reranker_mod, "RERANK_MODEL", old_model)
+
+
+def test_fallback_skipped_when_same_as_primary():
+    rec = _PostRecorder(error=RuntimeError("boom"))
+    old_post = _patch(reranker_mod.requests, "post", rec)
+    old_sleep = _patch(reranker_mod.time, "sleep", lambda s: None)
+    old_fb = _patch(reranker_mod, "RERANK_FALLBACK_MODEL", reranker_mod.RERANK_MODEL)
+    try:
+        assert reranker_mod.rerank("q", ["a"]) is None
+        # 主备同模型时不重复烧调用：只打一轮（首次+重试）
         assert len(rec.calls) == reranker_mod.MAX_RETRIES + 1
     finally:
         _patch(reranker_mod.requests, "post", old_post)
         _patch(reranker_mod.time, "sleep", old_sleep)
+        _patch(reranker_mod, "RERANK_FALLBACK_MODEL", old_fb)
 
 
 # ── hybrid._rerank_enabled ───────────────────────────────────────

@@ -32,8 +32,42 @@ def _format_result(result: RetrievalResult) -> dict:
         artwork = row_to_artwork_dict(result.metadata)
         artwork["relevance_score"] = round(result.score, 4)
         return artwork
-    # 用户文档（PDF）：title 形如"《画册》第3页"，供证据模板与溯源引用
     meta = result.metadata
+    if result.source == "user_table":
+        # 用户表格（Stage 5）：原始列全带上（小写键，recommendation 的
+        # exclude_from_results 按 schema.entity_col.lower() 定位要靠它）；
+        # 通用 title/description_snippet 供证据模板与相关性过滤拼候选；
+        # 带 source 键 → 不进 UI 配图卡片（陷阱 #13）
+        dataset_id = str(meta.get("dataset_id") or "")
+        entity, desc, axis = "", "", ""
+        try:
+            from src.retrieval.structured_retriever import get_structured_retriever
+
+            schema = get_structured_retriever(dataset_id).schema
+            if schema.entity_col:
+                entity = str(meta.get(schema.entity_col.lower()) or "")
+            if schema.description_col:
+                desc = str(meta.get(schema.description_col.lower()) or "")
+            if schema.group_axis_col:
+                axis = str(meta.get(schema.group_axis_col.lower()) or "")
+        except Exception:  # 表已被注销等异常：退化为通用形状，不拖垮检索
+            pass
+        title = str(meta.get("title") or entity or "(未命名记录)")
+        if axis:
+            title += f"（{axis}）"
+        snippet = desc or result.content or title
+        if len(snippet) > EVIDENCE_SNIPPET_LEN:
+            snippet = snippet[:EVIDENCE_SNIPPET_LEN] + "..."
+        return {
+            **{k: v for k, v in meta.items() if k != "dataset_id"},
+            "source": result.source,
+            "title": title,
+            "content": result.content,
+            "description_snippet": snippet,
+            "dataset_id": dataset_id,
+            "relevance_score": round(result.score, 4),
+        }
+    # 用户文档（PDF）：title 形如"《画册》第3页"，供证据模板与溯源引用
     title = f"《{meta.get('doc_name') or '用户文档'}》第{meta.get('page', '?')}页"
     section = str(meta.get("section") or "").strip()
     if section:  # Stage 4 上下文头展示侧：章节进标题（旧文档无此字段自动跳过）
@@ -87,7 +121,10 @@ def semantic_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     """
     from src.retrieval.hybrid import get_hybrid_retriever
 
-    results = get_hybrid_retriever().search(query, top_k=top_k)
+    hybrid = get_hybrid_retriever()
+    # Stage 5：限定当前生效的结构化数据源（semart 或用户切换的表格）；
+    # 用户 PDF 两路无 dataset_id 属性，不受切换影响始终参与
+    results = hybrid.search(query, top_k=top_k, dataset_id=hybrid.active_dataset)
     return [_format_result(r) for r in results]
 
 
