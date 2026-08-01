@@ -28,6 +28,7 @@ tavily-python>=0.5.0
 
 # Utilities
 python-dotenv>=1.0.0
+requests>=2.31.0  # MinerU 精准解析 API（Stage 3 文字路线主力解析器）
 tqdm>=4.66.0
 pydantic>=2.0.0
 

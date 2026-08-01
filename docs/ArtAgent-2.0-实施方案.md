@@ -96,7 +96,7 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 
 **实施中的关键决策（对原方案的修订/细化）：**
 
-1. **MinerU 未接入（遗留项）**。MinerU v3 依赖重（~4GB 模型 + 可能拉入与 pyarrow 冲突的 `datasets` 包），本 Stage 先以 pdfplumber 兜底跑通全链路，解析器接口已按可插拔设计。**遗留：真实画册 PDF 验证 MinerU 短板后再决定接入策略**（开放问题 §12 素材仍缺）。
+1. **MinerU 精准解析 API 已接入（2026-08-01 闭环 ✅）**。路线选型：官方 v4 云端 API，本地安装方案否决（~4GB 模型 + `datasets`/pyarrow 冲突前科 + CPU 慢；且当日上午用 16 页全扫描画册实测云端 API 质量优秀——OCR 连贯、图注完整，本地无质量收益）。落地为 `src/ingestion/mineru_parser.py`：`MINERU_TOKEN` 配置即启用，未配置/调用失败自动降级 pdfplumber（公式密集页仍退多模态整页图）；v4 流程 = `file-urls/batch` 申请签名 URL → PUT 上传（自动开解析）→ `extract-results/batch/{batch_id}` 轮询 → zip 取 `*_content_list.json`；`model_version=vlm`；**整份文档上传解析后按页过滤**（`page_ranges` 参数的 page_idx 语义未明，Phase 2 实测后再改按页解析省 quota，注意 quota 按整文档页数计）；块映射 text/list/code→text、equation→LaTeX 整块、table→caption+HTML+footnote 整块、image/chart→文档自带图注（无图注不产块，视觉内容走整页图路线）、header/footer/page_number 等噪声丢弃；内嵌图落盘 `work_dir/images/` 备用。实测：RAG PDF 5 页云端 8.8s 解析、160 blocks → 52 chunks（含 1 个 table 块——chunker 的 table 路径首次命中真实数据）；`tests/test_mineru_parser.py` 13 个纯单测。新增显式依赖 `requests`（原为传递依赖）。
 2. **Qwen-VL 读图作答（2026-08-01 已闭环 ✅）**。落地方式为 **`read_page_image` 工具**而非 ToolMessage 多模态化：对话模型 glm-4.7 是纯文本大脑，继续负责工具决策；命中整页图（`source=user_pdf_image`，结果带 `image_path` + `read_hint`）时 Agent 自主调用 `read_page_image`，由 `qwen3.5-omni-plus` 读图返回文字描述。这保留了"工具内不偷藏 LLM 调用"的纪律（该工具的存在意义就是视觉读取，与 `image_lookup analyze=True` 同类），且每次读图调用在日志中可观测（正是"命中图片路线的生成开销"度量点）。路径安全校验：只放行 `data/uploads/` 下的图片文件。已实测：含纯图版页的测试画册 → Agent 依次调 `semantic_search` → `read_page_image` → 准确答出《星夜》画面内容（旋转星空/柏树/村庄/厚涂笔触）。视觉客户端统一收敛到 `utils/llm.py::get_vision_llm`（`image_lookup` 同步复用）。
 3. **去重从"page_id/doc_id 塌缩"改为路线感知**：Stage 2 的朴素 page_id 去重会把同页多个文字 chunk 误杀——同页多 chunk 内容不同必须全保留；只抑制"同页整页图 vs 文字 chunk"的冗余命中。
 4. **eval 与 parity 校验锁定 semart 源**：`semantic_search` 融合用户 PDF 后，`eval/run_eval.py` 的 Recall@5 与 `verify_recall_parity.py` 一律 `sources=["semart"]`，保证 64.0% 基线口径不被开发库里的测试文档污染。
@@ -160,7 +160,7 @@ Agent 编排层（graph.py，路由基本不变）
 
 ---
 
-## 4. Stage 3：PDF 解析与入库 ✅（主体已完成，实施记录见 §1.5；MinerU 接入与 Qwen-VL 读图为遗留项）
+## 4. Stage 3：PDF 解析与入库 ✅（已完成，实施记录见 §1.5；MinerU 接入与 Qwen-VL 读图两项遗留均已于 2026-08-01 闭环）
 
 **最大风险 Stage，估 4–6 天。**
 
@@ -321,3 +321,4 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 15. **pdfminer 警告已压制在 ERROR**（`pdfplumber_fallback.py` 顶部）：中文字体缺 FontBBox 会逐条刷屏，别再全局调回 WARNING。
 16. **视觉/对话是两套模型**：glm-4.7（纯文本大脑，工具决策）与 qwen3.5-omni-plus（唯一"眼睛"）分工——需要看图的场景只能走视觉工具（`image_lookup analyze` / `read_page_image`），别指望对话模型读图；视觉客户端统一用 `utils/llm.py::get_vision_llm`。
 17. **`read_page_image` 只放行 `data/uploads/` 下的图片路径**（防路径穿越）：SemArt 图片的分析走 `image_lookup analyze=True`，不要混用。
+18. **MinerU quota 按整份文档页数计**：`mineru_parser.parse_pages` 是整份上传、按页过滤——`page_ranges` 参数的 page_idx 语义（原页码 vs 重排序）未实测前勿用（Phase 2 省 quota 优化点）；每日 2000 页高优额度，批量灌库前先算页数。Token 在 `.env` 的 `MINERU_TOKEN`，空着自动降级 pdfplumber。
