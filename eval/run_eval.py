@@ -87,7 +87,7 @@ def eval_intent() -> dict:
 # ══════════════════════════════════════════════════════════════════
 def eval_retrieval(n: int = 20, top_k: int = 5, seed: int = 42) -> dict:
     from src.data.loader import get_dataset
-    from src.tools.retrieval import semantic_search
+    from src.retrieval.hybrid import get_hybrid_retriever
 
     df = get_dataset().all
     # 只取描述够长的样本，query 才有信息量
@@ -95,7 +95,12 @@ def eval_retrieval(n: int = 20, top_k: int = 5, seed: int = 42) -> dict:
     random.seed(seed)
     idxs = random.sample(list(usable.index), min(n, len(usable)))
 
-    print(f"\n▶ 已知项检索评估（{len(idxs)} 条，Recall@{top_k}）...")
+    # Stage 3 起 semantic_search 融合全部数据源；本指标衡量 SemArt 向量索引
+    # 质量（基线 64.0%@n=25），必须锁定 semart 源，否则开发库里的用户 PDF
+    # 会污染指标。
+    hybrid = get_hybrid_retriever()
+
+    print(f"\n▶ 已知项检索评估（{len(idxs)} 条，Recall@{top_k}，source=semart）...")
     hits = 0
     rows = []
     for i, idx in enumerate(idxs, 1):
@@ -104,8 +109,10 @@ def eval_retrieval(n: int = 20, top_k: int = 5, seed: int = 42) -> dict:
         desc = str(row["DESCRIPTION"])
         # 用描述中段片段作 query，避免直接含标题
         query = desc[40:200]
-        results = semantic_search.invoke({"query": query, "top_k": top_k})
-        returned = [str(r.get("title", "")).strip().lower() for r in results]
+        results = hybrid.search(query, top_k=top_k, sources=["semart"])
+        returned = [
+            str(r.metadata.get("title", "")).strip().lower() for r in results
+        ]
         hit = gold_title in returned
         hits += hit
         rows.append({"gold": row["TITLE"], "hit": hit})

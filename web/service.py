@@ -198,7 +198,8 @@ def _parse_artworks_from_messages(messages: list) -> list[dict]:
             except (json.JSONDecodeError, TypeError):
                 continue
             for item in (data if isinstance(data, list) else [data]):
-                if isinstance(item, dict) and item.get("title"):
+                # 用户 PDF 片段带 source 键：不进配图卡片（无 SemArt 本地图）
+                if isinstance(item, dict) and item.get("title") and not item.get("source"):
                     artworks.append({
                         "title": item.get("title", ""), "author": item.get("author", ""),
                         "date": item.get("date", ""), "image_file": item.get("image_file", ""),
@@ -322,3 +323,48 @@ def preferences() -> dict:
 
 def reset_preferences() -> None:
     clear_preferences(WEB_USER_ID)
+
+
+# ── 文档上传与入库（Stage 3） ──
+def save_upload(filename: str, data: bytes, kb_id: str = "default") -> dict:
+    """把上传的 PDF 存到 uploads/{kb_id}/{doc_id}/document.pdf。"""
+    import uuid
+
+    from src.ingestion.pipeline import UPLOADS_DIR
+
+    doc_id = uuid.uuid4().hex[:12]
+    work_dir = UPLOADS_DIR / kb_id / doc_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = work_dir / "document.pdf"
+    pdf_path.write_bytes(data)
+    return {
+        "doc_id": doc_id,
+        "doc_name": filename,
+        "pdf_path": str(pdf_path),
+        "kb_id": kb_id,
+    }
+
+
+def ingest_document(doc_id: str, doc_name: str, pdf_path: str, kb_id: str) -> None:
+    """后台任务入口（BackgroundTasks）：跑入库流水线，异常已落 failed 状态。"""
+    from src.ingestion.pipeline import ingest_pdf
+
+    try:
+        ingest_pdf(pdf_path, doc_id, doc_name=doc_name, kb_id=kb_id)
+    except Exception:
+        logger.exception("ingest_document failed: %s", doc_id)
+
+
+def documents() -> list[dict]:
+    """文档库列表（新的在前）。"""
+    from src.ingestion.pipeline import list_doc_status
+
+    return sorted(
+        list_doc_status(), key=lambda d: d.get("started_at", ""), reverse=True
+    )
+
+
+def document_status(doc_id: str) -> dict:
+    from src.ingestion.pipeline import get_doc_status
+
+    return get_doc_status(doc_id) or {}

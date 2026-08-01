@@ -121,6 +121,8 @@ def _get_vision_llm() -> ChatOpenAI:
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         ),
         temperature=0.3,
+        request_timeout=180,  # 同 get_llm：防 DashScope 挂起连接无限等待
+        max_retries=2,
     )
 
 

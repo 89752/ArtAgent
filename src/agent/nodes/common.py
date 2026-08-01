@@ -48,11 +48,18 @@ def parse_json(text: str) -> Any:
 
 
 def collect_artworks(docs_by_group: dict[str, list[dict]], limit: int = 8) -> list[dict]:
-    """把分组检索结果扁平化、去重，供 UI 卡片展示。"""
+    """把分组检索结果扁平化、去重，供 UI 卡片展示。
+
+    只收画作（SemArt 结果无 source 键）；用户 PDF 片段带 source 键，
+    不进配图卡片（没有 SemArt 本地图可配），但仍保留在 retrieved_docs
+    里作为 LLM 证据。
+    """
     seen = set()
     flat = []
     for group in docs_by_group.values():
         for d in group:
+            if d.get("source"):  # 用户文档片段 → 跳过配图卡片
+                continue
             title = d.get("title", "")
             if not title or title in seen:
                 continue

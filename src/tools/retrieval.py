@@ -5,9 +5,11 @@ Tool 1: Artwork Retrieval Tools
   - semantic_search: 语义向量检索（用于模糊查询、主题检索）
   - exact_lookup:    精确字段查询（用于按画家/标题/年代精确查找）
 
-Stage 2 起 semantic_search 改走检索抽象层（HybridRetriever），Agent 工具层
-无感知升级——返回形状保持现状（title/author/date/.../description_snippet/
-relevance_score），web/service.py 的 ToolMessage 解析与各合成节点不受影响。
+Stage 2 起 semantic_search 改走检索抽象层（HybridRetriever）；Stage 3 起
+融合用户上传 PDF 的文字/整页图两路结果，按 source 分形状返回：
+  - semart → 画作字典（title/author/date/...，形状与 Stage 1 一致）
+  - user_pdf_text / user_pdf_image → 文档片段字典（带 doc_name/page/内容）
+web/service.py 的 ToolMessage 解析与各合成节点不受影响（画作形状未变）。
 数据过滤/格式化统一走 src/data/access.py 数据访问层。
 """
 
@@ -16,7 +18,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 
-from src.data.access import fuzzy_match, row_to_artwork_dict
+from src.data.access import EVIDENCE_SNIPPET_LEN, fuzzy_match, row_to_artwork_dict
 from src.retrieval.base import RetrievalResult
 
 load_dotenv()
@@ -25,10 +27,31 @@ DEFAULT_TOP_K = 5
 
 
 def _format_result(result: RetrievalResult) -> dict:
-    """格式化单条检索结果，供 Agent 消费（返回形状与 Stage 1 保持一致）。"""
-    artwork = row_to_artwork_dict(result.metadata)
-    artwork["relevance_score"] = round(result.score, 4)
-    return artwork
+    """格式化单条检索结果，供 Agent 消费（按数据源分形状）。"""
+    if result.source == "semart":
+        artwork = row_to_artwork_dict(result.metadata)
+        artwork["relevance_score"] = round(result.score, 4)
+        return artwork
+    # 用户文档（PDF）：title 形如"《画册》第3页"，供证据模板与溯源引用
+    meta = result.metadata
+    title = f"《{meta.get('doc_name') or '用户文档'}》第{meta.get('page', '?')}页"
+    if result.source == "user_pdf_image":
+        title += "（整页图）"
+    snippet = result.content
+    if len(snippet) > EVIDENCE_SNIPPET_LEN:
+        snippet = snippet[:EVIDENCE_SNIPPET_LEN] + "..."
+    return {
+        "source": result.source,
+        "title": title,
+        "doc_id": meta.get("doc_id", ""),
+        "doc_name": meta.get("doc_name", ""),
+        "page": meta.get("page", 0),
+        "block_type": meta.get("block_type", ""),
+        "content": result.content,
+        "description_snippet": snippet,
+        "image_path": result.image_refs[0] if result.image_refs else "",
+        "relevance_score": round(result.score, 4),
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -39,19 +62,22 @@ def _format_result(result: RetrievalResult) -> dict:
 @tool
 def semantic_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     """
-    通过自然语言语义检索相关画作。
+    通过自然语言语义检索相关画作与用户上传文档片段。
 
     适用场景：
       - 按主题检索（如"描绘爱情的文艺复兴画作"）
       - 按风格检索（如"印象派风景画"）
       - 按内容描述检索（如"使用金箔的画作"）
+      - 检索用户上传的 PDF 文档内容（结果 source 为 user_pdf_text/user_pdf_image，
+        标题形如《文档名》第N页，引用时请注明来自用户文档）
 
     Args:
         query: 自然语言检索查询
         top_k: 返回结果数量（默认5）
 
     Returns:
-        匹配画作列表，每项包含标题、画家、年代、技法、流派、图片路径、描述摘要
+        匹配结果列表：画作（标题、画家、年代、技法、流派、图片路径、描述摘要）
+        与用户文档片段（文档名、页码、内容）
     """
     from src.retrieval.hybrid import get_hybrid_retriever
 

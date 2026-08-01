@@ -352,6 +352,33 @@ body {
 .disclaimer { max-width: 760px; margin: 9px auto 0; text-align: center;
   font-size: 0.76rem; color: var(--ink-faint); letter-spacing: 0.02em; }
 
+/* ══════════════ 文档面板（Stage 3 上传入库） ══════════════ */
+.doc-panel { padding: 0 14px; }
+.btn-upload {
+  width: 100%; border: 1px dashed var(--line); border-radius: 12px; cursor: pointer;
+  background: transparent; color: var(--ink-soft); font-family: var(--serif-cn);
+  font-size: 0.92rem; padding: 9px 0; transition: all 0.3s var(--ease);
+}
+.btn-upload:hover { border-color: var(--gold); color: var(--gold-deep); background: #d9b87414; }
+.btn-upload .plus { margin-right: 4px; }
+.btn-upload:disabled { opacity: 0.5; cursor: default; }
+.doc-list { margin-top: 8px; max-height: 180px; overflow-y: auto; }
+.doc-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+  border-radius: 9px; font-size: 0.84rem; color: var(--ink-soft);
+}
+.doc-item:hover { background: #d9b87412; }
+.doc-name {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--serif-cn);
+}
+.doc-badge { flex-shrink: 0; font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; }
+.doc-badge.processing { background: #b98f4722; color: #8a6526; }
+.doc-badge.done { background: #4e7c4e22; color: #3c623c; }
+.doc-badge.failed { background: #a9444222; color: #8c3833; }
+.doc-meta { flex-shrink: 0; font-size: 0.72rem; color: var(--ink-faint); }
+.doc-empty { font-size: 0.8rem; color: var(--ink-faint); padding: 6px 8px; }
+
 /* ══════════════ 响应式 / 缩放兜底 ══════════════ */
 @media (max-width: 880px) {
   #sidebar { width: 240px; }

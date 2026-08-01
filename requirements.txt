@@ -21,6 +21,7 @@ Pillow>=10.0.0
 # Web UI —— 自研前端（FastAPI + SSE）
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9  # FastAPI 文件上传（Stage 3）
 
 # Web Search (场景4兜底，可选：无 TAVILY_API_KEY 时优雅降级)
 tavily-python>=0.5.0
@@ -29,3 +30,9 @@ tavily-python>=0.5.0
 python-dotenv>=1.0.0
 tqdm>=4.66.0
 pydantic>=2.0.0
+
+# PDF 解析（Stage 3：页级路由信号采集 / 整页渲染、文字路线兜底解析）
+PyMuPDF>=1.24.0
+pdfplumber>=0.11.0
+# 多模态 embedding（Stage 3 多模态路线：tongyi-embedding-vision-plus）
+dashscope>=1.24.0

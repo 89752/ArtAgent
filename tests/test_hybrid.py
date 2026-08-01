@@ -57,7 +57,7 @@ def test_rrf_head_of_second_source_can_outrank_tail_of_first():
 
 
 # ── page_id/doc_id 去重 ──────────────────────────────────────────
-def test_dedup_by_page_id_keeps_first():
+def test_dedup_image_dropped_when_text_same_page():
     hits = [
         _hit("page1-text", source="user_pdf_text", page_id="d1-p3"),
         _hit("page1-image", source="user_pdf_image", page_id="d1-p3"),
@@ -67,13 +67,26 @@ def test_dedup_by_page_id_keeps_first():
     assert [h.content for h in out] == ["page1-text", "page2-text"]
 
 
-def test_dedup_by_doc_id_when_no_page_id():
-    hits = [_hit("x", doc_id="d1"), _hit("y", doc_id="d1")]
-    assert len(_dedup(hits)) == 1
+def test_dedup_image_kept_when_no_text_sibling():
+    # 无文字 chunk 的同页，整页图作为兜底证据保留
+    hits = [
+        _hit("page1-image", source="user_pdf_image", page_id="d1-p3"),
+        _hit("page2-text", source="user_pdf_text", page_id="d1-p4"),
+    ]
+    assert len(_dedup(hits)) == 2
+
+
+def test_dedup_multiple_text_chunks_same_page_kept():
+    # 同页多个文字 chunk 内容不同、互不冲突，全部保留
+    hits = [
+        _hit("chunk-a", source="user_pdf_text", page_id="d1-p3"),
+        _hit("chunk-b", source="user_pdf_text", page_id="d1-p3"),
+    ]
+    assert len(_dedup(hits)) == 2
 
 
 def test_dedup_ignores_results_without_keys():
-    # SemArt 行无 page_id/doc_id：不参与去重，全部保留
+    # SemArt 行无 page_id：不参与去重，全部保留
     hits = [_hit("s1", title="T1"), _hit("s2", title="T2")]
     assert len(_dedup(hits)) == 2
 
@@ -122,10 +135,11 @@ def test_search_empty_when_no_sources():
 
 def test_search_dedup_across_sources():
     h = HybridRetriever()
-    h.register("user_pdf_text", _FakeRetriever("user_pdf_text", [_hit("text", page_id="d1-p3")]))
-    h.register("user_pdf_image", _FakeRetriever("user_pdf_image", [_hit("image", page_id="d1-p3")]))
+    h.register("user_pdf_text", _FakeRetriever("user_pdf_text", [_hit("text", source="user_pdf_text", page_id="d1-p3")]))
+    h.register("user_pdf_image", _FakeRetriever("user_pdf_image", [_hit("image", source="user_pdf_image", page_id="d1-p3")]))
     out = h.search("q", top_k=5)
-    assert len(out) == 1  # 双路线同页命中被去重
+    # 双路线同页命中：整页图被丢弃，只留文字 chunk
+    assert [x.content for x in out] == ["text"]
 
 
 if __name__ == "__main__":

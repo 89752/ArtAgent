@@ -9,6 +9,9 @@ ArtAgent Web —— FastAPI 后端（替代 Gradio）。
   · DELETE /api/sessions/{sid}   删除会话
   · GET  /api/bootstrap          启动数据（场景卡 + 偏好数）
   · DELETE /api/preferences      清空长期偏好
+  · POST /api/documents/upload   上传 PDF，后台解析入库（Stage 3）
+  · GET  /api/documents          文档库列表（解析状态/路由分布/chunk 数）
+  · GET  /api/documents/{doc_id} 单文档状态（前端轮询进度）
 
 样式与逻辑 100% 自控，彻底摆脱 Gradio 的 DOM/CSS 束缚。
 """
@@ -30,7 +33,7 @@ for _k in ("NO_PROXY", "no_proxy"):
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request, UploadFile
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -98,6 +101,50 @@ async def chat(request: Request):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"},
     )
+
+
+# ── 文档上传与入库（Stage 3） ──
+_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50MB
+
+
+@app.post("/api/documents/upload")
+async def upload_document(file: UploadFile, background: BackgroundTasks):
+    """上传 PDF：保存 → BackgroundTasks 后台解析入库 → 前端轮询进度。
+
+    Phase 1 即采用后台任务而非同步阻塞（MinerU/大图文档解析耗时以分钟计，
+    浏览器与 uvicorn 都会超时）。
+    """
+    filename = file.filename or "document.pdf"
+    if not filename.lower().endswith(".pdf"):
+        return JSONResponse(
+            {"ok": False, "error": "当前仅支持 PDF 文件"}, status_code=400
+        )
+    data = await file.read()
+    if not data:
+        return JSONResponse({"ok": False, "error": "空文件"}, status_code=400)
+    if len(data) > _UPLOAD_MAX_BYTES:
+        return JSONResponse(
+            {"ok": False, "error": "文件超过 50MB 限制"}, status_code=400
+        )
+
+    saved = service.save_upload(filename, data)
+    background.add_task(
+        service.ingest_document,
+        saved["doc_id"], saved["doc_name"], saved["pdf_path"], saved["kb_id"],
+    )
+    return JSONResponse(
+        {"ok": True, "doc_id": saved["doc_id"], "doc_name": saved["doc_name"]}
+    )
+
+
+@app.get("/api/documents")
+def get_documents():
+    return JSONResponse(service.documents())
+
+
+@app.get("/api/documents/{doc_id}")
+def get_document(doc_id: str):
+    return JSONResponse(service.document_status(doc_id))
 
 
 if __name__ == "__main__":

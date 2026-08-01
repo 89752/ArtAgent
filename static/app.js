@@ -223,7 +223,73 @@ dom.send.addEventListener("click", () => send(dom.msg.value));
 $("#btn-new").addEventListener("click", newSession);
 $("#btn-clear").addEventListener("click", clearSession);
 
+/* ── 文档上传与入库进度（Stage 3）── */
+const docDom = { upload: $("#btn-upload"), file: $("#file-input"), list: $("#doc-list") };
+let docPollTimer = null;
+
+async function loadDocuments() {
+  try {
+    const list = await (await fetch("/api/documents")).json();
+    renderDocuments(list);
+    // 有解析中的文档 → 3s 轮询；全部落定 → 停止
+    const pending = list.some((d) => d.status === "processing" || d.status === "pending");
+    if (pending && !docPollTimer) {
+      docPollTimer = setInterval(loadDocuments, 3000);
+    } else if (!pending && docPollTimer) {
+      clearInterval(docPollTimer); docPollTimer = null;
+    }
+  } catch (e) { console.error(e); }
+}
+
+function renderDocuments(list) {
+  docDom.list.innerHTML = "";
+  if (!list.length) {
+    const e = el("div", "doc-empty"); e.textContent = "暂无上传文档";
+    docDom.list.appendChild(e); return;
+  }
+  for (const d of list) {
+    const item = el("div", "doc-item");
+    const name = el("div", "doc-name");
+    name.textContent = d.doc_name || "未命名";
+    name.title = d.doc_name || "";
+    const badge = el("span", `doc-badge ${d.status || ""}`);
+    if (d.status === "done") {
+      badge.textContent = `${d.text_chunks || 0} 片段`;
+      badge.title = `${d.pages || 0} 页 · 路由 ${JSON.stringify(d.route_distribution || {})}`;
+    } else if (d.status === "failed") {
+      badge.textContent = "失败";
+      badge.title = d.error || "";
+    } else {
+      badge.textContent = "解析中…";
+    }
+    item.append(name, badge);
+    docDom.list.appendChild(item);
+  }
+}
+
+async function uploadPdf(file) {
+  if (!file) return;
+  docDom.upload.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch("/api/documents/upload", { method: "POST", body: fd });
+    const j = await res.json();
+    if (!j.ok) { alert(j.error || "上传失败"); return; }
+    loadDocuments();           // 立即出现"解析中"，随后轮询
+  } catch (e) {
+    alert("上传失败：" + e.message);
+  } finally {
+    docDom.upload.disabled = false;
+    docDom.file.value = "";
+  }
+}
+
+docDom.upload.addEventListener("click", () => docDom.file.click());
+docDom.file.addEventListener("change", () => uploadPdf(docDom.file.files[0]));
+
 /* ── 启动 ── */
 if (window.marked) marked.setOptions({ breaks: true, gfm: true });
 bootstrap();
 loadSessions();
+loadDocuments();

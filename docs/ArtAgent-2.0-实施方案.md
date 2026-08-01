@@ -31,9 +31,9 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 
 ---
 
-## 1. 当前状态：Stage 1 / Stage 2 已完成 ✅
+## 1. 当前状态：Stage 1 / 2 / 3 已完成 ✅
 
-> Stage 1：commits `a08bda1`、`1aaf48c`；Stage 2：见 §1.4。
+> Stage 1：commits `a08bda1`、`1aaf48c`；Stage 2：见 §1.4；Stage 3：见 §1.5。
 
 ### 1.1 已落地的改动（Stage 1）
 
@@ -43,10 +43,10 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 - **隐藏 bug 修复**：旧 `get_by_author` 整串 contains 匹配遇上 SemArt 的倒序 AUTHOR（`"GOGH, Vincent van"`）永远查空，`fuzzy_match` 分词匹配根治。
 - **清理**：faiss 残留索引（49MB）、pdf_loader.py 孤儿代码、README/requirements 的 Gradio 失效引用；`.gitignore` 的 `data/` 改为 `/data/`（原规则会把 `src/data/` 源码也忽略）。
 
-### 1.2 保留未动的遗产（Stage 3/6 处理）
+### 1.2 保留未动的遗产（Stage 6 处理）
 
-- `data/uploads/`：12 个旧会话目录 + 真实 PDF（用户上传过的文件，勿直接删，Stage 6 文档管理体系建立时迁移或经用户确认后清理）。
-- Chroma `user_pdfs` 集合：旧 chunk 策略的向量，Stage 3 新入库体系上线时废弃重建。
+- `data/uploads/`：旧会话目录 + 真实 PDF（用户上传过的文件，勿直接删，Stage 6 文档管理体系建立时迁移或经用户确认后清理）。新体系的上传落在 `data/uploads/{kb_id}/{doc_id}/`（与旧目录结构不同，不冲突）。
+- Chroma `user_pdfs` 集合：旧 chunk 策略的向量，新体系用 `user_pdf_text`/`user_pdf_images` 两个新 collection，`user_pdfs` 已无消费者，Stage 6 废弃。
 
 ### 1.3 测试约定（全 Stage 通用）
 
@@ -78,6 +78,38 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 - `tests/test_tools.py` / `test_pipelines.py` / `test_multi_tool.py` 全绿，四分支与多工具链行为不回归。
 - eval 意图分类 **98.0%**（49/50，基线 96.0%，波动在 ±2pp 内）。
 - eval Recall@5：**新旧路径 25 条 query 逐位对比 0 不一致**（`tests/verify_recall_parity.py`，标题/顺序/条数完全相同）；**n=25 复现基线恰为 64.0%**（16/25）。注意口径：基线 64.0% 来自 n=25，`run_eval.py` 默认 `--retrieval-n 20` 跑出 70.0%（14/20）是同一样本种子下的不同口径，非行为变化。`verify_recall_parity.py` 留作永久校验工具，Stage 3/4 改动检索层后应复跑。
+
+### 1.5 Stage 3 实施记录（PDF 解析与入库）✅
+
+**已落地的改动：**
+
+- **`src/ingestion/` 新包**：
+  - `page_classifier.py`：PyMuPDF 逐页信号采集（text_len/image_ratio/has_fonts/公式符号密度 + producer 文档级先验），确定性规则判定 text/multimodal/dual 路由，公式密集页标 `force_mineru`。阈值全部做成模块常量（起始值 200字符/30%/80%）。
+  - `blocks.py`：`Block`（解析器产出的语义块）/ `Chunk`（入库检索单元，page_id/chroma_id/metadata 统一）。
+  - `pdfplumber_fallback.py`：兜底解析器（全部产出 text 块，section 留空）；与 MinerU 约定同签名接口（`parse_pages(pdf_path, page_nos) -> list[Block]`），MinerU 接入时可直接替换。已压制 pdfminer 字体 warning 刷屏。
+  - `chunker.py`：按 block_type 分流——text 短段归并（同页同小节，下限 180）/ 长块滑窗拆分（上限 500、12% 重叠）/ table 整块 / equation 整块+前后 80 字符上下文 / image_caption 独立。
+  - `multimodal_indexer.py`：整页渲染（150 DPI PNG 落盘）→ DashScope `tongyi-embedding-vision-plus`（实测 1152 维，文本/图片同空间，文搜图跨模态成立）→ `user_pdf_images` collection。
+  - `pipeline.py`：编排（路由→两路入库→状态落盘）。公式密集页在 MinerU 不可用时退多模态整页图（不硬用 pdfplumber 解公式）。状态用 JSON 文件（`data/index/doc_status.json`）支撑轮询，**Stage 6 换 SQLite documents_store 时整体替换**。
+- **检索层扩展**：`userdoc_text_retriever.py`（BGE 空间，`user_pdf_text` collection）+ `userdoc_image_retriever.py`（DashScope 空间）实现 BaseRetriever 并注册进 `get_hybrid_retriever()`；`_dedup` 改为**路线感知**：同页文字 chunk 与整页图同时命中时丢弃整页图（文字证据更精确，且 LLM 尚不能读图），同页多个文字 chunk 全保留。`semantic_search` 按 source 分形状输出：semart→画作字典（不变）；PDF→`{source, title="《doc》第N页", content, description_snippet, page, ...}`。
+- **Web 链路**：`POST /api/documents/upload`（multipart，50MB 上限，`BackgroundTasks` 后台解析）+ `GET /api/documents[/{doc_id}]` 状态轮询；前端侧栏"我的文档"面板（上传按钮 + 状态徽标：解析中/N 片段/失败，3s 轮询）。新增依赖：`PyMuPDF/pdfplumber/dashscope/python-multipart`（已入 requirements）。
+- **UI 防污染**：`collect_artworks` 与 `_parse_artworks_from_messages` 跳过带 `source` 键的文档片段（不进配图卡片），但保留在 retrieved_docs 作 LLM 证据——`format_evidence_block` 输出形如 `- 《画册》第3页: 内容…`，溯源自然成立。
+
+**实施中的关键决策（对原方案的修订/细化）：**
+
+1. **MinerU 未接入（遗留项）**。MinerU v3 依赖重（~4GB 模型 + 可能拉入与 pyarrow 冲突的 `datasets` 包），本 Stage 先以 pdfplumber 兜底跑通全链路，解析器接口已按可插拔设计。**遗留：真实画册 PDF 验证 MinerU 短板后再决定接入策略**（开放问题 §12 素材仍缺）。
+2. **Qwen-VL 读图作答未接入（遗留项）**。整页图命中目前只以 `[整页图]` 占位+图片路径呈现给 LLM/前端；ToolMessage 多模态化（image_url block）改动 ReAct 循环，放到后续单独做。
+3. **去重从"page_id/doc_id 塌缩"改为路线感知**：Stage 2 的朴素 page_id 去重会把同页多个文字 chunk 误杀——同页多 chunk 内容不同必须全保留；只抑制"同页整页图 vs 文字 chunk"的冗余命中。
+4. **eval 与 parity 校验锁定 semart 源**：`semantic_search` 融合用户 PDF 后，`eval/run_eval.py` 的 Recall@5 与 `verify_recall_parity.py` 一律 `sources=["semart"]`，保证 64.0% 基线口径不被开发库里的测试文档污染。
+5. **测试文档级联清理已验证**：`collection.get(where={"doc_id": ...}) → delete(ids=...)` 两个 collection 各清一遍即可（Stage 6 删除按钮复用此流程）。沙箱环境下 `shutil.rmtree` 被 safe-delete 拦截，工作目录残留文件需用户手动清理（`data/uploads/default/`，已被 gitignore）。
+6. **DashScope 多模态查询成本**：`user_pdf_image` 检索每次查询调一次多模态编码 API；collection 为空时短路返回，零成本。
+
+**验收数据（2026-08-01）：**
+
+- 纯单测累计 **81 个全绿**：access 17 + structured_retriever 23 + hybrid 14 + page_classifier 15 + chunker 12。
+- 端到端（真实服务）：上传百度百科 RAG PDF（5页：4 文字路线+1 双路线 → 21 chunks + 1 整页图）与 Renaissance 测试 PDF（3页全双路线 → 6 chunks + 3 整页图），混合检索来源标签正确、双路线页面文字命中时整页图被抑制、提问回答正确声明"上传文档讨论的是 RAG 技术"并溯源。
+- 回归：`verify_recall_parity` 锁 semart 源 25 条 query 逐位 0 不一致；`test_pipelines` 5 问全过；`test_tools` 4 工具全过。
+- eval：意图分类跑到 38/38 全对（100%）后 **DashScope 免费额度耗尽（403 FreeTierOnly）中断**；Recall@5 已锁源验证 64.0% 持平（纯本地 BGE 无 API 依赖）。**待额度恢复后补跑 `eval/run_eval.py` 全程**（意图分类代码路径自 Stage 2（98.0%）起未改动）。
+- 事故与修复：全量回归曾两次在 `rec_filter` 节点卡死——DashScope 偶发连接挂起不返回（额度耗尽前兆），而 LLM 客户端未设超时导致无限等待。已在 `src/utils/llm.py` 与 `image_lookup.py` 加 `request_timeout=180` + `max_retries=2`（修复后同一调用 161s 正常完成）。**教训：任何外部 API 客户端必须显式设超时。**
 
 ---
 
@@ -127,7 +159,7 @@ Agent 编排层（graph.py，路由基本不变）
 
 ---
 
-## 4. Stage 3：PDF 解析与入库
+## 4. Stage 3：PDF 解析与入库 ✅（主体已完成，实施记录见 §1.5；MinerU 接入与 Qwen-VL 读图为遗留项）
 
 **最大风险 Stage，估 4–6 天。**
 
@@ -282,3 +314,7 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 9. **BGE/Chroma 单例已迁到 `src/retrieval/hybrid.py`**（`get_chroma_collection(name)` / `get_bge_embed_fn()`）；`tools/retrieval.py` 不再有 `_get_collection`/`_get_embedding_model`，Stage 3 新增 collection 直接调前者。
 10. **数据源注册表全懒加载**：`get_structured_retriever("semart")` 只注册 schema + loader，不读 CSV/不开 Chroma/不加载 BGE——能力开关可以挂在每次意图路由上零成本调用；但别在纯单测里访问 `.df` 或 `search`（会真加载 SemArt）。
 11. **跨源排序只信 RRF 排名**：各源 `score` 绝对值不可比（SemArt 是 1-cosine distance，未来 museum API 无相似度分数），HybridRetriever 融合时不得对 score 做跨源比较；`relevance_score=1-distance` 是 SemArt 专属形状，仅在其结果上成立。
+12. **eval/parity 必须锁 `sources=["semart"]`**：semantic_search 已融合用户 PDF，不锁源会被开发库里的测试文档污染指标（64.0% 基线只对 semart 源成立）。
+13. **带 `source` 键的是用户文档片段**：`collect_artworks`/`_parse_artworks_from_messages` 靠这个键跳过它们防止配图卡片污染；新增工具返回形状时注意画作字典**不要**带 source 键。
+14. **Chroma 用户 collection 用 `get_or_create`**：用户文档未上传前 collection 不存在，检索器对空集合短路返回（尤其 user_pdf_image，避免白调 DashScope 编码 API）。
+15. **pdfminer 警告已压制在 ERROR**（`pdfplumber_fallback.py` 顶部）：中文字体缺 FontBBox 会逐条刷屏，别再全局调回 WARNING。

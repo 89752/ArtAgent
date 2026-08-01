@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Noto+Serif+SC:wght@300;400;500;600&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="/static/app.css?v=4"/>
+  <link rel="stylesheet" href="/static/app.css?v=5"/>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -27,6 +27,15 @@
 
       <div class="side-heading"><span>历史对话</span></div>
       <nav id="history" class="history"></nav>
+
+      <div class="side-heading"><span>我的文档</span></div>
+      <div class="doc-panel">
+        <button id="btn-upload" class="btn-upload" title="上传 PDF 资料，助手检索时会引用">
+          <span class="plus">＋</span> 上传 PDF
+        </button>
+        <input type="file" id="file-input" accept=".pdf,application/pdf" hidden/>
+        <nav id="doc-list" class="doc-list"></nav>
+      </div>
 
       <div id="user-card" class="user-card">
         <div class="u-avatar">
@@ -92,6 +101,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

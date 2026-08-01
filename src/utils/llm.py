@@ -31,6 +31,11 @@ def get_llm(temperature: float = 0.7) -> ChatOpenAI:
         api_key=api_key,
         base_url=base_url,
         temperature=temperature,
+        # 必须有超时：DashScope 偶发"连接挂着但不返回"，无超时会让
+        # 整个 graph/服务无限等待（2026-08-01 全量回归两次卡死于此）。
+        # 180s 覆盖正常慢响应（最长见过 ~120s），重试消化瞬时抖动。
+        request_timeout=180,
+        max_retries=2,
     )
 
 

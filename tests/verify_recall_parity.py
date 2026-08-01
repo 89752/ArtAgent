@@ -28,10 +28,12 @@ def old_semantic_search(query: str, top_k: int = 5) -> list[str]:
 
 
 def new_semantic_search(query: str, top_k: int = 5) -> list[str]:
-    from src.tools.retrieval import semantic_search
+    """Stage 3 起 semantic_search 融合全部数据源；本校验只关心 SemArt
+    向量路径是否逐位不变，锁定 semart 源对比（用户 PDF 不参与）。"""
+    from src.retrieval.hybrid import get_hybrid_retriever
 
-    results = semantic_search.invoke({"query": query, "top_k": top_k})
-    return [r["title"] for r in results]
+    results = get_hybrid_retriever().search(query, top_k=top_k, sources=["semart"])
+    return [r.metadata.get("title", "") for r in results]
 
 
 def eval_queries(n: int, seed: int = 42) -> list[str]:

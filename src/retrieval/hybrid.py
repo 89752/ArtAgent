@@ -46,11 +46,20 @@ _RRF_K = 60
 
 @lru_cache(maxsize=8)
 def get_chroma_collection(name: str):
-    """按名加载持久化 Chroma collection（每名单例）。"""
+    """按名加载持久化 Chroma collection（每名单例，必须已存在）。"""
     import chromadb
 
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     return client.get_collection(name)
+
+
+@lru_cache(maxsize=8)
+def get_or_create_chroma_collection(name: str):
+    """按名获取或创建 Chroma collection（用户上传文档的 collection 用）。"""
+    import chromadb
+
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    return client.get_or_create_collection(name)
 
 
 @lru_cache(maxsize=1)
@@ -89,21 +98,25 @@ def _rrf_fuse(per_source: list[list[RetrievalResult]]) -> list[RetrievalResult]:
 
 
 def _dedup(hits: list[RetrievalResult]) -> list[RetrievalResult]:
-    """按 page_id/doc_id 去重：同键只保留排名最高的一条。
+    """双路线页面去重：同页文字 chunk 与整页图同时命中时，丢弃整页图。
 
-    Stage 3 双路线页面（文字 chunk + 整页图共享 page_id）依赖此逻辑避免
-    重复引用；metadata 中两键皆无的结果（SemArt 行）原样保留。
+    Stage 3 双路线页面（文字 chunk 与整页图共享 page_id）若被多路命中，
+    保留文字 chunk——它是更精确的证据，且当前 LLM 尚不能直接读图，
+    整页图仅在页面无可用文字层时作为兜底证据。同页的多个文字 chunk
+    内容不同、互不冲突，全部保留；无 page_id 的结果（SemArt 行）不参与。
     """
-    seen: set = set()
+    text_pages = {
+        h.metadata["page_id"]
+        for h in hits
+        if h.source == "user_pdf_text" and h.metadata.get("page_id")
+    }
     out: list[RetrievalResult] = []
     for h in hits:
-        key = h.metadata.get("page_id") or h.metadata.get("doc_id")
-        if key is None:
-            out.append(h)
+        if (
+            h.source == "user_pdf_image"
+            and h.metadata.get("page_id") in text_pages
+        ):
             continue
-        if key in seen:
-            continue
-        seen.add(key)
         out.append(h)
     return out
 
@@ -168,12 +181,17 @@ _hybrid: Optional[HybridRetriever] = None
 
 
 def get_hybrid_retriever() -> HybridRetriever:
-    """返回全局 HybridRetriever 单例（首次调用时注册 SemArt 数据源）。"""
+    """返回全局 HybridRetriever 单例（首次调用时注册全部已上线数据源）。"""
     global _hybrid
     if _hybrid is None:
         from src.retrieval.structured_retriever import get_structured_retriever
+        from src.retrieval.userdoc_image_retriever import UserDocImageRetriever
+        from src.retrieval.userdoc_text_retriever import UserDocTextRetriever
 
         hybrid = HybridRetriever()
         hybrid.register("semart", get_structured_retriever("semart"))
+        # Stage 3：用户 PDF 两路检索器（collection 为空时自动返回空列表）
+        hybrid.register("user_pdf_text", UserDocTextRetriever())
+        hybrid.register("user_pdf_image", UserDocImageRetriever())
         _hybrid = hybrid
     return _hybrid
