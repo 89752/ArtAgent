@@ -40,6 +40,7 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from web import service
+from src.data import documents_store
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -47,7 +48,8 @@ STATIC_DIR = BASE_DIR / "static"
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """启动时恢复已确认的表格数据源（注册表/Hybrid 是内存单例，Stage 5）。"""
+    """启动时初始化 SQLite documents 表并迁移旧 JSON；然后恢复已确认表格数据源。"""
+    documents_store.init_db()
     service.restore_tables()
     yield
 
@@ -202,6 +204,18 @@ def get_documents():
 @app.get("/api/documents/{doc_id}")
 def get_document(doc_id: str):
     return JSONResponse(service.document_status(doc_id))
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str):
+    """删除文档并级联清理向量/文件/状态（Stage 6）。"""
+    try:
+        result = service.delete_document(doc_id)
+    except KeyError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "result": result})
 
 
 if __name__ == "__main__":

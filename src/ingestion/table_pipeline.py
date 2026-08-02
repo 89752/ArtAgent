@@ -70,10 +70,13 @@ def ingest_table(
     """
     t0 = time.time()
     doc_name = doc_name or Path(table_path).name
+    path_obj = Path(table_path)
+    file_size = path_obj.stat().st_size if path_obj.exists() else None
     update_doc_status(
         doc_id,
         doc_name=doc_name, kb_id=kb_id, kind="table",
         status="processing", started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        file_path=str(table_path), file_size=file_size,
     )
     try:
         loaded = load_table(table_path)
@@ -81,6 +84,7 @@ def ingest_table(
         summary = {
             "kind": "table",
             "status": "pending_confirm",
+            "elapsed_sec": round(time.time() - t0, 1),
             "table_path": str(table_path),
             "dataset_id": table_dataset_id(doc_id),
             "rows": len(loaded.df),
@@ -88,10 +92,16 @@ def ingest_table(
             "sheet_name": loaded.sheet_name,
             "columns": [str(c) for c in loaded.df.columns],
             "proposed_schema": inferred.to_dict(),
-            "elapsed_sec": round(time.time() - t0, 1),
         }
-        update_doc_status(doc_id, **summary)
-        log_event(logger, "table_ingest", doc_id=doc_id, rows=summary["rows"],
+        # Stage 6：kind-specific 字段存 metadata；返回仍保持旧扁平形状兼容
+        update_doc_status(doc_id, metadata={k: summary[k] for k in (
+            "table_path", "dataset_id", "rows", "cols", "sheet_name",
+            "columns", "proposed_schema",
+        )}, **{k: v for k, v in summary.items() if k not in (
+            "table_path", "dataset_id", "rows", "cols", "sheet_name",
+            "columns", "proposed_schema",
+        )})
+        log_event(logger, "table_ingest", doc_id=doc_id, rows=len(loaded.df),
                   sheet=loaded.sheet_name)
         return {"doc_id": doc_id, **summary}
     except Exception as e:  # noqa: BLE001 — 失败落状态供前端展示
@@ -155,16 +165,18 @@ def confirm_table_schema(doc_id: str, roles: dict) -> dict:
 
     confirmed = {
         "status": "active",
-        "confirmed_schema": {
-            "entity_col": schema.entity_col,
-            "group_axis_col": schema.group_axis_col,
-            "description_col": schema.description_col,
-            "image_col": schema.image_col,
-            "display_name": display_name,
+        "metadata": {
+            "confirmed_schema": {
+                "entity_col": schema.entity_col,
+                "group_axis_col": schema.group_axis_col,
+                "description_col": schema.description_col,
+                "image_col": schema.image_col,
+                "display_name": display_name,
+            },
+            "display_name": display_name or st.get("doc_name") or dataset_id,
+            "supports_timeline": schema.supports_timeline,
+            "supports_recommendation": schema.supports_recommendation,
         },
-        "display_name": display_name or st.get("doc_name") or dataset_id,
-        "supports_timeline": schema.supports_timeline,
-        "supports_recommendation": schema.supports_recommendation,
     }
     update_doc_status(doc_id, **confirmed)
     log_event(logger, "table_confirm", doc_id=doc_id, dataset_id=dataset_id,

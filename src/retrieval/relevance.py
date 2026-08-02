@@ -48,6 +48,11 @@ def _candidate_line(i: int, item: dict) -> str:
     return f"[{i}] {title}: {snippet[:200]}"
 
 
+def _is_image_result(item: dict) -> bool:
+    """整页图结果不能靠文本 snippet 判断相关性，需透传给 read_page_image。"""
+    return item.get("source") == "user_pdf_image"
+
+
 def llm_relevance_filter(
     query: str,
     items: list[dict],
@@ -66,14 +71,23 @@ def llm_relevance_filter(
     max_candidates: 超过此数的尾部候选不参与过滤、原样透传（控制调用体量）。
     llm: 可注入的模型实例（测试用）；None 时用 get_deterministic_llm()。
     返回：原列表的子序列（保持原相对顺序）；未过滤/失败时返回原列表本身。
+
+    注意：source="user_pdf_image" 的整页图结果只能由视觉模型真正读取内容，
+    文本 snippet 只是占位标题，因此不参与 LLM 相关性判断、始终保留。
     """
     if not _filter_enabled(enabled):
         return items
-    if len(items) <= min_keep:
-        return items  # 无可过滤，省一次 LLM 调用
 
-    candidates = items[:max_candidates]
-    rest = items[max_candidates:]
+    # 整页图结果始终保留，只对其余候选做文本相关性过滤
+    image_indices = {i for i, it in enumerate(items) if _is_image_result(it)}
+    text_indices = [i for i in range(len(items)) if i not in image_indices]
+    text_items = [items[i] for i in text_indices]
+
+    if len(text_items) <= min_keep:
+        return items  # 文本候选无可过滤，省一次 LLM 调用
+
+    candidates = text_items[:max_candidates]
+    rest = text_items[max_candidates:]
     numbered = "\n".join(_candidate_line(i, c) for i, c in enumerate(candidates))
     prompt = RELEVANCE_FILTER_PROMPT.format(query=query, candidates=numbered)
 
@@ -95,20 +109,26 @@ def llm_relevance_filter(
         logger.warning("[relevance] 输出非数组，保留原列表")
         return items
 
-    keep = {
+    keep_in_text = {
         i
         for i in parsed
         if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(candidates)
     }
     # 兜底：LLM 过度过滤（全否定/有效编号不足）时按原序补足 min_keep
     for i in range(len(candidates)):
-        if len(keep) >= min_keep:
+        if len(keep_in_text) >= min_keep:
             break
-        keep.add(i)
+        keep_in_text.add(i)
 
-    filtered = [c for i, c in enumerate(candidates) if i in keep]
+    # 把在 text_items 中的下标映射回原列表下标
+    kept_original_indices = {text_indices[i] for i in keep_in_text}
+    # 尾部未参与过滤的文本候选原样保留
+    kept_original_indices.update(text_indices[max_candidates:])
+
+    result = [items[i] for i in range(len(items)) if i in image_indices or i in kept_original_indices]
+
     log_event(
         logger, "relevance_filter",
-        in_count=len(items), kept=len(filtered), dropped=len(items) - len(filtered) - len(rest),
+        in_count=len(items), kept=len(result), dropped=len(items) - len(result),
     )
-    return filtered + rest
+    return result

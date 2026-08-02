@@ -1,32 +1,26 @@
 # ArtAgent 评估结果
 
-> 生成时间：2026-08-01 16:52:26
+> 生成时间：2026-08-02 11:03:23
 
 ## 1. 意图分类
 
-**准确率 94.0%**（47/50） · Macro-F1 0.945
+**准确率 100.0%**（50/50） · Macro-F1 1.000
 
 | 意图 | Precision | Recall | F1 | 样本数 |
 |---|---|---|---|---|
-| comparison | 0.92 | 1.00 | 0.96 | 11 |
-| timeline | 1.00 | 0.83 | 0.91 | 12 |
+| comparison | 1.00 | 1.00 | 1.00 | 11 |
+| timeline | 1.00 | 1.00 | 1.00 | 12 |
 | recommendation | 1.00 | 1.00 | 1.00 | 10 |
-| general | 0.89 | 0.94 | 0.91 | 17 |
+| general | 1.00 | 1.00 | 1.00 | 17 |
 
 **混淆矩阵**（行=真实，列=预测）
 
 | gold \ pred | comparison | timeline | recommendation | general |
 |---|---|---|---|---|
 | **comparison** | 11 | 0 | 0 | 0 |
-| **timeline** | 0 | 10 | 0 | 2 |
+| **timeline** | 0 | 12 | 0 | 0 |
 | **recommendation** | 0 | 0 | 10 | 0 |
-| **general** | 1 | 0 | 0 | 16 |
-
-**误分类样本**
-
-- `timeline` → `general`：莫奈晚年为什么画风变得更抽象
-- `timeline` → `general`：我想了解印象派是怎么发展起来的
-- `general` → `comparison`：喜欢梵高的人一般也喜欢莫奈吗
+| **general** | 0 | 0 | 0 | 17 |
 
 ## 2. 已知项检索
 

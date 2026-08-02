@@ -271,7 +271,15 @@ function renderDocuments(list) {
         badge.textContent = "解析中…";
       }
     } else if (d.status === "done") {
-      badge.textContent = `${d.text_chunks || 0} 片段`;
+      const chunks = d.text_chunks || 0;
+      const imgs = d.image_pages || 0;
+      if (chunks && imgs) {
+        badge.textContent = `${chunks} 片段 · ${imgs} 图`;
+      } else if (imgs) {
+        badge.textContent = `${imgs} 整页图`;
+      } else {
+        badge.textContent = `${chunks} 片段`;
+      }
       badge.title = `${d.pages || 0} 页 · 路由 ${JSON.stringify(d.route_distribution || {})}`;
     } else if (d.status === "failed") {
       badge.textContent = "失败";
@@ -279,8 +287,33 @@ function renderDocuments(list) {
     } else {
       badge.textContent = "解析中…";
     }
-    item.append(name, badge);
+
+    const actions = el("div", "doc-actions");
+    // 解析中时不允许删除，避免后台任务与清理冲突
+    if (d.status !== "processing") {
+      const delBtn = el("button", "doc-delete");
+      delBtn.textContent = "×";
+      delBtn.title = "删除文档及关联向量";
+      delBtn.onclick = () => deleteDocument(d);
+      actions.appendChild(delBtn);
+    }
+
+    item.append(name, badge, actions);
     docDom.list.appendChild(item);
+  }
+}
+
+async function deleteDocument(d) {
+  const label = d.doc_name || "未命名文档";
+  if (!confirm(`确定删除「${label}」？\n将同时删除上传文件和索引向量，不可恢复。`)) return;
+  try {
+    const res = await fetch(`/api/documents/${d.doc_id}`, { method: "DELETE" });
+    const j = await res.json();
+    if (!j.ok) { alert(j.error || "删除失败"); return; }
+    loadDocuments();
+    loadDatasets();            // 表格数据源可能随之移除
+  } catch (e) {
+    alert("删除失败：" + e.message);
   }
 }
 

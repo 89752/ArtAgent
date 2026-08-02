@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 
+from src.data import documents_store
 from src.ingestion import pipeline as pipeline_mod
 from src.ingestion import table_pipeline as tp
 from src.ingestion.schema_inference import infer_table_schema
@@ -67,13 +68,17 @@ def _cleanup(*paths: Path):
 
 
 def _isolate_state(tmp: Path):
-    """把 doc_status.json 与 uploads 指到临时目录，返回恢复函数。"""
-    old_status = pipeline_mod._STATUS_FILE
+    """把 SQLite 状态库与 uploads 指到临时目录，返回恢复函数。"""
+    old_db = documents_store.DB_PATH
     old_uploads = tp.UPLOADS_DIR
-    pipeline_mod._STATUS_FILE = tmp / "doc_status.json"
+    db_path = tmp / "documents.db"
+    documents_store._reset_for_tests(db_path)
+    documents_store.init_db()
     tp.UPLOADS_DIR = tmp / "uploads"
-    return lambda: (setattr(pipeline_mod, "_STATUS_FILE", old_status),
-                    setattr(tp, "UPLOADS_DIR", old_uploads))
+    return lambda: (
+        setattr(documents_store, "DB_PATH", old_db),
+        setattr(tp, "UPLOADS_DIR", old_uploads),
+    )
 
 
 def _fresh_hybrid():
@@ -373,5 +378,5 @@ if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
         fn()
-        print(f"  ✅ {fn.__name__}")
-    print(f"\n🎉 table_ingest 全部 {len(fns)} 个单测通过！")
+        print(f"  [OK] {fn.__name__}")
+    print(f"\n[PASS] table_ingest 全部 {len(fns)} 个单测通过！")

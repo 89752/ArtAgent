@@ -97,47 +97,64 @@ def test_success_parses_and_sorts_by_score():
     }
     rec = _PostRecorder(payload)
     old = _patch(reranker_mod.requests, "post", rec)
+    old_primary = reranker_mod.RERANK_MODEL
+    reranker_mod.RERANK_MODEL = "qwen3-rerank"
     try:
         ranked = reranker_mod.rerank("q", ["a", "b", "c"])
         assert ranked == [(0, 0.9), (1, 0.7), (2, 0.5)]
     finally:
         _patch(reranker_mod.requests, "post", old)
+        reranker_mod.RERANK_MODEL = old_primary
 
 
 def test_top_n_capped_by_document_count():
     rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 1.0}]})
     old = _patch(reranker_mod.requests, "post", rec)
+    old_primary = reranker_mod.RERANK_MODEL
+    reranker_mod.RERANK_MODEL = "qwen3-rerank"
     try:
         reranker_mod.rerank("q", ["a", "b"], top_n=10)
         assert rec.calls[0]["json"]["top_n"] == 2  # top_n 不得超过候选数
     finally:
         _patch(reranker_mod.requests, "post", old)
+        reranker_mod.RERANK_MODEL = old_primary
 
 
 def test_long_documents_truncated_to_char_limit():
     rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 1.0}]})
     old = _patch(reranker_mod.requests, "post", rec)
+    old_primary = reranker_mod.RERANK_MODEL
+    reranker_mod.RERANK_MODEL = "qwen3-rerank"
     try:
         reranker_mod.rerank("q", ["x" * (reranker_mod.DOC_CHAR_LIMIT + 500)])
         assert len(rec.calls[0]["json"]["documents"][0]) == reranker_mod.DOC_CHAR_LIMIT
     finally:
         _patch(reranker_mod.requests, "post", old)
+        reranker_mod.RERANK_MODEL = old_primary
 
 
 def test_instruct_passed_through():
     rec = _PostRecorder({"results": []})
     old = _patch(reranker_mod.requests, "post", rec)
+    old_primary = reranker_mod.RERANK_MODEL
+    # instruct 只在兼容端点报文中传递，需避开原生模型
+    reranker_mod.RERANK_MODEL = "qwen3-rerank"
     try:
         reranker_mod.rerank("q", ["a"], instruct="按艺术史相关性排序")
         assert rec.calls[0]["json"]["instruct"] == "按艺术史相关性排序"
     finally:
         _patch(reranker_mod.requests, "post", old)
+        reranker_mod.RERANK_MODEL = old_primary
 
 
 def test_http_error_retries_then_returns_none():
     rec = _PostRecorder(error=RuntimeError("boom"))
     old_post = _patch(reranker_mod.requests, "post", rec)
     old_sleep = _patch(reranker_mod.time, "sleep", lambda s: None)
+    old_primary = reranker_mod.RERANK_MODEL
+    old_fallback = reranker_mod.RERANK_FALLBACK_MODEL
+    reranker_mod.RERANK_MODEL = "primary-model"
+    reranker_mod.RERANK_FALLBACK_MODEL = "fallback-model"
     try:
         assert reranker_mod.rerank("q", ["a"]) is None
         # 主模型（首次+MAX_RETRIES 重试）+ 后备模型（同次数），双失败才降级
@@ -145,6 +162,8 @@ def test_http_error_retries_then_returns_none():
     finally:
         _patch(reranker_mod.requests, "post", old_post)
         _patch(reranker_mod.time, "sleep", old_sleep)
+        reranker_mod.RERANK_MODEL = old_primary
+        reranker_mod.RERANK_FALLBACK_MODEL = old_fallback
 
 
 # ── 双端点与主备接力（2026-08-01：gte-rerank-v2 实测未下线）─────────

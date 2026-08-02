@@ -380,8 +380,20 @@ body {
 .doc-badge.active { background: #4e7c4e22; color: #3c623c; }
 .doc-badge.actionable { cursor: pointer; border: 1px dashed #8a6526; }
 .doc-badge.actionable:hover { background: #b98f4740; }
+.doc-actions { flex-shrink: 0; display: flex; align-items: center; }
+.doc-delete {
+  width: 20px; height: 20px; line-height: 18px; padding: 0;
+  border: none; border-radius: 50%; background: transparent;
+  color: var(--ink-faint); font-size: 1rem; cursor: pointer;
+  transition: all 0.2s var(--ease);
+}
+.doc-delete:hover { background: #a9444222; color: #8c3833; }
 .doc-meta { flex-shrink: 0; font-size: 0.72rem; color: var(--ink-faint); }
 .doc-empty { font-size: 0.8rem; color: var(--ink-faint); padding: 6px 8px; }
+
+/* ══════════════ 全局隐藏滚动条（保留滚动功能） ══════════════ */
+* { scrollbar-width: none; -ms-overflow-style: none; }
+*::-webkit-scrollbar { width: 0; height: 0; background: transparent; }
 
 /* ══════════════ 数据源切换器（Stage 5） ══════════════ */
 .dataset-panel { padding: 0 14px; }

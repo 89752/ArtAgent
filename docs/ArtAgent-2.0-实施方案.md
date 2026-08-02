@@ -1,6 +1,6 @@
 # ArtAgent 2.0 实施方案（完善版 · 开发用）
 
-> 本文档 = 原《ArtAgent-2.0-设计方案》+ 2026-07-31 代码级评估的 8 项补充 + Stage 1/2 实施记录。
+> 本文档 = 原《ArtAgent-2.0-设计方案》+ 2026-07-31 代码级评估的 8 项补充 + Stage 1–6 实施记录。
 > 是 Stage 3–7 后续开发的**唯一事实来源**；每个新会话开工前先读「§1 当前状态」和「§13 陷阱速查」。
 >
 > 原方案中的架构判断（三层结构、确定性编排 vs 真工具调用、collection 级隔离不做物理合并、
@@ -31,7 +31,7 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 
 ---
 
-## 1. 当前状态：Stage 1 / 2 / 3 / 4 / 5 已完成 ✅
+## 1. 当前状态：Stage 1 / 2 / 3 / 4 / 5 / 6 已完成 ✅
 
 > Stage 1：commits `a08bda1`、`1aaf48c`；Stage 2：见 §1.4；Stage 3：见 §1.5；Stage 4：见 §1.6；Stage 5：见 §1.7。
 
@@ -165,6 +165,31 @@ $PY eval/run_eval.py           # 意图分类 + Recall@5（基线 96.0% / 64.0%�
 - 回归：parity（关精排）25 条逐位 0 不一致、复现 64.0%；test_tools/test_multi_tool/test_pipelines 全绿（日志 `logs/stage5_regression.log`）；eval 意图分类 94.0%（47/50，基线 96.0% 的 ±2pp 容差内达标）、Recall@5 76.0% 持平。
 - **精排额度事故与双端点接力（当日插曲）**：回归跑到一半 qwen3-rerank 免费额度耗尽（17:29 起连续 403）。当日已先知先觉把 `reranker.py` 重写为**双端点主备接力**——按模型名自动选端点（gte-rerank-v2/qwen3-vl-rerank 走原生 `services/rerank` 报文；其余走兼容报文），`RERANK_MODEL`/`RERANK_FALLBACK_MODEL` env 槽位，主模型重试耗尽自动接力后备、双失败才降级粗排；事故发生时**热备 gte-rerank-v2 一次调用即接管**，回归全程无感知。事后实测 gte-rerank-v2 主力口径 **Recall@5 = 76.0%（19/25），与 qwen3-rerank 逐条一致**——满额 100 万免费额度，`.env` 已切其为新主力（跳过死模型重试税）。**订正旧记载："gte-rerank-v2 已下线"为误传**（混淆了 gte-rerank v1 的 2026-05-30 停服）；兼容端点仅 qwen3-rerank 一个文本精排，vl-rerank 在其上 404 属正常（走原生端点）。按量付费价约 0.5 元/百万 token（国际站 $0.1/1M）。
 
+### 1.8 Stage 6 实施记录（文档/数据源生命周期管理）✅
+
+**已落地的改动：**
+
+- **`src/data/documents_store.py`（SQLite `documents` 表）**：替换 Stage 3/5 的 JSON 状态文件（`data/index/doc_status.json`），统一持久化 doc_id/kb_id/kind/doc_name/status/started_at/finished_at/file_path/file_size/pages/text_chunks/image_pages/elapsed_sec/error，以及 kind-specific 的 metadata JSON（PDF 路由分布、表格 schema/行列数/显示名/能力开关）。对外 `get_document` / `list_documents` 仍返回与旧 `list_doc_status` 兼容的扁平 dict，前端与管线代码改动最小化。启动时 `init_db()` 自动建表；若表为空且旧 JSON 存在，则一次性迁移并重命名原文件为 `.json.migrated`。
+- **状态存储切换**：`src/ingestion/pipeline.py` 与 `table_pipeline.py` 的 `update_doc_status` / `get_doc_status` / `list_doc_status` 全部改走 `documents_store`，不再直接读写 JSON；`api.py` lifespan 先 `documents_store.init_db()` 再 `service.restore_tables()`。
+- **级联删除**：`web/service.py::delete_document` 统一处理 PDF/表格删除——PDF 调用 `pipeline.delete_pdf_vectors` 清理 `user_pdf_text` 与 `user_pdf_images` 两个 collection 中该 `doc_id` 的全部向量；表格调用 `table_pipeline.unregister_table` 从 `_REGISTRY` 与 HybridRetriever 移除，若其为当前生效数据源则复位为 `semart`；随后 `shutil.rmtree` 删除上传文件目录，最后删除 SQLite 记录。`DELETE /api/documents/{doc_id}` 已接入。
+- **文件库列表 UI**：侧栏「我的文档」面板渲染所有文档（文件名/状态/页数/chunk 数/路由分布/失败原因），解析中的文档显示进度徽标与轮询，已落定文档显示「×」删除按钮；删除前二次确认并提示「将同时删除上传文件和索引向量」。
+- **并发与过滤加固（Stage 6 验证期间顺手修复）**：`hybrid.py` 的 Chroma PersistentClient 改为**线程本地单例**——FastAPI BackgroundTasks（线程池）与主线程共用一份缓存 Collection 在 Windows 下会触发 "attempt to write a readonly database"（`data/uploads/default/threadpool-test-001` 即当时的复现目录）；`relevance.py::llm_relevance_filter` 对 `source="user_pdf_image"` 的整页图结果**一律保留不送文本过滤**——其文本 snippet 只是占位标题，LLM 过滤会误杀 `read_page_image` 的唯一入口，与 Stage 4 精排"整页图保持原槽位"同纪律。两者各配 1 条纯单测。
+
+**实施中的关键决策（后续 Stage 需知晓）：**
+
+1. **一上传即落库**：`service.save_upload` 在文件写入磁盘后立即 `documents_store.add_document(kind=..., status='processing')`，后台解析任务再调用 `update_doc_status` 补充结果；前端轮询 `/api/documents` 时即使解析极快也能看到记录，避免 JSON 时代「先写文件后写状态」的竞态空窗。
+2. **metadata 合并而非覆盖**：`update_document(metadata={...})` 会与现有 metadata 做 dict.update，表格确认时追加 `confirmed_schema` / `supports_*` 等字段不会冲掉之前的 `proposed_schema` / `rows` / `cols`。
+3. **删除时禁止处理中状态由 UI 兜底**：后端 `delete_document` 不硬拦 `processing` 文档，因为后台任务异常时用户需要能清理脏记录；但 UI 在解析中时禁用删除按钮，避免正常流程冲突。
+4. **旧 JSON 迁移是冷切换**：新库首次启动自动迁移旧状态，迁移成功后重命名原文件；若 `.migrated` 已存在则先删除再重命名，避免 WinError 183 警告。
+5. **未做独立文件库页面**：按 §9「Web UI 拆进各 Stage」原则，Stage 6 的最小能力落在侧栏面板而非新增页面；后续 Phase 2 如需「解析详情页/逐页路由分布」再扩展。
+
+**验收数据（2026-08-02，glm-4.7）：**
+
+- 纯单测累计 **167 个全绿**：+`test_documents_store` 8（SQLite CRUD / 旧 JSON 迁移 / metadata 合并 / 状态形状兼容）、+`test_stage6_lifecycle` 3（PDF 级联删向量+文件+记录 / 表格注销+复位 active / 删除不存在文档抛 KeyError）。
+- 文档库 UI 手动验证：上传 PDF → 侧栏显示解析中 → 完成后显示 chunk 数与整页图数 → 删除二次确认 → 刷新后文档消失；上传表格 → 待确认 schema → 确认激活 → 删除后数据源切换器自动移除该项。
+- 全量回归（commit 前补跑完成）：`test_tools` / `test_pipelines`（四分支 5 问）/ `test_multi_tool`（3 场景）全绿；eval 意图分类 **100.0%**（50/50，≥94% 达标）、Recall@5 n=25 口径 **76.0%**（19/25）与 Stage 4/5 精排基线逐位持平（同日 n=20 口径为 75.0%，仍是两个口径别混）。注意：回归中途 glm-4.7 免费额度耗尽（403 FreeTierOnly），`.env` 的 `DEEPSEEK_MODEL` 已换为 deepseek-v4-flash，后续场景与 eval 均在该模型下通过——模型槽位口径随 `.env` 为准。
+- `test_tools` 的 `semantic_search` 断言按 source 形状兼容化：开发库含用户真实 PDF（莫奈手稿 16 页全图版）时 top-k 会混入 `user_pdf_image` 整页图结果（无 `author` 键），画作形状断言只针对 semart 结果（与 §13 #12 锁 semart 源同理由）。
+
 ---
 
 ## 2. 目标架构（三层）
@@ -285,7 +310,7 @@ PyMuPDF 逐页采集信号（**先把 `PyMuPDF` 加回 requirements.txt**，旧 
 
 ---
 
-## 7. Stage 6：文档/数据源生命周期管理（Phase 1 基线，非可选）
+## 7. Stage 6：文档/数据源生命周期管理 ✅（已完成，实施记录见 §1.8）
 
 1. **`src/data/documents_store.py`（SQLite `documents` 表）**：上传时间/大小/原始文件名/页数/路由分布/解析状态(pending/processing/done/failed)/耗时/chunk 数。Stage 3/5 的解析元数据在此落库。路由分布与 chunk 数是排查"为什么检索不到"的第一手诊断信息。
 2. **文件库列表页（最小能力）**：列表（文件名/时间/大小/状态/页数）+ **删除**。

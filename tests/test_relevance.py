@@ -110,6 +110,22 @@ def test_beyond_max_candidates_passes_through():
     assert [d["title"] for d in out] == ["Work 0", "Work 3", "Work 4"]
 
 
+def test_user_pdf_image_always_preserved():
+    """整页图结果文本 snippet 只是占位标题，不能靠 LLM 判断相关性，必须保留。"""
+    items = [
+        {"title": "《手稿》第1页（整页图）", "description_snippet": "[整页图]", "source": "user_pdf_image"},
+        {"title": "《手册》第2页（整页图）", "description_snippet": "[整页图]", "source": "user_pdf_image"},
+        {"title": "相关画作", "description_snippet": "一幅风景画"},
+        {"title": "无关画作", "description_snippet": "另一幅静物画"},
+    ]
+    # LLM 只选文本候选中的 [3]，但整页图必须原样保留
+    out = llm_relevance_filter("手稿内容", items, min_keep=1, llm=_FakeLLM("[3]"))
+    sources = [d.get("source") for d in out]
+    assert sources.count("user_pdf_image") == 2
+    assert out[0]["source"] == "user_pdf_image"
+    assert out[1]["source"] == "user_pdf_image"
+
+
 # ── 降级 ─────────────────────────────────────────────────────────
 def test_invalid_json_returns_original():
     items = _items()

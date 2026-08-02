@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import html
 import base64
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -340,6 +341,7 @@ def save_upload(filename: str, data: bytes, kb_id: str = "default") -> dict:
     """
     import uuid
 
+    from src.data import documents_store
     from src.ingestion.pipeline import UPLOADS_DIR
     from src.ingestion.table_loader import classify_upload
 
@@ -352,6 +354,19 @@ def save_upload(filename: str, data: bytes, kb_id: str = "default") -> dict:
     else:
         file_path = work_dir / "document.pdf"
     file_path.write_bytes(data)
+
+    # Stage 6：一上传就落库基础记录，后续后台任务补充解析结果
+    documents_store.add_document(
+        doc_id=doc_id,
+        kind=kind or "pdf",
+        doc_name=filename,
+        kb_id=kb_id,
+        status="processing",
+        file_path=str(file_path),
+        file_size=len(data),
+        started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
     return {
         "doc_id": doc_id,
         "doc_name": filename,
@@ -425,14 +440,57 @@ def restore_tables() -> int:
 
 def documents() -> list[dict]:
     """文档库列表（新的在前）。"""
-    from src.ingestion.pipeline import list_doc_status
+    from src.data import documents_store
 
-    return sorted(
-        list_doc_status(), key=lambda d: d.get("started_at", ""), reverse=True
-    )
+    return documents_store.list_documents()
 
 
 def document_status(doc_id: str) -> dict:
-    from src.ingestion.pipeline import get_doc_status
+    from src.data import documents_store
 
-    return get_doc_status(doc_id) or {}
+    return documents_store.get_document(doc_id) or {}
+
+
+def delete_document(doc_id: str) -> dict:
+    """删除文档并级联清理：状态记录、上传文件、向量（PDF）、注册表（Table）。"""
+    from src.data import documents_store
+    from src.ingestion.pipeline import UPLOADS_DIR, delete_pdf_vectors
+    from src.ingestion.table_pipeline import table_dataset_id, unregister_table
+    from src.retrieval.hybrid import get_hybrid_retriever
+
+    doc = documents_store.get_document(doc_id)
+    if not doc:
+        raise KeyError(f"文档不存在：{doc_id}")
+
+    kind = doc.get("kind", "pdf")
+    kb_id = doc.get("kb_id", "default")
+    result: dict = {"doc_id": doc_id, "kind": kind, "vectors": {}, "files_removed": False}
+
+    # 1. PDF：清理两路 Chroma 向量
+    if kind == "pdf":
+        result["vectors"] = delete_pdf_vectors(doc_id)
+
+    # 2. Table：从内存注册表与 Hybrid 移除；若当前生效则复位
+    else:
+        dataset_id = doc.get("dataset_id") or table_dataset_id(doc_id)
+        unregister_table(dataset_id)
+        hybrid = get_hybrid_retriever()
+        if hybrid.active_dataset == dataset_id:
+            hybrid.active_dataset = "semart"
+            result["active_dataset_reset"] = "semart"
+
+    # 3. 删除上传文件目录
+    work_dir = UPLOADS_DIR / kb_id / doc_id
+    if work_dir.exists():
+        try:
+            import shutil
+
+            shutil.rmtree(work_dir)
+            result["files_removed"] = True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("delete_document 删除文件目录失败 %s: %s", work_dir, e)
+
+    # 4. 删除 SQLite 记录
+    deleted = documents_store.delete_document(doc_id)
+    result["db_deleted"] = deleted
+    return result

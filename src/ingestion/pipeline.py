@@ -14,7 +14,6 @@ pdfplumber 兜底；公式密集页（force_mineru）在 MinerU 不可用/调用
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from pathlib import Path
@@ -22,6 +21,7 @@ from typing import Callable, Optional
 
 from dotenv import load_dotenv
 
+from src.data import documents_store
 from src.ingestion.chunker import chunk_blocks
 from src.ingestion.mineru_parser import mineru_available
 from src.ingestion.mineru_parser import parse_pages as mineru_parse_pages
@@ -37,44 +37,53 @@ load_dotenv()
 logger = get_logger("ingestion.pipeline")
 
 UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", "./data/uploads"))
-_STATUS_FILE = Path(os.getenv("INDEX_DIR", "./data/index")) / "doc_status.json"
 
 
 # ------------------------------------------------------------------ #
-# 状态存储（Stage 6 换 SQLite 前的轻量实现）                            #
+# 状态存储（Stage 6：SQLite documents_store 替换 JSON）                #
 # ------------------------------------------------------------------ #
-
-
-def _load_status() -> dict:
-    if not _STATUS_FILE.exists():
-        return {}
-    try:
-        return json.loads(_STATUS_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_status(data: dict) -> None:
-    _STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _STATUS_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
 
 
 def update_doc_status(doc_id: str, **fields) -> None:
-    data = _load_status()
-    data.setdefault(doc_id, {}).update(fields)
-    _save_status(data)
+    """更新文档解析状态；首次调用时若记录不存在则自动创建。"""
+    if not documents_store.get_document(doc_id):
+        kind = fields.pop("kind", "pdf")
+        status = fields.pop("status", "processing")
+        documents_store.add_document(doc_id=doc_id, kind=kind, status=status, **fields)
+    else:
+        documents_store.update_document(doc_id, **fields)
 
 
 def get_doc_status(doc_id: str) -> Optional[dict]:
-    return _load_status().get(doc_id)
+    return documents_store.get_document(doc_id)
 
 
 def list_doc_status() -> list[dict]:
-    return [
-        {"doc_id": doc_id, **info} for doc_id, info in _load_status().items()
-    ]
+    return documents_store.list_documents()
+
+
+# ------------------------------------------------------------------ #
+# 向量清理（Stage 6：删除文档时级联清理）                              #
+# ------------------------------------------------------------------ #
+
+
+def delete_pdf_vectors(doc_id: str) -> dict:
+    """删除该 doc_id 在 user_pdf_text / user_pdf_images 中的全部向量。"""
+    from src.retrieval.userdoc_image_retriever import COLLECTION_NAME as IMAGE_COLLECTION
+
+    deleted = {"text": 0, "images": 0}
+    for name, col_name in (("text", TEXT_COLLECTION), ("images", IMAGE_COLLECTION)):
+        collection = get_or_create_chroma_collection(col_name)
+        if collection.count() == 0:
+            continue
+        try:
+            hits = collection.get(where={"doc_id": doc_id}, include=["metadatas"])
+            if hits["ids"]:
+                collection.delete(where={"doc_id": doc_id})
+                deleted[name] = len(hits["ids"])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[pipeline] 清理 %s collection 失败 doc_id=%s: %s", col_name, doc_id, e)
+    return deleted
 
 
 # ------------------------------------------------------------------ #
@@ -178,12 +187,17 @@ def ingest_pdf(
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    file_path = str(work_dir / "document.pdf")
+    file_size = Path(file_path).stat().st_size if Path(file_path).exists() else None
+
     update_doc_status(
         doc_id,
         doc_name=doc_name,
         kb_id=kb_id,
         status="processing",
         started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        file_path=file_path,
+        file_size=file_size,
     )
 
     try:
@@ -209,17 +223,21 @@ def ingest_pdf(
         summary = {
             "doc_name": doc_name,
             "pages": len(plan.pages),
-            "route_distribution": plan.distribution,
             "text_chunks": n_chunks,
             "image_pages": n_images,
             "elapsed_sec": round(time.time() - t0, 1),
+            "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "status": "done",
+            "metadata": {"route_distribution": plan.distribution},
         }
         update_doc_status(doc_id, **summary)
         log_event(logger, "ingest_done", doc_id=doc_id, **summary)
-        return {"doc_id": doc_id, **summary}
+        return {"doc_id": doc_id, **summary, "route_distribution": plan.distribution}
 
     except Exception as e:  # noqa: BLE001 — 失败也要落状态供前端轮询
         logger.exception("[ingest] 解析失败 doc_id=%s", doc_id)
-        update_doc_status(doc_id, status="failed", error=str(e))
+        update_doc_status(
+            doc_id, status="failed", error=str(e),
+            finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
         raise

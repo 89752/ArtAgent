@@ -22,6 +22,7 @@ search 流程:
 from __future__ import annotations
 
 import os
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
@@ -56,22 +57,31 @@ _NON_RERANK_SOURCES = {"user_pdf_image"}
 # ------------------------------------------------------------------ #
 
 
-@lru_cache(maxsize=8)
+# Chroma PersistentClient 按线程隔离：SQLite 连接不能安全地跨线程共享，
+# 尤其 Windows 下 FastAPI BackgroundTasks（线程池）与主事件循环共用一份缓存
+# Collection 时会触发 "attempt to write a readonly database"。每个线程持有自己
+# 的 PersistentClient/连接，由 SQLite 文件级锁协调并发。
+_chroma_local = threading.local()
+
+
+def _get_thread_local_chroma_client():
+    client = getattr(_chroma_local, "client", None)
+    if client is None:
+        import chromadb
+
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        _chroma_local.client = client
+    return client
+
+
 def get_chroma_collection(name: str):
-    """按名加载持久化 Chroma collection（每名单例，必须已存在）。"""
-    import chromadb
-
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    return client.get_collection(name)
+    """按名加载持久化 Chroma collection（每线程单例，必须已存在）。"""
+    return _get_thread_local_chroma_client().get_collection(name)
 
 
-@lru_cache(maxsize=8)
 def get_or_create_chroma_collection(name: str):
-    """按名获取或创建 Chroma collection（用户上传文档的 collection 用）。"""
-    import chromadb
-
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    return client.get_or_create_collection(name)
+    """按名获取或创建 Chroma collection（每线程单例；用户上传文档用）。"""
+    return _get_thread_local_chroma_client().get_or_create_collection(name)
 
 
 @lru_cache(maxsize=1)
