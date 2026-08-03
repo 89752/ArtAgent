@@ -12,7 +12,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.retrieval.structured_retriever import (
-    SEMART_SCHEMA,
+    CORE_SCHEMA,
     TableSchema,
     StructuredTableRetriever,
     get_structured_retriever,
@@ -47,9 +47,9 @@ def _retriever(**kwargs) -> StructuredTableRetriever:
 
 
 # ── TableSchema 能力推导 ─────────────────────────────────────────
-def test_schema_capabilities_full():
-    assert SEMART_SCHEMA.supports_timeline is True
-    assert SEMART_SCHEMA.supports_recommendation is True
+def test_core_schema_capabilities_full():
+    assert CORE_SCHEMA.supports_timeline is True
+    assert CORE_SCHEMA.supports_recommendation is True
 
 
 def test_schema_no_axis_no_timeline():

@@ -1,0 +1,39 @@
+{
+  "id": "artagent",
+  "name": "ArtAgent 艺术助手",
+  "description": "西方艺术史与 SemArt 画作数据集：跨维度对比、风格时间线、偏好推荐、读图分析、用户文档问答。平台内置种子应用模板。",
+  "version": "1.0.0",
+  "system_prompt": "@builtin:artagent",
+  "model_config": {
+    "temperature": 0.2
+  },
+  "tools": [
+    "semantic_search",
+    "exact_lookup",
+    "query_painter_knowledge",
+    "image_lookup",
+    "read_page_image",
+    "web_search",
+    "compare_subjects",
+    "timeline_by_periods",
+    "recommend_with_exclusions",
+    "remember",
+    "recall",
+    "forget",
+    "save_collection",
+    "list_collections",
+    "list_preferences"
+  ],
+  "skills": null,
+  "knowledge_base": "core",
+  "memory": {
+    "enabled": true,
+    "preferences": true,
+    "summary": true
+  },
+  "guardrails": [
+    "evidence_grounding",
+    "cost_bounds"
+  ],
+  "mcp_servers": []
+}

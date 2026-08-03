@@ -16,7 +16,7 @@ def test_semantic_search():
     # Stage 3 起语义检索融合用户 PDF（带 source 键的文档片段，无 author 字段），
     # 画作形状只对 semart 结果保证；断言只针对画作，文档片段不影响测试。
     semart_hits = [r for r in results if "author" in r]
-    print(f"  semart hits: {len(semart_hits)}/{len(results)}")
+print(f"  core hits: {len(semart_hits)}/{len(results)}")
     for r in semart_hits:
         print(f"  - {r['title']} by {r['author']} ({r['date']})")
     assert semart_hits, "语义检索应至少返回 1 条画作结果"

@@ -15,7 +15,8 @@ from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-# 数据源标签：met_museum / rijksmuseum 为 Stage 7 预留（接口先定、暂不实现）
+# 数据源标签：met_museum / rijksmuseum 为 Stage 7 预留（接口先定、暂不实现）；
+# core 为从零构建的核心库（Wikidata 骨干 + 博物馆源，见 docs/核心库-从零构建-设计.md）
 RetrievalSource = Literal[
     "semart",
     "user_table",
@@ -23,6 +24,8 @@ RetrievalSource = Literal[
     "user_pdf_image",
     "met_museum",
     "rijksmuseum",
+    "extended",
+    "core",
 ]
 
 

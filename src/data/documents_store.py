@@ -68,9 +68,21 @@ def _connect() -> sqlite3.Connection:
 # Init + migration                                                    #
 # ------------------------------------------------------------------ #
 def init_db() -> None:
-    """建表；若存在旧 doc_status.json 且表为空则迁移。"""
+    """建表；迁移旧 JSON；重置服务重启导致中断的解析任务（防僵尸轮询）。"""
     with _connect() as conn:
         conn.executescript(_CREATE_TABLE_SQL)
+        cur = conn.execute(
+            """
+            UPDATE documents SET status = 'failed', error = ?
+            WHERE status IN ('processing', 'pending')
+            """,
+            ("服务重启，解析任务中断，请重新上传",),
+        )
+        if cur.rowcount:
+            logger.info(
+                "[documents_store] 已将 %d 条中断中的解析任务标记为 failed",
+                cur.rowcount,
+            )
         conn.commit()
     _migrate_legacy_json()
 

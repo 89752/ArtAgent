@@ -49,9 +49,41 @@ def _validate_image_path(image_path: str) -> tuple[Optional[Path], Optional[str]
     return path, None
 
 
-def read_page_image_impl(image_path: str, question: str = "") -> dict:
+def _resolve_page_path(doc_name: str, page: int) -> tuple[Optional[Path], Optional[str]]:
+    """按文档名 + 页码（1 基）定位整页图路径（不依赖语义检索先命中）。"""
+    from src.data.documents_store import list_documents
+
+    name = (doc_name or "").strip()
+    if not name or not page or page < 1:
+        return None, "需要 doc_name 与 page（页码从 1 开始）"
+    docs = list_documents()
+    candidates = [
+        d for d in docs
+        if name == (d.get("doc_name") or "").strip()
+        or name in (d.get("doc_name") or "")
+    ]
+    if not candidates:
+        return None, f"未找到文档：{doc_name}"
+    doc = candidates[0]
+    rel = (
+        f"{doc.get('kb_id') or 'default'}/{doc.get('doc_id')}/pages/"
+        f"page-{page - 1}.png"
+    )
+    return _validate_image_path(str((_UPLOADS_ROOT / rel).resolve()))
+
+
+def read_page_image_impl(
+    image_path: str = "",
+    doc_name: str = "",
+    page: int = 0,
+    question: str = "",
+) -> dict:
     """底层实现（绕过 @tool 包装，供测试直接调用）。"""
-    path, error = _validate_image_path(image_path)
+    path, error = None, None
+    if image_path:
+        path, error = _validate_image_path(image_path)
+    else:
+        path, error = _resolve_page_path(doc_name, page)
     if error:
         return {"success": False, "error": error, "image_path": image_path}
 
@@ -107,18 +139,26 @@ def read_page_image_impl(image_path: str, question: str = "") -> dict:
 
 
 @tool
-def read_page_image(image_path: str, question: str = "") -> dict:
+def read_page_image(
+    image_path: Optional[str] = None,
+    doc_name: Optional[str] = None,
+    page: Optional[int] = None,
+    question: str = "",
+) -> dict:
     """
     用视觉模型读取用户上传文档的整页图片内容。
 
-    适用场景：semantic_search 结果中出现 source=user_pdf_image（整页图）的条目，
-    且回答用户问题需要该页的图面/文字内容时，用其 image_path 调用本工具。
+    适用场景：用户上传的文档是纯图片/扫描件（无文字索引），或 semantic_search
+    命中 source=user_pdf_image（整页图）需要读取图面内容时。两种定位方式任选其一：
+    直接给 image_path，或用 doc_name + page（页码 1 基）按文档定位。
 
     Args:
-        image_path: 检索结果中给出的整页图路径（必须是用户上传文档的页面图）
+        image_path: 检索结果中给出的整页图路径
+        doc_name:   文档名称（与 page 组合定位页面）
+        page:       页码，从 1 开始
         question:   用户的原始问题（可选，提供后视觉模型侧重提取相关信息）
 
     Returns:
         {"success": bool, "page_description": 页面内容的文字描述（文字转录+图像描述）}
     """
-    return read_page_image_impl(image_path, question)
+    return read_page_image_impl(image_path or "", doc_name or "", page or 0, question)

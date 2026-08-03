@@ -167,6 +167,9 @@ def _check(resp: requests.Response, what: str) -> dict:
 
 def _apply_upload_url(pdf_name: str) -> tuple[str, str]:
     """申请单文件批量上传，返回 (batch_id, file_url)。URL 24h 有效。"""
+    enable_ocr = os.getenv("MINERU_OCR", "1").strip().lower() not in (
+        "0", "false", "no",
+    )
     data = _check(
         requests.post(
             f"{API_BASE}/file-urls/batch",
@@ -176,6 +179,7 @@ def _apply_upload_url(pdf_name: str) -> tuple[str, str]:
                 "model_version": MODEL_VERSION,
                 "enable_formula": True,
                 "enable_table": True,
+                "is_ocr": enable_ocr,
                 "language": "ch",
             },
             timeout=30,

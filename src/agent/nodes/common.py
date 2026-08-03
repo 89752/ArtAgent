@@ -20,7 +20,7 @@ from src.agent.prompts import (
 from src.utils.llm import get_llm, get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
 from src.data.access import format_evidence_block
-from src.memory.store import load_preferences, upsert_preference
+from src.memory.store import load_preferences
 
 logger = get_logger("nodes")
 
@@ -108,30 +108,220 @@ def contextualize(state: AgentState) -> dict:
     return {"user_query": rewritten, "current_step": "contextualize"}
 
 
+# ── 查询改写 + 拆分（P0-③，替代 contextualize） ────────────────
+def rewrite_split(state: AgentState) -> dict:
+    """查询改写 + 多问题拆分。
+
+    改写后的完整问题写回 user_query（下游全部读它，全局生效）；
+    rewritten_question / sub_questions 存入 state，供意图打分与后续
+    多意图并行检索使用。LLM 失败自动回落原问题，不阻塞主流程。
+    """
+    from src.agent.rewrite import rewrite_and_split
+
+    result = rewrite_and_split(state.user_query, state.messages)
+    log_event(
+        logger,
+        "rewrite_split",
+        original=state.user_query,
+        rewritten=result.rewritten_question,
+        sub_questions=result.sub_questions,
+    )
+    return {
+        "user_query": result.rewritten_question,
+        "rewritten_question": result.rewritten_question,
+        "sub_questions": result.sub_questions,
+        "rewritten_key_entities": result.key_entities,
+        "rewrite_ambiguous": result.ambiguous,
+        "current_step": "rewrite_split",
+    }
+
+
 # ── 意图路由 ────────────────────────────────────────────────────
 def classify_intent(state: AgentState) -> dict:
-    """判断意图，路由到对应子管线或 general 分支。"""
-    prompt = INTENT_CLASSIFIER_PROMPT.format(user_query=state.user_query)
-    raw = get_deterministic_llm().invoke(prompt).content.strip().lower()
-    for intent in ("comparison", "timeline", "recommendation", "general"):
-        if intent in raw:
-            log_event(logger, "classify", query=state.user_query, intent=intent)
-            return {"intent": intent, "current_step": f"classify→{intent}"}
-    log_event(logger, "classify", query=state.user_query, intent="general", note="fallback")
-    return {"intent": "general", "current_step": "classify→general"}
+    """意图树打分分类（P0-②）：对所有叶子打分，主意图仍路由到现有分支。
+
+    分数写入 state.intent_scores（供 UI 展示与后续多意图并行使用）；
+    LLM 失败 / 畸形输出自动回落 general，行为与旧版一致。
+    """
+    from src.agent.intent_tree import classify_intents
+
+    scores, intent = classify_intents(state.user_query)
+    log_event(
+        logger,
+        "classify",
+        query=state.user_query,
+        intent=intent,
+        top_scores="; ".join(f"{s.leaf.id}={s.score:.2f}" for s in scores[:3]),
+    )
+    return {
+        "intent": intent,
+        "intent_scores": [s.to_dict() for s in scores],
+        "current_step": f"classify→{intent}",
+    }
+
+
+# ── RAG 开关（收尾项）：判断是否需要检索 ───────────────────────
+import re as _re
+
+# 确定性问候模式（全匹配，允许尾部语气词/标点）：命中即无需检索，
+# 不依赖 LLM 打分（打分有随机性，2026-08-02 实测同题两次结果不同）。
+_GREETING_RE = _re.compile(
+    r"^(你好|您好|嗨|哈喽|hello|hi|hey|thanks|thank you|谢谢|多谢|"
+    r"再见|拜拜|bye|你是谁|你能做什么|能帮我什么)[!！。.？?～~呀啊呢吧 ]*$",
+    _re.IGNORECASE,
+)
+
+
+def _rag_gate(question: str, intent_scores) -> bool:
+    """是否需要检索：寒暄类（system）意图高分 → 不需要。
+
+    双保险：① 确定性问候词匹配（主要）；② LLM 意图打分 system_greeting
+    ≥ 0.7 且为最高分（兜底）。intent_scores 为已按分数降序的 dict 列表。
+    """
+    if not question:
+        return True
+    if _GREETING_RE.match(question.strip()):
+        return False
+    if not intent_scores:
+        return True
+    best = intent_scores[0]
+    if not isinstance(best, dict):
+        return True
+    try:
+        score = float(best.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    if best.get("kind") == "system" and score >= 0.7:
+        return False
+    return True
+
+
+def rag_gate(state: AgentState) -> dict:
+    """RAG 开关节点：寒暄高分 → 关闭检索（走直接回答），否则放行。"""
+    needed = _rag_gate(state.user_query, state.intent_scores)
+    log_event(logger, "rag_gate", query=state.user_query, rag_needed=needed)
+    return {"rag_needed": needed, "current_step": "rag_gate"}
+
+
+def direct_answer(state: AgentState) -> dict:
+    """无需检索时的直接回答节点（LLM 不带任何工具）。"""
+    from src.utils.llm import get_deterministic_llm
+
+    prompt = (
+        "你是艺术领域助手。请简短、自然地回答用户的问题，不要编造事实。\n\n"
+        f"用户：{state.user_query}\n\n回答："
+    )
+    answer = get_deterministic_llm().invoke(prompt).content.strip()
+    log_event(logger, "direct_answer", query=state.user_query)
+    return {
+        "final_answer": answer,
+        "messages": [AIMessage(content=answer)],
+        "current_step": "direct_answer",
+    }
+
+
+# ── 信息缺口澄清（P1-1.5） ─────────────────────────────────────
+_STYLE_SIGNALS = (
+    "喜欢", "偏爱", "风格", "色彩", "笔触", "画家", "作品",
+    "类似", "像", "主题", "氛围", "光影", "色调", "构图",
+    # 常见审美/风格词（避免"浓烈奔放"这类被误判为信息不足）
+    "浓烈", "奔放", "宁静", "优雅", "华丽", "简约", "古典", "现代",
+    "抽象", "写实", "印象", "巴洛克", "洛可可", "浪漫", "深沉", "明亮",
+    "柔和", "风景", "静物", "肖像", "宗教", "神话",
+)
+
+
+def _info_gap(question: str, intent: str) -> tuple[bool, str]:
+    """判定是否存在"信息不足"（仅明确缺口才追问，一般歧义放行）。"""
+    q = (question or "").strip()
+    if len(q) < 6:
+        return True, "能再具体说说想了解什么吗？例如某位画家、某幅画或某种艺术风格。"
+    if intent == "recommendation" and not any(s in q for s in _STYLE_SIGNALS):
+        return True, "你更偏好哪种风格？或者有没有喜欢的画家/作品作为参考？"
+    return False, ""
+
+
+def ask_user(state: AgentState) -> dict:
+    """信息缺口澄清节点：不足则追问并短路，否则放行继续主流程。"""
+    if state.rewrite_ambiguous:
+        gap, message = True, (
+            "你的意思我不太确定，能说得更具体一点吗？"
+            "例如想了解哪位画家、哪幅画或哪种风格。"
+        )
+    else:
+        gap, message = _info_gap(state.user_query or "", state.intent)
+    if not gap:
+        return {
+            "ask_user": "continue",
+            "pending_clarification": "",
+            "current_step": "ask_user",
+        }
+    log_event(logger, "ask_user", query=state.user_query, question=message)
+    return {
+        "ask_user": "ask",
+        "pending_clarification": message,
+        "final_answer": message,
+        "messages": [AIMessage(content=message)],
+        "current_step": "ask_user→澄清",
+    }
+
+
+# ── 多意图并行检索（P0-A / Phase 2） ───────────────────────────
+def multi_retrieve(state: AgentState) -> dict:
+    """复合问题并行预取证据：sub_questions > 1 时按子问题并行 semantic_search。
+
+    结果按子问题分组存入 state.multi_evidence，由 ContextBuilder 以
+    【子任务N】分组注入上下文；agent 主循环仍可自行调用工具补细节。
+    单一子问题时零开销放行（不启动线程池、不检索）。
+    """
+    subs = [s for s in (state.sub_questions or []) if s.strip()]
+    if len(subs) <= 1:
+        return {"multi_evidence": {}, "current_step": "multi_retrieve"}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.tools.retrieval import semantic_search
+
+    def _search(sub: str) -> list[dict]:
+        try:
+            return semantic_search.invoke({"query": sub, "top_k": 5})
+        except Exception as e:  # noqa: BLE001 — 单子任务失败不影响整体
+            log_event(logger, "multi_retrieve", sub=sub, error=str(e))
+            return []
+
+    grouped: dict[str, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=min(4, len(subs))) as pool:
+        futures = {pool.submit(_search, sub): sub for sub in subs}
+        for future in futures:
+            grouped[futures[future]] = future.result()
+
+    log_event(
+        logger, "multi_retrieve",
+        sub_questions=len(subs),
+        hits={sub[:24]: len(items) for sub, items in grouped.items()},
+    )
+    return {"multi_evidence": grouped, "current_step": "multi_retrieve"}
 
 
 # ── 长期记忆读取（S5） ──────────────────────────────────────────
 def load_memory(state: AgentState) -> dict:
-    """从持久化存储读取用户偏好，注入 state。"""
+    """从持久化存储读取用户偏好与会话摘要，注入 state。"""
+    from src.memory.summary import load_summary
+
     prefs = load_preferences(state.user_id)
+    summary = load_summary(state.conversation_id)
     log_event(
         logger, "load_memory",
         user=state.user_id,
         artists=prefs.get("artists", []),
         styles=prefs.get("styles", []),
+        summary_len=len(summary),
     )
-    return {"user_preferences": prefs, "current_step": "load_memory"}
+    return {
+        "user_preferences": prefs,
+        "conversation_summary": summary,
+        "current_step": "load_memory",
+    }
 
 
 # ── 反思 ────────────────────────────────────────────────────────
@@ -181,16 +371,23 @@ def web_fallback(state: AgentState) -> dict:
 # ── 长期记忆写入（S5） ──────────────────────────────────────────
 def save_memory(state: AgentState) -> dict:
     """
-    推荐场景后，把用户明确表达喜欢的画家/风格写入持久化存储。
-    只在 recommendation 意图下写入（此时用户确实表达了偏好）。
+    Phase 4/5：触发会话滚动摘要（达到轮数后增量压缩并落库）。
+
+    说明：旧版"推荐场景写偏好"逻辑已删除——扁平化后 state.subjects 不再由
+    管线填充，偏好记忆改由 Agent 用 remember 工具显式记录（Phase 4）。
     """
-    if state.intent == "recommendation":
-        for artist in state.subjects:
-            upsert_preference(state.user_id, "artist", artist, weight=1.0)
-        if state.extracted_features:
-            # 存一个精简的风格关键词（取前若干词）
-            style_kw = state.extracted_features.strip()[:80]
-            if style_kw:
-                upsert_preference(state.user_id, "style", style_kw, weight=1.0)
-        log_event(logger, "save_memory", user=state.user_id, saved_artists=state.subjects)
-    return {"current_step": "save_memory"}
+    from src.memory.summary import maybe_summarize
+
+    summary = maybe_summarize(
+        state.messages, state.conversation_id, state.user_id,
+        volume_chars=state.context_chars,
+    )
+    log_event(
+        logger, "save_memory",
+        user=state.user_id,
+        turns=sum(1 for m in state.messages if getattr(m, "type", "") == "human"),
+        tool_rounds=state.tool_rounds,
+        context_chars=state.context_chars,
+        summary_len=len(summary),
+    )
+    return {"current_step": "save_memory", "conversation_summary": summary}

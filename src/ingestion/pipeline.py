@@ -28,7 +28,7 @@ from src.ingestion.mineru_parser import parse_pages as mineru_parse_pages
 from src.ingestion.multimodal_indexer import index_page_images
 from src.ingestion.page_classifier import DocRoutePlan, classify_document
 from src.ingestion.pdfplumber_fallback import parse_pages as pdfplumber_parse_pages
-from src.retrieval.hybrid import _get_bge_model, get_or_create_chroma_collection
+from src.retrieval.hybrid import get_bge_m3_embed_batch, get_or_create_chroma_collection
 from src.retrieval.userdoc_text_retriever import COLLECTION_NAME as TEXT_COLLECTION
 from src.utils.logging_config import get_logger, log_event
 
@@ -123,6 +123,34 @@ def _parse_text_route(
 # ------------------------------------------------------------------ #
 
 
+def _parse_ocr_route(pdf_path: str, mm_pages: list[int], work_dir) -> list:
+    """多模态/扫描页尝试 MinerU OCR：把扫描文字抽成可检索的 text blocks。
+
+    这是"扫描件里的大段文字"进入文字层的正解（可语义检索，避免全靠视觉读图）。
+    OCR 关闭 / MinerU 不可用 / 调用失败 / 无文字 → 返回空列表，保持纯图像路径。
+    """
+    if not mm_pages:
+        return []
+    if os.getenv("MINERU_OCR", "1").strip().lower() in ("0", "false", "no"):
+        return []
+    if not mineru_available():
+        return []
+    try:
+        blocks = mineru_parse_pages(pdf_path, mm_pages, work_dir=work_dir)
+        text_blocks = [
+            b for b in blocks
+            if getattr(b, "type", "") in ("text", "table", "equation")
+        ]
+        log_event(
+            logger, "ocr_route",
+            pages=len(mm_pages), blocks=len(blocks), text_blocks=len(text_blocks),
+        )
+        return text_blocks
+    except Exception as e:  # noqa: BLE001 — 失败降级纯图像路径
+        logger.warning("[ingest] 扫描页 OCR 失败（保持纯图像路径）: %s", e)
+        return []
+
+
 def _context_header(doc_name: str, section: str) -> str:
     """上下文头（Stage 4）：[文档 | 章节]——向量化与展示用，不写入原始 chunk。
 
@@ -145,12 +173,12 @@ def index_text_chunks(chunks, doc_name: str = "") -> int:
     if not chunks:
         return 0
     collection = get_or_create_chroma_collection(TEXT_COLLECTION)
-    model = _get_bge_model()
+    embed_batch = get_bge_m3_embed_batch()
     headers = [_context_header(doc_name, c.section) for c in chunks]
     embed_inputs = [
         f"{h}\n{c.content}" if h else c.content for h, c in zip(headers, chunks)
     ]
-    vectors = model.encode(embed_inputs, normalize_embeddings=True).tolist()
+    vectors = embed_batch(embed_inputs)
     collection.upsert(
         ids=[c.chroma_id() for c in chunks],
         embeddings=vectors,
@@ -214,7 +242,14 @@ def ingest_pdf(
         chunks = chunk_blocks(blocks, doc_id, kb_id=kb_id)
         n_chunks = index_text_chunks(chunks, doc_name=doc_name)
 
-        # 3. 多模态路线：整页渲染 → DashScope 入库
+        # 3. 多模态路线：先 OCR 出文字层（扫描件可检索），再整页渲染入库。
+        #    仅处理纯 multimodal 页；dual 页文字已被文字路线（MinerU 自带 OCR）抽取，
+        #    再 OCR 会重复解析与重复 chunk。
+        ocr_pages = [p.page_no for p in plan.pages if p.route == "multimodal"]
+        ocr_blocks = _parse_ocr_route(pdf_path, ocr_pages, work_dir)
+        if ocr_blocks:
+            ocr_chunks = chunk_blocks(ocr_blocks, doc_id, kb_id=kb_id)
+            n_chunks += index_text_chunks(ocr_chunks, doc_name=doc_name)
         n_images = index_page_images(
             pdf_path, doc_id, mm_pages,
             doc_name=doc_name, kb_id=kb_id, work_dir=work_dir,
@@ -228,6 +263,7 @@ def ingest_pdf(
             "elapsed_sec": round(time.time() - t0, 1),
             "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "status": "done",
+            "error": "",
             "metadata": {"route_distribution": plan.distribution},
         }
         update_doc_status(doc_id, **summary)

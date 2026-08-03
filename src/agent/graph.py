@@ -3,20 +3,22 @@ ArtAgent 混合架构 LangGraph。
 
   START
     └─► load_memory            读取用户长期偏好（S5）
-          └─► contextualize    多轮指代消解（把"他/这幅"改写成具体对象）
-                └─► classify   意图路由
-                ├─ comparison ──► comp_decompose → comp_retrieve → comp_synthesize ─┐
-                ├─ timeline ────► tl_subject → tl_periods → tl_synthesize ───────────┤
-                ├─ recommendation► rec_extract → rec_search → rec_filter → rec_synth ┤
-                └─ general ─────► general_agent ⇄ tools ──────────────────────────────┤
-                                                                                      ▼
-                                                                              [reflection]
-                                                                          PASS │      │ RETRY
-                                                                               ▼      ▼
-                                                                        save_memory  web_fallback（S4）
-                                                                               │      │
-                                                                               ▼      ▼
-                                                                              END    save_memory → END
+          └─► rewrite_split    查询改写+拆分（含指代消解）
+                └─► classify   意图打分（软指引，不再路由分支）
+                      └─► rag_gate   RAG 开关（寒暄高分→直接回答，否则放行）
+                            ├─(no_rag)→ direct_answer
+                            └─(rag)→ ask_user   信息缺口澄清（不足→追问短路，否则放行）
+                            └─► multi_retrieve   复合问题并行预取证据（P0-A）
+                                  └─► general_agent ⇄ tools（ReAct + 工具守卫）
+                              │
+                              ▼
+                      [reflection]
+                   PASS │        │ RETRY
+                        ▼        ▼
+                 save_memory  web_fallback（S4）
+                        │        │
+                        ▼        ▼
+                       END    save_memory → END
 """
 
 from typing import Literal
@@ -55,24 +57,6 @@ def _capability_supported(intent: str, dataset_id: str) -> bool:
     return True
 
 
-def _route_by_intent(
-    state: AgentState,
-) -> Literal["comparison", "timeline", "recommendation", "general"]:
-    intent = state.intent
-    if intent not in ("comparison", "timeline", "recommendation"):
-        return "general"
-    # 能力开关：数据源 schema 不支持该管线能力时降级 general
-    if intent in ("timeline", "recommendation") and not _capability_supported(
-        intent, state.dataset_id
-    ):
-        log_event(
-            logger, "capability_gate",
-            intent=intent, dataset_id=state.dataset_id, action="downgrade→general",
-        )
-        return "general"
-    return intent
-
-
 def _route_after_reflection(state: AgentState) -> Literal["web_fallback", "save_memory"]:
     if state.reflection_notes == "RETRY" and state.retry_count < 1:
         return "web_fallback"
@@ -89,29 +73,17 @@ def build_graph():
 
     # 公共节点
     add("load_memory", N.load_memory)
-    add("contextualize", N.contextualize)
+    add("rewrite_split", N.rewrite_split)
     add("classify", N.classify_intent)
+    add("rag_gate", N.rag_gate)
+    add("direct_answer", N.direct_answer)
+    add("ask_user", N.ask_user)
+    add("multi_retrieve", N.multi_retrieve)
     add("reflection", N.reflection)
     add("web_fallback", N.web_fallback)
     add("save_memory", N.save_memory)
 
-    # comparison 子管线
-    add("comp_decompose", N.comparison_decompose)
-    add("comp_retrieve", N.comparison_retrieve)
-    add("comp_synthesize", N.comparison_synthesize)
-
-    # timeline 子管线
-    add("tl_subject", N.timeline_extract_subject)
-    add("tl_periods", N.timeline_gather_periods)
-    add("tl_synthesize", N.timeline_synthesize)
-
-    # recommendation 子管线
-    add("rec_extract", N.recommendation_extract_features)
-    add("rec_search", N.recommendation_feature_search)
-    add("rec_filter", N.recommendation_relevance_filter)
-    add("rec_synthesize", N.recommendation_synthesize)
-
-    # general 分支（ReAct）
+    # 唯一主路径：ReAct（子管线逻辑已下沉为工具，见 src/tools/capabilities.py）
     add("general_agent", N.general_agent)
     # Stage 4：ToolNode 包成普通节点——执行后对 semantic_search 结果做相关性
     # 过滤（节点名不变，service.py 的"执行工具"标签无需同步）；包成普通函数
@@ -120,35 +92,23 @@ def build_graph():
 
     # ── 连线 ──
     builder.add_edge(START, "load_memory")
-    builder.add_edge("load_memory", "contextualize")
-    builder.add_edge("contextualize", "classify")
-
+    builder.add_edge("load_memory", "rewrite_split")
+    builder.add_edge("rewrite_split", "classify")
+    builder.add_edge("classify", "rag_gate")
+    # RAG 开关：不需要检索 → 直接回答；需要 → 走澄清/检索主路径
     builder.add_conditional_edges(
-        "classify",
-        _route_by_intent,
-        {
-            "comparison": "comp_decompose",
-            "timeline": "tl_subject",
-            "recommendation": "rec_extract",
-            "general": "general_agent",
-        },
+        "rag_gate",
+        lambda s: "no_rag" if not s.rag_needed else "rag",
+        {"no_rag": "direct_answer", "rag": "ask_user"},
     )
-
-    # comparison
-    builder.add_edge("comp_decompose", "comp_retrieve")
-    builder.add_edge("comp_retrieve", "comp_synthesize")
-    builder.add_edge("comp_synthesize", "reflection")
-
-    # timeline
-    builder.add_edge("tl_subject", "tl_periods")
-    builder.add_edge("tl_periods", "tl_synthesize")
-    builder.add_edge("tl_synthesize", "reflection")
-
-    # recommendation
-    builder.add_edge("rec_extract", "rec_search")
-    builder.add_edge("rec_search", "rec_filter")
-    builder.add_edge("rec_filter", "rec_synthesize")
-    builder.add_edge("rec_synthesize", "reflection")
+    builder.add_edge("direct_answer", "reflection")
+    # 信息缺口澄清：ask → 直接收尾（等用户补充）；continue → 统一 agent 主路径
+    builder.add_conditional_edges(
+        "ask_user",
+        lambda s: s.ask_user,
+        {"ask": END, "continue": "multi_retrieve"},
+    )
+    builder.add_edge("multi_retrieve", "general_agent")
 
     # general ReAct 循环
     builder.add_conditional_edges(

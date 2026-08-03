@@ -32,6 +32,24 @@ def _format_result(result: RetrievalResult) -> dict:
         artwork = row_to_artwork_dict(result.metadata)
         artwork["relevance_score"] = round(result.score, 4)
         return artwork
+    if result.source == "core":
+        # 核心库（M3）：与 semart 同契约（title/author/date/...），不带 source 键
+        # → 可进 UI 配图卡片；image_file 为 URL，由 _thumb_data_uri 直通
+        meta = result.metadata
+        snippet = str(meta.get("description") or result.content or "")
+        if len(snippet) > EVIDENCE_SNIPPET_LEN:
+            snippet = snippet[:EVIDENCE_SNIPPET_LEN] + "..."
+        return {
+            "title": str(meta.get("title") or ""),
+            "author": str(meta.get("artist") or ""),
+            "date": str(meta.get("year_display") or (meta.get("year") or "")),
+            "technique": str(meta.get("material") or ""),
+            "school": str(meta.get("movement") or meta.get("school") or meta.get("genre") or ""),
+            "timeframe": str(meta.get("year_bucket") or ""),
+            "image_file": str(meta.get("image_url") or ""),
+            "description_snippet": snippet,
+            "relevance_score": round(result.score, 4),
+        }
     meta = result.metadata
     if result.source == "user_table":
         # 用户表格（Stage 5）：原始列全带上（小写键，recommendation 的
@@ -92,6 +110,29 @@ def _format_result(result: RetrievalResult) -> dict:
         # 提示 Agent：这页图可以用 read_page_image 真正读取内容
         out["read_hint"] = "调用 read_page_image(image_path=...) 可读取此页图片的文字与图面内容"
     return out
+
+
+def _artwork_from_schema_row(schema, row: dict) -> dict:
+    """按 TableSchema 角色把 df 行/元数据 dict 转成工具契约（title/author/date/...）。
+
+    供 exact_lookup / image_lookup 等结构化检索工具使用，semart 与 core 统一走角色列。
+    """
+    def g(col: Optional[str]) -> str:
+        return str(row.get(col) or "") if col else ""
+
+    snippet = g(schema.description_col)
+    if len(snippet) > EVIDENCE_SNIPPET_LEN:
+        snippet = snippet[:EVIDENCE_SNIPPET_LEN] + "..."
+    return {
+        "title": g(schema.title_col) or g("title"),
+        "author": g(schema.entity_col),
+        "date": g(schema.date_col),
+        "technique": g(schema.technique_col),
+        "school": g(schema.school_col),
+        "timeframe": g(schema.group_axis_col),
+        "image_file": g(schema.image_col),
+        "description_snippet": snippet,
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -155,27 +196,38 @@ def exact_lookup(
     Returns:
         匹配画作列表
     """
-    from src.data.loader import get_dataset
+    # 2026-08-02：按当前生效数据源（semart / core / 用户表格）的角色列检索，
+    # 不再硬编码 SemArt 列名——切换数据源后 exact_lookup 跟着走
+    from src.retrieval.hybrid import get_hybrid_retriever
+    from src.retrieval.structured_retriever import get_structured_retriever
 
-    df = get_dataset().all
+    dataset_id = get_hybrid_retriever().active_dataset
+    retriever = get_structured_retriever(dataset_id)
+    schema = retriever.schema
+    df = retriever.df
 
     # 标题/作者走统一的三级模糊匹配；枚举字段（年代段/流派）保持简单包含
     if author:
-        df = fuzzy_match(df, "AUTHOR", author)
-    if title:
-        df = fuzzy_match(df, "TITLE", title)
-    if timeframe:
+        df = fuzzy_match(df, schema.entity_col, author)
+    if title and schema.title_col:
+        df = fuzzy_match(df, schema.title_col, title)
+    if timeframe and schema.group_axis_col:
         df = df[
-            df["TIMEFRAME"]
-            .str.lower()
-            .str.contains(timeframe.lower(), na=False, regex=False)
+            df[schema.group_axis_col].astype(str).str.lower().str.contains(
+                timeframe.lower(), na=False, regex=False
+            )
         ]
-    if school:
+    if school and schema.school_col:
         df = df[
-            df["SCHOOL"].str.lower().str.contains(school.lower(), na=False, regex=False)
+            df[schema.school_col].astype(str).str.lower().str.contains(
+                school.lower(), na=False, regex=False
+            )
         ]
 
     if df.empty:
         return [{"message": "No artworks found matching the given criteria."}]
 
-    return [row_to_artwork_dict(row) for _, row in df.head(top_k).iterrows()]
+    return [
+        _artwork_from_schema_row(schema, row)
+        for _, row in df.head(top_k).iterrows()
+    ]

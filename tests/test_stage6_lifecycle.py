@@ -43,19 +43,9 @@ def _isolate(tmp: Path):
 
 
 def _fresh_hybrid():
-    """重置 Hybrid 单例并只注册 semart，避免测试间状态污染。"""
+    """重置 Hybrid 单例，保留默认 core 数据源，避免测试间状态污染。"""
     hybrid_mod._hybrid = None
-    hybrid = hybrid_mod.get_hybrid_retriever()
-    # 用空 DataFrame 注册 semart，避免真实加载 SemArt
-    from src.retrieval.structured_retriever import register_structured_dataset, TableSchema
-    register_structured_dataset(
-        "semart",
-        TableSchema(entity_col="AUTHOR", group_axis_col="TIMEFRAME",
-                    description_col="DESCRIPTION", image_col="IMAGE_FILE"),
-        source="semart",
-        df=pd.DataFrame(columns=["AUTHOR", "TIMEFRAME", "DESCRIPTION", "IMAGE_FILE"]),
-    )
-    return hybrid
+    return hybrid_mod.get_hybrid_retriever()
 
 
 def test_delete_pdf_cascades():
@@ -93,7 +83,7 @@ def test_delete_pdf_cascades():
 
 
 def test_delete_table_unregisters_and_resets_active():
-    """表格删除应注销数据源；若其为当前生效数据源，则复位为 semart。"""
+    """表格删除应注销数据源；若其为当前生效数据源，则复位为 core。"""
     tmp = Path(tempfile.mkdtemp(prefix="s6_tbl_"))
     restore = _isolate(tmp)
     try:
@@ -123,15 +113,15 @@ def test_delete_table_unregisters_and_resets_active():
             source="user_table",
             df=pd.DataFrame(columns=["书名"]),
         )
-        hybrid.register(dataset_id, hybrid.retrievers["semart"])  # 占位 retriever
+        hybrid.register(dataset_id, hybrid.retrievers["core"])  # 占位 retriever
         hybrid.active_dataset = dataset_id
 
         result = service_mod.delete_document(doc_id)
 
         assert result["doc_id"] == doc_id
         assert result["kind"] == "table"
-        assert result["active_dataset_reset"] == "semart"
-        assert hybrid.active_dataset == "semart"
+        assert result["active_dataset_reset"] == "core"
+        assert hybrid.active_dataset == "core"
         assert dataset_id not in hybrid.retrievers
         assert documents_store.get_document(doc_id) is None
     finally:

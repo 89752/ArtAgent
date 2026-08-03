@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import json
 import html
-import base64
+import threading
 import time
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import quote
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
@@ -29,6 +30,8 @@ from src.memory.conversations import (
     list_conversations,
     load_conversation,
     delete_conversation,
+    remove_attachment_from_all,
+    rename_conversation as rename_conversation_db,
     relative_time,
 )
 from src.utils.logging_config import get_logger
@@ -56,7 +59,10 @@ _INTENT_LABELS = {
     "recommendation": "💡 偏好推荐", "general": "💬 综合问答",
 }
 _NODE_LABELS = {
-    "load_memory": "读取长期记忆", "contextualize": "理解上下文", "classify": "识别意图",
+    "load_memory": "读取长期记忆", "rewrite_split": "改写与拆分", "classify": "识别意图",
+    "rag_gate": "判断是否需要检索", "direct_answer": "直接回答",
+    "ask_user": "澄清信息不足",
+    "multi_retrieve": "并行检索子任务",
     "comp_decompose": "拆解对比对象与维度", "comp_retrieve": "分组语义检索",
     "comp_synthesize": "逐维度综合对比", "tl_subject": "锁定梳理对象",
     "tl_periods": "按时期收集证据+配图", "tl_synthesize": "编织时间线叙事",
@@ -70,18 +76,17 @@ _NODE_LABELS = {
 # ═══════════════════════════════════════════════════════════════════
 # 渲染工具（与 app.py 一致，去除 Gradio 依赖）
 # ═══════════════════════════════════════════════════════════════════
-def _thumb_data_uri(image_file: str) -> str:
-    """本地 SemArt 图片转 base64 data URI（内联可靠，无需静态路由）。"""
+def _thumb_url(image_file: str) -> str:
+    """本地 SemArt 图片转可缓存 URL（不再内联 base64，避免会话库膨胀）。"""
     if not image_file:
         return ""
-    path = BASE_DIR / "SemArt" / "Images" / image_file
-    if not path.exists():
+    # M3：核心库图片是 http(s) URL，直接透传给前端
+    if image_file.startswith(("http://", "https://")):
+        return image_file
+    name = Path(image_file).name
+    if not name:
         return ""
-    try:
-        return "data:image/jpeg;base64," + base64.b64encode(
-            path.read_bytes()).decode("ascii")
-    except OSError:
-        return ""
+    return f"/api/images/{quote(name)}"
 
 
 def _chain_detail(node: str, out: dict) -> str:
@@ -92,32 +97,59 @@ def _chain_detail(node: str, out: dict) -> str:
         arts = (out.get("user_preferences") or {}).get("artists") or []
         return (f"已知偏好画家 <span class='hl'>{len(arts)}</span> 位"
                 if arts else "暂无历史偏好")
-    if node == "contextualize":
+    if node in ("contextualize", "rewrite_split"):
         q = (out.get("user_query") or "").strip()
-        return f"理解为：<span class='hl'>{q[:40]}{'…' if len(q) > 40 else ''}</span>" if q else ""
+        return (f"理解为：<span class='hl'>{html.escape(q[:40])}"
+                f"{'…' if len(q) > 40 else ''}</span>" if q else "")
     if node == "classify":
         it = out.get("intent", "")
-        return f"意图 = <span class='hl'>{_INTENT_LABELS.get(it, it)}</span>"
+        return f"意图 = <span class='hl'>{html.escape(_INTENT_LABELS.get(it, it))}</span>"
+    if node == "rag_gate":
+        return ("无需检索，直接回答" if out.get("rag_needed") is False
+                else "需要检索，进入检索路径")
+    if node == "direct_answer":
+        a = (out.get("final_answer") or "").strip()
+        return (f"直接回答：<span class='hl'>{html.escape(a[:48])}"
+                f"{'…' if len(a) > 48 else ''}</span>" if a else "")
+    if node == "ask_user":
+        q = (out.get("pending_clarification") or "").strip()
+        return (f"追问：<span class='hl'>{html.escape(q[:48])}{'…' if len(q) > 48 else ''}</span>"
+                if q else "信息充足，继续")
+    if node == "multi_retrieve":
+        grouped = out.get("multi_evidence") or {}
+        if not grouped:
+            return "单一子任务，直接进入 agent"
+        return "并行检索 <span class='hl'>%d</span> 个子任务" % len(grouped)
+    if node == "general_tools":
+        shown = out.get("shown_artworks") or []
+        rec = out.get("recommended_artists") or []
+        parts = []
+        if shown:
+            parts.append(f"已展示 <span class='hl'>{len(shown)}</span> 幅")
+        if rec:
+            parts.append(f"已推荐 <span class='hl'>{len(rec)}</span> 位")
+        return "；".join(parts) if parts else ""
     if node == "comp_decompose":
         subs = out.get("subjects") or []
-        return "对象：" + "、".join(f"<span class='hl'>{s}</span>" for s in subs)
+        return "对象：" + "、".join(
+            f"<span class='hl'>{html.escape(s)}</span>" for s in subs)
     if node == "comp_retrieve":
         docs = out.get("retrieved_docs") or {}
         return f"检索到 <span class='hl'>{sum(len(v) for v in docs.values())}</span> 条评论证据"
     if node == "rec_extract":
         feat = (out.get("extracted_features") or "").strip()
-        return (f"推理特征：<span class='hl'>{feat[:48]}{'…' if len(feat) > 48 else ''}</span>"
-                if feat else "")
+        return (f"推理特征：<span class='hl'>{html.escape(feat[:48])}"
+                f"{'…' if len(feat) > 48 else ''}</span>" if feat else "")
     if node == "rec_search":
         return f"匹配候选 <span class='hl'>{len(out.get('artworks') or [])}</span> 幅"
     if node == "rec_filter":
         cands = out.get("candidates") or []
-        names = "、".join(c.get("author", "") for c in cands[:4])
+        names = "、".join(html.escape(c.get("author", "")) for c in cands[:4])
         return (f"筛出 <span class='hl'>{len(cands)}</span> 位：{names}"
                 if cands else "未筛出匹配画家")
     if node == "tl_subject":
         subs = out.get("subjects") or []
-        return f"对象：<span class='hl'>{subs[0]}</span>" if subs else ""
+        return f"对象：<span class='hl'>{html.escape(subs[0])}</span>" if subs else ""
     if node == "tl_periods":
         return f"覆盖 <span class='hl'>{len(out.get('retrieved_docs') or {})}</span> 个时期"
     if node == "general_agent":
@@ -165,12 +197,13 @@ def _artwork_grid(artworks: list[dict], with_thumbs: bool) -> str:
         return ""
     cells = ""
     for aw in artworks[:4]:
-        uri = _thumb_data_uri(aw.get("image_file", ""))
+        uri = _thumb_url(aw.get("image_file", ""))
         if not uri:
             continue
-        title = (aw.get("title") or "")[:24]
-        author = (aw.get("author") or "")[:22]
-        cells += (f'<figure class="aw-card"><img src="{uri}" alt="{title}"/>'
+        title = html.escape((aw.get("title") or "")[:24])
+        author = html.escape((aw.get("author") or "")[:22])
+        uri_esc = html.escape(uri, quote=True)
+        cells += (f'<figure class="aw-card"><img src="{uri_esc}" alt="{title}" loading="lazy"/>'
                   f'<figcaption class="aw-cap"><b>{title}</b>{author}</figcaption></figure>')
     return f'<div class="aw-grid">{cells}</div>' if cells else ""
 
@@ -208,6 +241,98 @@ def _parse_artworks_from_messages(messages: list) -> list[dict]:
     return artworks
 
 
+def _collect_sources(
+    tool_messages: list,
+    struct_artworks: list[dict],
+    evidence: list[dict] | None = None,
+) -> list[dict]:
+    """从工具消息、结构化输出与检索证据收集参考来源（去重、限量）。"""
+    sources: list[dict] = []
+    seen: set = set()
+
+    def add(kind: str, label: str) -> None:
+        key = (kind, label)
+        if key in seen:
+            return
+        seen.add(key)
+        sources.append({"kind": kind, "label": label})
+
+    for msg in tool_messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        try:
+            data = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for item in (data if isinstance(data, list) else [data]):
+            if not isinstance(item, dict):
+                continue
+            src = item.get("source")
+            if src in ("user_pdf_text", "user_pdf_image"):
+                doc = item.get("doc_name") or "用户文档"
+                page = item.get("page")
+                label = f"《{doc}》第{page}页" if page else f"《{doc}》"
+                add("document", label)
+            elif src == "user_table":
+                name = item.get("doc_name") or item.get("dataset_id") or "用户表格"
+                add("table", f"表格《{name}》")
+            elif item.get("title") and not src:
+                author = item.get("author") or ""
+                label = f"《{item['title']}》" + (f" · {author}" if author else "")
+                add("artwork", label)
+
+    for aw in struct_artworks or []:
+        if isinstance(aw, dict) and aw.get("title") and not aw.get("source"):
+            author = aw.get("author") or ""
+            label = f"《{aw['title']}》" + (f" · {author}" if author else "")
+            add("artwork", label)
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        src = item.get("source")
+        if src in ("user_pdf_text", "user_pdf_image"):
+            doc = item.get("doc_name") or "用户文档"
+            page = item.get("page")
+            label = f"《{doc}》第{page}页" if page else f"《{doc}》"
+            add("document", label)
+        elif src == "user_table":
+            name = item.get("doc_name") or item.get("dataset_id") or "用户表格"
+            add("table", f"表格《{name}》")
+        elif item.get("title") and not src:
+            author = item.get("author") or ""
+            label = f"《{item['title']}》" + (f" · {author}" if author else "")
+            add("artwork", label)
+        elif item.get("url"):
+            add("web", item.get("url"))
+    return sources[:6]
+
+
+def _clear_thread_checkpoint(thread_id: str) -> None:
+    """尽力清理图检查点，避免中断运行残留导致下一轮续跑状态错乱。"""
+    cp = getattr(graph, "checkpointer", None)
+    if cp is None:
+        return
+    for meth in ("adelete_thread", "delete_thread", "adelete", "delete"):
+        fn = getattr(cp, meth, None)
+        if fn is None:
+            continue
+        try:
+            if meth.startswith("a"):
+                asyncio_ = __import__("asyncio")
+                try:
+                    asyncio_.get_running_loop()
+                except RuntimeError:
+                    asyncio_.run(fn(thread_id))
+                else:
+                    return
+            else:
+                fn(thread_id)
+            logger.info("已清理会话 %s 的图检查点（%s）", thread_id, meth)
+            return
+        except Exception:  # noqa: BLE001
+            continue
+
+
 def memory_count() -> int:
     """已记住的偏好项数（画家 + 风格）。"""
     prefs = load_preferences(WEB_USER_ID)
@@ -217,20 +342,37 @@ def memory_count() -> int:
 # ═══════════════════════════════════════════════════════════════════
 # 流式 Agent 调用
 # ═══════════════════════════════════════════════════════════════════
-def stream_answer(message: str, sid: str) -> Iterator[dict]:
+def stream_answer(
+    message: str,
+    sid: str,
+    regenerate: bool = False,
+    stop_event: threading.Event | None = None,
+) -> Iterator[dict]:
     """
     生成器：逐节点产出事件字典，API 层转 SSE。
       · {"type": "delta", "html": <助手气泡 HTML>}           —— 流式刷新
       · {"type": "done",  "html": ..., "session_id": sid,
-         "memory": <偏好数>}                                  —— 收尾
+         "memory": <偏好数>, "sources": [...], "cancelled": bool} —— 收尾
+
+    regenerate=True：丢弃最后一个用户消息及其后的回复，用本轮消息替代
+    （编辑 / 重新生成共用）。stop_event：客户端断开/停止时置位，生成器在
+    节点边界提前收尾并持久化部分内容。
     """
     message = (message or "").strip()
     if not message:
-        yield {"type": "done", "html": "", "session_id": sid, "memory": memory_count()}
+        yield {"type": "done", "html": "", "session_id": sid, "memory": memory_count(),
+               "sources": [], "cancelled": False}
         return
 
     # 历史消息在库中（前端无状态）：读出→追加本轮→回写
     history = load_conversation(sid)
+    if regenerate:
+        last_user = -1
+        for i, m in enumerate(history):
+            if m.get("role") == "user":
+                last_user = i
+        if last_user >= 0:
+            history = history[:last_user]
     history = history + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": _think_box([], done=False)},
@@ -243,10 +385,25 @@ def stream_answer(message: str, sid: str) -> Iterator[dict]:
     from src.retrieval.hybrid import get_hybrid_retriever
 
     active_dataset = get_hybrid_retriever().active_dataset
+    from src.data import documents_store
+
+    uploaded_docs = [
+        {
+            "doc_name": d.get("doc_name") or "",
+            "pages": d.get("pages"),
+            "kind": d.get("kind"),
+            "text_chunks": d.get("text_chunks") or 0,
+            "image_pages": d.get("image_pages") or 0,
+        }
+        for d in documents_store.list_documents()
+    ]
 
     intent, final_answer = "", ""
     struct_artworks: list[dict] = []
     tool_artworks: list[dict] = []
+    tool_msgs: list = []
+    evidence: list[dict] = []
+    cancelled = False
 
     try:
         for chunk in graph.stream(
@@ -256,7 +413,15 @@ def stream_answer(message: str, sid: str) -> Iterator[dict]:
                 "messages": [HumanMessage(content=message)],
                 "user_query": message,
                 "user_id": WEB_USER_ID,
+                "conversation_id": sid,
+                "uploaded_docs": uploaded_docs,
                 "intent": "",
+                "rag_needed": True,
+                "tool_rounds": 0,
+                "context_chars": 0,
+                "executed_tool_signatures": [],
+                "ask_user": "",
+                "pending_clarification": "",
                 "dataset_id": active_dataset,  # Stage 2/5：每轮重置当前生效数据源
                 "subjects": [],
                 "sub_queries": [],
@@ -274,6 +439,9 @@ def stream_answer(message: str, sid: str) -> Iterator[dict]:
             config={"configurable": {"thread_id": sid}},
             stream_mode="updates",
         ):
+            if stop_event is not None and stop_event.is_set():
+                cancelled = True
+                break
             for node, out in chunk.items():
                 if node == "__interrupt__":
                     continue
@@ -285,35 +453,61 @@ def stream_answer(message: str, sid: str) -> Iterator[dict]:
                         final_answer = out["final_answer"]
                     if out.get("artworks"):
                         struct_artworks = out["artworks"]
+                    for key in ("multi_evidence", "retrieved_docs"):
+                        groups = out.get(key) or {}
+                        if isinstance(groups, dict):
+                            for vals in groups.values():
+                                if isinstance(vals, list):
+                                    evidence.extend(
+                                        v for v in vals if isinstance(v, dict))
+                    if isinstance(out.get("web_results"), list):
+                        evidence.extend(
+                            v for v in out["web_results"] if isinstance(v, dict))
                     if out.get("messages"):
-                        tool_artworks.extend(_parse_artworks_from_messages(out["messages"]))
+                        msgs = out["messages"]
+                        tool_artworks.extend(_parse_artworks_from_messages(msgs))
+                        tool_msgs.extend(m for m in msgs if isinstance(m, ToolMessage))
                 history[-1]["content"] = _assistant_bubble(steps, "", [], False, done=False)
                 yield {"type": "delta", "html": history[-1]["content"]}
 
         artworks = struct_artworks or tool_artworks
         with_thumbs = intent in ("timeline", "recommendation", "general")
-        reply = final_answer or "（未能生成回答，请重试）"
+        reply = (final_answer or "（未能生成回答，请重试）") if not cancelled \
+            else "（已停止生成，以上为已生成的部分内容）"
+        if cancelled:
+            with_thumbs = False
         history[-1]["content"] = _assistant_bubble(steps, reply, artworks, with_thumbs, done=True)
+        history[-1]["sources"] = _collect_sources(tool_msgs, struct_artworks, evidence)
+        if cancelled:
+            _clear_thread_checkpoint(sid)
     except Exception as e:  # noqa: BLE001 — 面向用户兜底，避免整页崩溃
         logger.exception("graph.stream failed: %s", e)
         steps.append({"node": "error", "detail": f"<span class='hl'>{type(e).__name__}</span>"})
         history[-1]["content"] = _assistant_bubble(
             steps, "😔 抱歉，处理时出错了。可能是模型接口超时或未配置 API Key，请稍后重试。",
             [], False, done=True)
+        history[-1]["sources"] = []
 
     title = next((m["content"] for m in history if m["role"] == "user"), message)
     save_conversation(sid, title, history)
     yield {"type": "done", "html": history[-1]["content"],
-           "session_id": sid, "memory": memory_count()}
+           "session_id": sid, "memory": memory_count(),
+           "sources": history[-1].get("sources", []), "cancelled": cancelled}
 
 
 # ── 会话 / 偏好：透传给 REST 端点 ──
-def sessions() -> list[dict]:
-    """侧栏列表：附带相对时间。"""
-    out = []
-    for c in list_conversations():
-        out.append({**c, "relative": relative_time(c["updated_at"])})
-    return out
+def sessions(offset: int = 0, limit: int = 50) -> tuple[list[dict], int]:
+    """侧栏列表（分页）：附带相对时间，返回 (items, total)。"""
+    convos, total = list_conversations(limit=limit, offset=offset)
+    out = [
+        {**c, "relative": relative_time(c["updated_at"])}
+        for c in convos
+    ]
+    return out, total
+
+
+def rename_conversation(sid: str, title: str) -> bool:
+    return rename_conversation_db(sid, title)
 
 
 def conversation(sid: str) -> list[dict]:
@@ -322,6 +516,29 @@ def conversation(sid: str) -> list[dict]:
 
 def remove_conversation(sid: str) -> None:
     delete_conversation(sid)
+
+
+def record_attachment(sid: str, doc_id: str, doc_name: str, kind: str) -> dict:
+    """把「已上传文档」事件写进会话历史，切换会话/刷新后仍可见。"""
+    if not sid or not doc_id:
+        return {"ok": False, "error": "缺少会话或文档标识"}
+    history = load_conversation(sid)
+    if any(
+        m.get("role") == "attachment" and m.get("doc_id") == doc_id
+        for m in history
+    ):
+        return {"ok": True, "duplicated": True}
+    history.append({
+        "role": "attachment",
+        "content": doc_name or "文档",
+        "doc_id": doc_id,
+        "doc_name": doc_name or "文档",
+        "kind": kind or "pdf",
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    title = next((m["content"] for m in history if m["role"] == "user"), None)
+    save_conversation(sid, title or "新对话", history)
+    return {"ok": True, "duplicated": False}
 
 
 def preferences() -> dict:
@@ -404,11 +621,11 @@ def confirm_table(doc_id: str, roles: dict) -> dict:
 
 
 def datasets() -> dict:
-    """数据源清单（Stage 5 前端切换器）：semart + 所有 active 表格。"""
+    """数据源清单（Stage 5 前端切换器）：核心库 + 所有 active 表格。"""
     from src.retrieval.hybrid import get_hybrid_retriever
 
     hybrid = get_hybrid_retriever()
-    items = [{"dataset_id": "semart", "name": "SemArt 画作库（默认）", "kind": "builtin"}]
+    items = [{"dataset_id": "core", "name": "核心库（默认）", "kind": "builtin"}]
     for st in documents():
         if st.get("kind") == "table" and st.get("status") == "active":
             items.append({
@@ -476,8 +693,8 @@ def delete_document(doc_id: str) -> dict:
         unregister_table(dataset_id)
         hybrid = get_hybrid_retriever()
         if hybrid.active_dataset == dataset_id:
-            hybrid.active_dataset = "semart"
-            result["active_dataset_reset"] = "semart"
+            hybrid.active_dataset = "core"
+            result["active_dataset_reset"] = "core"
 
     # 3. 删除上传文件目录
     work_dir = UPLOADS_DIR / kb_id / doc_id
@@ -493,4 +710,7 @@ def delete_document(doc_id: str) -> dict:
     # 4. 删除 SQLite 记录
     deleted = documents_store.delete_document(doc_id)
     result["db_deleted"] = deleted
+
+    # 5. 从所有会话历史中移除该文档的附件记录
+    result["attachment_records_removed"] = remove_attachment_from_all(doc_id)
     return result

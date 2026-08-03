@@ -13,14 +13,25 @@
 """
 
 import json
+import os
+import shutil
 import sqlite3
 import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
-# 与偏好库同目录：data/memory/conversations.db
-_DB_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "data" / "memory"
+# 与偏好库同目录：data/memory/conversations.db（P1 目录收敛）
+# 测试可通过 ARTAGENT_MEMORY_DIR 覆盖，避免污染真实数据
+_DB_DIR = Path(os.getenv(
+    "ARTAGENT_MEMORY_DIR",
+    str(Path(__file__).resolve().parent.parent.parent / "data" / "memory"),
+))
 _DB_PATH = _DB_DIR / "conversations.db"
+# 旧路径（历史笔误多了一层 data/）：存在则迁移一次
+_LEGACY_DB_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "data" / "data" / "memory"
+    / "conversations.db"
+) if not os.getenv("ARTAGENT_MEMORY_DIR") else None
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -28,8 +39,9 @@ _conn: sqlite3.Connection | None = None
 
 def _get_conn() -> sqlite3.Connection:
     """返回全局单例连接，首次调用时建表。"""
-    global _conn
+    global _conn, _DB_PATH
     if _conn is None:
+        _DB_PATH = _migrate_legacy_db()
         _DB_DIR.mkdir(parents=True, exist_ok=True)
         _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
         _conn.execute(
@@ -44,6 +56,21 @@ def _get_conn() -> sqlite3.Connection:
         )
         _conn.commit()
     return _conn
+
+
+def _migrate_legacy_db() -> Path:
+    """旧路径 data/data/memory/conversations.db → data/memory/（一次性迁移）。
+
+    返回最终应使用的 DB 路径（迁移失败时回退旧路径）。
+    """
+    if _LEGACY_DB_PATH is None or _DB_PATH.exists() or not _LEGACY_DB_PATH.exists():
+        return _DB_PATH
+    try:
+        _DB_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(_LEGACY_DB_PATH), str(_DB_PATH))
+        return _DB_PATH
+    except OSError:
+        return _LEGACY_DB_PATH
 
 
 def save_conversation(session_id: str, title: str, messages: list[dict]) -> None:
@@ -68,18 +95,36 @@ def save_conversation(session_id: str, title: str, messages: list[dict]) -> None
         conn.commit()
 
 
-def list_conversations(limit: int = 50) -> list[dict]:
-    """按最近更新降序返回 [{session_id, title, updated_at}]，供侧栏渲染。"""
+def list_conversations(limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
+    """按最近更新降序返回 (会话列表, 总数)，供侧栏分页渲染。"""
     with _lock:
         conn = _get_conn()
+        total = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
         rows = conn.execute(
             """
             SELECT session_id, title, updated_at FROM conversations
-            ORDER BY updated_at DESC LIMIT ?
+            ORDER BY updated_at DESC LIMIT ? OFFSET ?
             """,
-            (limit,),
+            (limit, offset),
         ).fetchall()
-    return [{"session_id": r[0], "title": r[1], "updated_at": r[2]} for r in rows]
+    return (
+        [{"session_id": r[0], "title": r[1], "updated_at": r[2]} for r in rows],
+        total,
+    )
+
+
+def rename_conversation(session_id: str, title: str) -> bool:
+    """重命名会话标题；返回是否找到并更新。"""
+    if not session_id or not title:
+        return False
+    with _lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "UPDATE conversations SET title = ? WHERE session_id = ?",
+            (title[:60], session_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def load_conversation(session_id: str) -> list[dict]:
@@ -106,6 +151,52 @@ def delete_conversation(session_id: str) -> None:
         conn = _get_conn()
         conn.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
         conn.commit()
+
+
+def remove_attachment_from_all(doc_id: str) -> int:
+    """从所有会话历史中移除引用某文档的附件记录；返回受影响会话数。
+
+    文档删除后调用，避免会话里残留指向已删除文档的附件卡片。
+    """
+    if not doc_id:
+        return 0
+    with _lock:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT session_id, messages_json FROM conversations"
+        ).fetchall()
+        now = datetime.now(timezone.utc).isoformat()
+        changed = 0
+        for session_id, payload in rows:
+            try:
+                messages = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            new_msgs = [
+                m for m in messages
+                if not (m.get("role") == "attachment" and m.get("doc_id") == doc_id)
+            ]
+            if len(new_msgs) == len(messages):
+                continue
+            if new_msgs:
+                title = next(
+                    (m["content"] for m in new_msgs if m["role"] == "user"), "新对话"
+                )
+                conn.execute(
+                    """
+                    UPDATE conversations
+                    SET title = ?, messages_json = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (title[:60], json.dumps(new_msgs, ensure_ascii=False), now, session_id),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM conversations WHERE session_id = ?", (session_id,)
+                )
+            changed += 1
+        conn.commit()
+    return changed
 
 
 def relative_time(iso_ts: str) -> str:

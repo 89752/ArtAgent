@@ -52,8 +52,9 @@ def get_vision_llm() -> ChatOpenAI:
     所有需要"看见图片"的场景（image_lookup analyze、read_page_image）
     都走这个 qwen omni 实例。
     """
+    model = os.getenv("VISION_MODEL", "qwen3.5-omni-plus-2026-03-15")
     return ChatOpenAI(
-        model="qwen3.5-omni-plus",
+        model=model,
         api_key=os.getenv("DEEPSEEK_API_KEY"),
         base_url=os.getenv(
             "DEEPSEEK_BASE_URL",

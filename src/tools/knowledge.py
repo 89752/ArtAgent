@@ -33,26 +33,43 @@ def query_painter_knowledge(painter_name: str) -> dict:
         结构化统计：found / matched_author / works_count / main_schools /
         active_timeframes / common_techniques / sample_works
     """
-    from src.data.loader import get_dataset
+    # 2026-08-02：按当前生效数据源（semart / core）的角色列统计，不再绑定 SemArt
+    from src.retrieval.hybrid import get_hybrid_retriever
+    from src.retrieval.structured_retriever import get_structured_retriever
 
-    df = get_dataset().all
-    works = fuzzy_match(df, "AUTHOR", painter_name)
+    dataset_id = get_hybrid_retriever().active_dataset
+    retriever = get_structured_retriever(dataset_id)
+    schema = retriever.schema
+    df = retriever.df
+    works = fuzzy_match(df, schema.entity_col, painter_name)
 
     if works.empty:
         return {
             "painter": painter_name,
             "found": False,
             "works_count": 0,
-            "note": "SemArt 数据集中未收录该画家的作品，请基于自身知识回答或考虑 web_search。",
+            "note": f"{dataset_id} 中未收录该画家的作品，请基于自身知识回答或考虑 web_search。",
         }
 
     return {
         "painter": painter_name,
         "found": True,
-        "matched_author": works["AUTHOR"].value_counts().index[0],
+        "matched_author": works[schema.entity_col].value_counts().index[0],
         "works_count": len(works),
-        "main_schools": works["SCHOOL"].value_counts().head(3).index.tolist(),
-        "active_timeframes": works["TIMEFRAME"].value_counts().head(3).index.tolist(),
-        "common_techniques": works["TECHNIQUE"].value_counts().head(3).to_dict(),
-        "sample_works": works["TITLE"].head(5).tolist(),
+        "main_schools": (
+            works[schema.school_col].value_counts().head(3).index.tolist()
+            if schema.school_col else []
+        ),
+        "active_timeframes": (
+            works[schema.group_axis_col].value_counts().head(3).index.tolist()
+            if schema.group_axis_col else []
+        ),
+        "common_techniques": (
+            works[schema.technique_col].value_counts().head(3).to_dict()
+            if schema.technique_col else {}
+        ),
+        "sample_works": (
+            works[schema.title_col].head(5).tolist()
+            if schema.title_col else []
+        ),
     }

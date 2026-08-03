@@ -18,6 +18,9 @@ ArtAgent Web —— FastAPI 后端（替代 Gradio）。
 
 import os
 import json
+import asyncio
+import logging
+import threading
 from pathlib import Path
 
 # 仅对本地地址绕过系统代理（沿用 app.py：避免启动自检走代理 502，又不断外部 API）。
@@ -38,12 +41,43 @@ from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, Request, UploadFile
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field
 
 from web import service
 from src.data import documents_store
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+_SEMART_IMAGES = BASE_DIR / "SemArt" / "Images"
+logger = logging.getLogger("api")
+
+
+# ── 请求体模型（统一参数校验） ──
+class ChatIn(BaseModel):
+    message: str = Field(default="", max_length=8000)
+    session_id: str = Field(default="", max_length=128)
+    regenerate: bool = False
+
+
+class AttachmentIn(BaseModel):
+    doc_id: str = Field(min_length=1, max_length=64)
+
+
+class SchemaIn(BaseModel):
+    entity_col: str = Field(min_length=1, max_length=200)
+    group_axis_col: str | None = None
+    description_col: str | None = None
+    image_col: str | None = None
+    display_name: str | None = Field(default=None, max_length=60)
+
+
+class DatasetIn(BaseModel):
+    dataset_id: str = Field(min_length=1, max_length=128)
+
+
+class RenameIn(BaseModel):
+    title: str = Field(min_length=1, max_length=60)
 
 
 @asynccontextmanager
@@ -58,9 +92,37 @@ app = FastAPI(title="西方艺术智能助手", docs_url=None, redoc_url=None, l
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.exception_handler(RequestValidationError)
+async def _validation_handler(_request: Request, exc: RequestValidationError):
+    errs = exc.errors()
+    msg = errs[0].get("msg", "参数错误") if errs else "参数错误"
+    return JSONResponse({"ok": False, "error": f"参数错误：{msg}"}, status_code=422)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_handler(_request: Request, exc: Exception):
+    logger.exception("unhandled error: %s", exc)
+    return JSONResponse({"ok": False, "error": "服务器内部错误"}, status_code=500)
+
+
 @app.get("/")
 def index():
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/api/images/{file_name}")
+def semart_image(file_name: str):
+    """SemArt 配图静态服务：basename 防穿越 + 长缓存（替代 base64 内联）。"""
+    name = Path(file_name).name
+    base = _SEMART_IMAGES.resolve()
+    path = (base / name).resolve()
+    if path.parent != base or not path.is_file():
+        return JSONResponse({"ok": False, "error": "图片不存在"}, status_code=404)
+    return FileResponse(
+        str(path),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/api/bootstrap")
@@ -68,15 +130,33 @@ def bootstrap():
     """首屏数据：场景卡（含缩略图 data URI）+ 已记忆偏好数。"""
     cards = [
         {"query": c["query"], "text": c["text"],
-         "thumb": service._thumb_data_uri(c["image"])}
+         "thumb": service._thumb_url(c["image"])}
         for c in service.SCENE_CARDS
     ]
     return JSONResponse({"cards": cards, "memory": service.memory_count()})
 
 
 @app.get("/api/sessions")
-def get_sessions():
-    return JSONResponse(service.sessions())
+def get_sessions(offset: int = 0, limit: int = 50):
+    """会话列表：分页返回 {items, total, has_more}。"""
+    offset = max(0, offset)
+    limit = min(max(1, limit), 100)
+    items, total = service.sessions(offset=offset, limit=limit)
+    return JSONResponse({
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "has_more": offset + len(items) < total,
+    })
+
+
+@app.patch("/api/sessions/{sid}")
+async def rename_session(sid: str, payload: RenameIn):
+    """重命名会话。"""
+    ok = service.rename_conversation(sid, payload.title)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "会话不存在"}, status_code=404)
+    return JSONResponse({"ok": True, "title": payload.title})
 
 
 @app.get("/api/sessions/{sid}")
@@ -90,6 +170,17 @@ def del_session(sid: str):
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/sessions/{sid}/attachment")
+async def attach_session_document(sid: str, payload: AttachmentIn):
+    """把已上传文档记录进会话历史（前端刷新/切换会话后仍可见）。"""
+    doc = service.document_status(payload.doc_id)
+    if not doc:
+        return JSONResponse({"ok": False, "error": "文档不存在"}, status_code=404)
+    return JSONResponse(service.record_attachment(
+        sid, payload.doc_id, doc.get("doc_name") or "", doc.get("kind") or ""
+    ))
+
+
 @app.delete("/api/preferences")
 def del_preferences():
     service.reset_preferences()
@@ -97,15 +188,51 @@ def del_preferences():
 
 
 @app.post("/api/chat")
-async def chat(request: Request):
-    """SSE 流式对话。请求体：{message, session_id}。"""
-    body = await request.json()
-    message = (body.get("message") or "").strip()
-    sid = body.get("session_id") or ""
+async def chat(payload: ChatIn):
+    """SSE 流式对话。请求体：{message, session_id, regenerate}。
 
-    def event_stream():
-        for evt in service.stream_answer(message, sid):
-            yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+    实现：生产者线程驱动 sync 生成器（graph.stream 为阻塞调用），事件经
+    asyncio.Queue 交给响应流。客户端断开/停止时 finally 置 stop_event，
+    生产者在节点边界检测到后自行收尾（保存部分内容），线程安全退出。
+    不依赖 request.is_disconnected()（在部分测试/代理场景会死锁）。
+    """
+    stop_event = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def put(evt) -> None:
+        """跨线程安全入队（asyncio.Queue 非线程安全，必须经 loop 调度）。"""
+        loop.call_soon_threadsafe(queue.put_nowait, evt)
+
+    def producer() -> None:
+        it = service.stream_answer(
+            payload.message,
+            payload.session_id,
+            regenerate=payload.regenerate,
+            stop_event=stop_event,
+        )
+        try:
+            for evt in it:
+                if stop_event.is_set():
+                    break
+                put(evt)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("chat producer failed: %s", e)
+            put({"type": "error", "message": "服务器内部错误"})
+        finally:
+            put(None)  # 哨兵：流结束
+
+    threading.Thread(target=producer, daemon=True, name="chat-producer").start()
+
+    async def event_stream():
+        try:
+            while True:
+                evt = await queue.get()
+                if evt is None:
+                    break
+                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+        finally:
+            stop_event.set()   # 客户端断开/正常收尾：通知生产者尽早停止
 
     return StreamingResponse(
         event_stream(),
@@ -163,15 +290,14 @@ async def upload_document(file: UploadFile, background: BackgroundTasks):
 
 
 @app.post("/api/documents/{doc_id}/schema")
-async def confirm_schema(doc_id: str, request: Request):
+async def confirm_schema(doc_id: str, payload: SchemaIn):
     """确认/纠正表格 schema（Stage 5）：用户确认后注册数据源生效。
 
     请求体：{entity_col, group_axis_col?, description_col?, image_col?, display_name?}
     （空串/null 表示该角色无列；entity_col 必填）
     """
-    roles = await request.json()
     try:
-        result = service.confirm_table(doc_id, roles or {})
+        result = service.confirm_table(doc_id, payload.model_dump())
     except KeyError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
     except ValueError as e:
@@ -186,12 +312,10 @@ def get_datasets():
 
 
 @app.post("/api/dataset/active")
-async def switch_dataset(request: Request):
+async def switch_dataset(payload: DatasetIn):
     """切换当前生效数据源（Stage 5）。请求体：{dataset_id}。"""
-    body = await request.json()
-    dataset_id = (body or {}).get("dataset_id") or ""
     try:
-        return JSONResponse(service.set_active_dataset(dataset_id))
+        return JSONResponse(service.set_active_dataset(payload.dataset_id))
     except KeyError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
 

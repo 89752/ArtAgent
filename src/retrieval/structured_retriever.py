@@ -1,10 +1,10 @@
 """
 结构化表检索器（Stage 2）：TableSchema + StructuredTableRetriever。
 
-核心思想：timeline / recommendation 依赖的不再是"SemArt"这个具体名字，
+核心思想：timeline / recommendation 依赖的不是某个具体数据集名字，
 而是"当前数据源的 schema 声明了它有实体列 / 分组轴列 / 描述列"这个抽象。
-SemArt 只是第一个满足该抽象、被注册的数据源（dataset_id="semart"）；
-Stage 5 用户上传的 CSV/Excel 将以同样方式注册复用同一套能力。
+内置核心库（dataset_id="core"）与 Stage 5 用户上传的 CSV/Excel
+都以同样方式注册复用同一套能力。
 
 懒加载设计：注册时只落 schema 与若干 loader，不真正读 CSV / 开 Chroma /
 加载 BGE 模型——路由层能力开关只查 schema，不能让每次意图分类都付出
@@ -13,7 +13,9 @@ Stage 5 用户上传的 CSV/Excel 将以同样方式注册复用同一套能力�
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import pandas as pd
@@ -38,6 +40,12 @@ class TableSchema(BaseModel):
     group_axis_col: Optional[str] = None  # 分组/时间轴列，如 TIMEFRAME；没有则 None
     description_col: str  # 描述文本列，如 DESCRIPTION
     image_col: Optional[str] = None  # 图片引用列，如 IMAGE_FILE
+    # 检索工具（exact_lookup / query_painter_knowledge / image_lookup）按角色取列，
+    # 不再硬编码 SemArt 列名（2026-08-02 核心库切换改造）
+    title_col: Optional[str] = None
+    date_col: Optional[str] = None
+    technique_col: Optional[str] = None
+    school_col: Optional[str] = None
 
     @property
     def supports_timeline(self) -> bool:
@@ -50,13 +58,20 @@ class TableSchema(BaseModel):
         return bool(self.entity_col and self.description_col)
 
 
-# SemArt 的 schema 配置：现有硬编码字段名的配置化归宿
-SEMART_SCHEMA = TableSchema(
-    entity_col="AUTHOR",
-    group_axis_col="TIMEFRAME",
-    description_col="DESCRIPTION",
-    image_col="IMAGE_FILE",
+# 核心库（从零构建）schema：列名自由，角色对齐 TableSchema
+CORE_SCHEMA = TableSchema(
+    entity_col="artist",
+    group_axis_col="year_bucket",
+    description_col="description",
+    image_col="image_url",
+    title_col="title",
+    date_col="year_display",
+    technique_col="material",
+    school_col="movement",
 )
+
+# 核心库归一化后的作品表（normalize_core.py 产出；不存在则不注册 core）
+CORE_DATA_PATH = Path(os.getenv("CORE_DATA_PATH", "./data/core/artworks_core.csv"))
 
 
 def _entity_tokens(names: list[str]) -> list[str]:
@@ -173,7 +188,11 @@ class StructuredTableRetriever:
         if not names:
             return list(results)
         key = self.schema.entity_col.lower()
-        return [r for r in results if not self.entity_matches(r.get(key, ""), names)]
+        # 兼容：core 结果经 _format_result 输出为 author 键（而非 artist）
+        return [
+            r for r in results
+            if not self.entity_matches(r.get(key) or r.get("author") or "", names)
+        ]
 
     # ── BaseRetriever 协议：HybridRetriever 融合入口 ───────────────
     def search(
@@ -186,6 +205,8 @@ class StructuredTableRetriever:
         collection = self._get_collection()
         embed_fn = self._get_embed_fn()
         if collection is not None and embed_fn is not None:
+            if collection.count() == 0:
+                return []  # 空集合短路（core 未索引时），避免 n_results=0 报错
             return self._vector_search(collection, embed_fn, query, top_k)
         return self._fuzzy_search(query, top_k, filters)
 
@@ -338,29 +359,69 @@ def register_structured_dataset(
     return retriever
 
 
-def get_structured_retriever(dataset_id: str = "semart") -> StructuredTableRetriever:
-    """按 dataset_id 取已注册的结构化检索器；semart 首次访问时懒注册。
+def _register_core() -> None:
+    """把核心库注册为内置结构化数据源（df / Chroma / BGE 全部懒加载）。
 
-    懒注册等价于"系统启动时自动注册 SemArt"，但只在真正用到时才付出
-    资源代价（且 schema 立即可用，df/向量集合仍保持懒加载）。
+    数据未就绪（CORE_DATA_PATH 不存在）时抛 KeyError——调用方
+    （能力开关/注册表）会捕获并降级 general，不打断启动。
     """
-    if dataset_id not in _REGISTRY:
-        if dataset_id != "semart":
-            raise KeyError(f"未注册的数据源：{dataset_id}")
-        _register_semart()
-    return _REGISTRY[dataset_id]
+    path = CORE_DATA_PATH
+    if not Path(path).exists():
+        raise KeyError(f"核心库数据未就绪：{path}（先跑 normalize_core.py）")
 
+    def df_loader():
+        df = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False)
+        # 核心库 CSV 列名 → 角色列/展示键 归一化（2026-08-02）：
+        # CSV 用 artist_name/year_display/material/movement/year_bucket/image_url，
+        # schema 与 row_to_artwork_dict 统一用 artist/author/date/technique/
+        # school/timeframe/image_file——不加别名会 KeyError 或产出空证据。
+        if "artist" not in df.columns and "artist_name" in df.columns:
+            df["artist"] = df["artist_name"]
+        # CSV 无 year_display（index_core 入库时才算）：这里按同一规则补，
+        # 保证结构化工具与 Chroma metadata 的日期显示一致
+        if "year_display" not in df.columns:
+            inc = (
+                df["inception"].astype(str).str.strip()
+                if "inception" in df.columns
+                else ""
+            )
+            yr = df["year"].astype(str).str.strip() if "year" in df.columns else ""
+            df["year_display"] = inc.where(inc != "", yr)
+        alias_map = {
+            "year_display": "date",
+            "material": "technique",
+            "movement": "school",
+            "year_bucket": "timeframe",
+            "image_url": "image_file",
+        }
+        for src, dst in alias_map.items():
+            if src in df.columns and dst not in df.columns:
+                df[dst] = df[src]
+        if "author" not in df.columns:
+            df["author"] = df["artist"]
+        return df
 
-def _register_semart() -> None:
-    """把 SemArt 注册为第一个结构化数据源（df / Chroma / BGE 全部懒加载）。"""
-    from src.data.loader import get_dataset
-    from src.retrieval.hybrid import get_bge_embed_fn, get_chroma_collection
+    from src.retrieval.hybrid import get_bge_m3_embed_fn, get_or_create_chroma_collection
 
     register_structured_dataset(
-        "semart",
-        SEMART_SCHEMA,
-        source="semart",
-        df_loader=lambda: get_dataset().all,
-        collection_loader=lambda: get_chroma_collection("semart"),
-        embed_fn_loader=get_bge_embed_fn,
+        "core",
+        CORE_SCHEMA,
+        source="core",
+        df_loader=df_loader,
+        collection_loader=lambda: get_or_create_chroma_collection("core"),
+        embed_fn_loader=get_bge_m3_embed_fn,  # 核心库中文查询 → 多语言向量空间
     )
+
+
+# 内置数据集注册表：首次访问懒注册
+_BUILTIN_REGISTRARS = {"core": _register_core}
+
+
+def get_structured_retriever(dataset_id: str = "core") -> StructuredTableRetriever:
+    """按 dataset_id 取已注册的结构化检索器；内置数据集首次访问懒注册。"""
+    if dataset_id not in _REGISTRY:
+        registrar = _BUILTIN_REGISTRARS.get(dataset_id)
+        if registrar is None:
+            raise KeyError(f"未注册的数据源：{dataset_id}")
+        registrar()
+    return _REGISTRY[dataset_id]

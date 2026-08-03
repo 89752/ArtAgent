@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from src.retrieval.base import RetrievalResult
-from src.retrieval.hybrid import get_bge_embed_fn, get_or_create_chroma_collection
+from src.retrieval.hybrid import get_bge_m3_embed_fn, get_or_create_chroma_collection
 from src.utils.logging_config import get_logger
 
 logger = get_logger("retrieval.userdoc_text")
@@ -41,7 +41,7 @@ class UserDocTextRetriever:
                 where = {"$and": [{k: v} for k, v in conds.items()]}
 
         results = collection.query(
-            query_embeddings=[get_bge_embed_fn()(query)],
+            query_embeddings=[get_bge_m3_embed_fn()(query)],
             n_results=min(top_k, collection.count()),
             include=["metadatas", "distances", "documents"],
             **({"where": where} if where else {}),

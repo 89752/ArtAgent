@@ -46,17 +46,23 @@ def lookup_images(
     top_k: int = 3,
 ) -> list[dict]:
     """底层实现，供节点直接调用（绕过 @tool 包装）。"""
-    from src.data.loader import get_dataset
+    # 2026-08-02：按当前生效数据源的角色列检索（semart / core）
+    from src.retrieval.hybrid import get_hybrid_retriever
+    from src.retrieval.structured_retriever import get_structured_retriever
+    from src.tools.retrieval import _artwork_from_schema_row
 
-    df = get_dataset().all
+    dataset_id = get_hybrid_retriever().active_dataset
+    retriever = get_structured_retriever(dataset_id)
+    schema = retriever.schema
+    df = retriever.df
 
-    if title:
-        df = fuzzy_match(df, "TITLE", title)
+    if title and schema.title_col:
+        df = fuzzy_match(df, schema.title_col, title)
     if author:
-        df = fuzzy_match(df, "AUTHOR", author)
-    if timeframe:
+        df = fuzzy_match(df, schema.entity_col, author)
+    if timeframe and schema.group_axis_col:
         df = df[
-            df["TIMEFRAME"].str.lower().str.contains(
+            df[schema.group_axis_col].astype(str).str.lower().str.contains(
                 timeframe.lower(), na=False, regex=False
             )
         ]
@@ -66,8 +72,12 @@ def lookup_images(
 
     out = []
     for _, row in df.head(top_k).iterrows():
-        d = row_to_artwork_dict(row)
-        d["image_path"] = _resolve_path(d["image_file"])
+        d = _artwork_from_schema_row(schema, row.to_dict())
+        image = d["image_file"]
+        if image.startswith(("http://", "https://")):
+            d["image_path"] = image  # core 图是 URL，直通前端
+        else:
+            d["image_path"] = _resolve_path(image)
         out.append(d)
     return out
 
@@ -123,25 +133,40 @@ def _find_image_file(artwork_query: str) -> Optional[str]:
     按标题或文件名查找 IMAGE_FILE。
     优先精确匹配文件名，其次走统一模糊匹配找标题。
     """
-    from src.data.loader import get_dataset
+    from src.retrieval.hybrid import get_hybrid_retriever
+    from src.retrieval.structured_retriever import get_structured_retriever
 
-    df = get_dataset().all
+    dataset_id = get_hybrid_retriever().active_dataset
+    retriever = get_structured_retriever(dataset_id)
+    schema = retriever.schema
+    df = retriever.df
+    img_col = schema.image_col
+    if not img_col:
+        return None
 
-    # 1. 精确匹配文件名
-    exact = df[df["IMAGE_FILE"].str.lower() == artwork_query.lower()]
+    # 1. 精确匹配图片值（文件名/URL）
+    exact = df[df[img_col].astype(str).str.lower() == artwork_query.lower()]
     if not exact.empty:
-        return exact.iloc[0]["IMAGE_FILE"]
+        return str(exact.iloc[0][img_col])
 
     # 2. 标题模糊匹配（三级递进），取第一条
-    matched = fuzzy_match(df, "TITLE", artwork_query)
-    if not matched.empty:
-        return matched.iloc[0]["IMAGE_FILE"]
+    if schema.title_col:
+        matched = fuzzy_match(df, schema.title_col, artwork_query)
+        if not matched.empty:
+            return str(matched.iloc[0][img_col])
 
     return None
 
 
 def _analyze_image_file(image_file: str, analysis_focus: str) -> dict:
     """对已定位的 IMAGE_FILE 调用视觉模型分析，返回结构化结果。"""
+    if image_file.startswith(("http://", "https://")):
+        # core 图是 URL：视觉模型暂不支持直接读 URL，返回提示（本地 SemArt 图不受影响）
+        return {
+            "success": False,
+            "error": "URL 图片暂不支持视觉分析（核心库图片）",
+            "image_file": image_file,
+        }
     from src.data.loader import get_dataset
 
     df = get_dataset().all
@@ -221,6 +246,10 @@ def image_lookup(
 ):
     """
     从 SemArt 本地图片库查找画作配图；analyze=True 时对定位到的画作做视觉分析。
+
+    ⚠️ 成本规则：analyze=True 调用付费视觉模型且很慢（单幅 20-30 秒）。
+    只有用户明确要求"看图分析"某幅具体画作（构图/色彩/笔触）时才传 True；
+    对比、时间线、推荐等任何证据收集场景一律保持 analyze=False。
 
     适用场景：
       - 需要为某画家/某时期的叙述配上代表作品图（默认模式，快、免费）

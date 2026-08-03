@@ -16,13 +16,18 @@
 """
 
 import os
+import shutil
 import sqlite3
 import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
-# 数据库落盘位置：data/memory/preferences.db
-_DB_DIR = Path(os.getenv("INDEX_DIR", "./data")).parent / "data" / "memory"
+# 数据库落盘位置：data/memory/preferences.db（与 conversations/summary 统一目录）
+# 测试可通过 ARTAGENT_MEMORY_DIR 覆盖，避免污染真实数据
+_DB_DIR = Path(os.getenv(
+    "ARTAGENT_MEMORY_DIR",
+    str(Path(__file__).resolve().parent.parent.parent / "data" / "memory"),
+))
 _DB_PATH = _DB_DIR / "preferences.db"
 
 # sqlite3 连接非线程安全，用锁保护（Gradio 多线程环境下需要）
@@ -32,10 +37,59 @@ _conn: sqlite3.Connection | None = None
 VALID_KINDS = {"artist", "style"}
 
 
+def _legacy_preferences_path() -> Path | None:
+    """旧路径：历史上 INDEX_DIR 被设置为 ./data/index 时，偏好库落在
+    data/data/memory/preferences.db；显式指定 ARTAGENT_MEMORY_DIR 时不迁移。"""
+    if os.getenv("ARTAGENT_MEMORY_DIR"):
+        return None
+    idx = os.getenv("INDEX_DIR", "./data")
+    legacy = Path(idx).parent / "data" / "memory" / "preferences.db"
+    return legacy if legacy != _DB_PATH else None
+
+
+def _pref_rows(path: Path) -> int:
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM preferences").fetchone()[0])
+        except sqlite3.Error:
+            return 0
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
+
+def _migrate_legacy_preferences() -> Path:
+    """旧路径 data/data/memory/preferences.db → data/memory/（一次性迁移）。
+
+    规则：新路径缺失或为空、且旧路径有数据时，用旧库覆盖新路径；
+    否则保留新路径。返回最终应使用的 DB 路径。
+    """
+    legacy = _legacy_preferences_path()
+    if legacy is None or not legacy.exists():
+        return _DB_PATH
+    if _DB_PATH.exists():
+        try:
+            if _pref_rows(_DB_PATH) or not _pref_rows(legacy):
+                return _DB_PATH
+            _DB_PATH.unlink()   # 新库是空壳，先移除再移动旧库
+        except OSError:
+            return legacy
+    _DB_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(legacy), str(_DB_PATH))
+        return _DB_PATH
+    except OSError:
+        return legacy
+
+
 def _get_conn() -> sqlite3.Connection:
     """返回全局单例连接，首次调用时建表。"""
-    global _conn
+    global _conn, _DB_PATH
     if _conn is None:
+        _DB_PATH = _migrate_legacy_preferences()
         _DB_DIR.mkdir(parents=True, exist_ok=True)
         _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
         _conn.execute(
