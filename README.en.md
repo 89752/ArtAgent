@@ -1,246 +1,129 @@
-# 🎨 ArtAgent — Western Art Intelligent Agent
+# 🎨 ArtAgent — A Conversational Agent for Western Art History
 
 <p align="right"><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
 
-> A painter / art-history agent built on the SemArt dataset, demonstrating the four core agent capabilities: **planning, tool use, memory, and reflection**.
+ArtAgent is a conversational agent for Western art history, orchestrated with LangGraph. It comes with a local art library of **53,912 artwork records and 10,107 artists**, supporting factual queries, style comparisons, timelines, preference-based recommendations, image analysis, document understanding, and long-term memory across sessions.
 
-ArtAgent is an assistant that understands Western art history. It goes beyond "retrieve + fill a template" — it **decides the task type, decomposes the problem itself, generates its own retrieval strategy, reflects on answer quality, and remembers your preferences across sessions**. It uses a **hybrid architecture**: structured tasks run through explicit orchestration pipelines (every decision step is visible), while open-ended questions fall back to a ReAct tool loop (flexible and autonomous).
+## Quick Start
 
----
+```bash
+# 1. Install dependencies (Python 3.10+)
+pip install -r requirements.txt
 
-## ✨ Core Capabilities (5 Scenarios)
+# 2. Configure environment variables
+cp .env.example .env
+# Required: LLM_API_KEY (chat model)
+# Optional: RERANK_API_KEY (reranking), TAVILY_API_KEY (web fallback), MINERU_TOKEN (precise PDF parsing)
 
-| Scenario | Example Prompt | Highlight |
-|---|---|---|
-| **① Cross-dimension style comparison** | "Compare Monet and Van Gogh in their use of color" | Organized dimension by dimension (color/brushwork/mood), not a flat list |
-| **② Timeline + image evidence** | "Trace Turner's stylistic evolution" | Narrative across periods, each period illustrated with a representative work |
-| **③ Preference-based chained recommendation** ⭐ | "I love Van Gogh's bold, expressive style — who else would I like?" | **The retrieval query is a style profile the agent *reasons out*, not the user's literal words** |
-| **④ Knowledge-gap web fallback** | Auto web-search when the dataset can't answer | Reflection judges "insufficient info" → triggers web search and re-answers |
-| **⑤ Cross-session long-term memory** | "Recommend another painter" | Remembers your liked painters/styles, personalizes across sessions |
-
-> **Scenario ③ is the one worth highlighting**: the user says "bold and expressive," and the agent first reasons out a structured style profile like `"bold vivid color contrasts, thick impasto brushwork, high emotional intensity..."`, then uses *that* for vector retrieval to match other painters — a direct demonstration of "understand → reason → retrieve," not keyword matching.
-
----
-
-## 🏗️ Architecture
-
-### Hybrid orchestration: explicit pipelines + ReAct fallback
-
-> The diagram below is exported from the actual compiled graph via `graph.get_graph().draw_mermaid()` and renders natively on GitHub.
-
-```mermaid
-graph TD;
-    START([START]) --> load_memory[load_memory<br/>load long-term prefs S5]
-    load_memory --> classify{classify<br/>intent routing}
-
-    classify -. comparison .-> comp_decompose[comp_decompose]
-    classify -. timeline .-> tl_subject[tl_subject]
-    classify -. recommendation .-> rec_extract[rec_extract]
-    classify -. general .-> general_agent[general_agent]
-
-    comp_decompose --> comp_retrieve[comp_retrieve] --> comp_synthesize[comp_synthesize] --> reflection
-    tl_subject --> tl_periods[tl_periods] --> tl_synthesize[tl_synthesize] --> reflection
-    rec_extract --> rec_search[rec_search] --> rec_filter[rec_filter] --> rec_synthesize[rec_synthesize] --> reflection
-
-    general_agent -. tools .-> general_tools[general_tools]
-    general_tools --> general_agent
-    general_agent -. done .-> reflection
-
-    reflection{reflection<br/>is the answer sufficient?}
-    reflection -. PASS .-> save_memory[save_memory]
-    reflection -. RETRY .-> web_fallback[web_fallback<br/>web fallback S4]
-    web_fallback --> save_memory
-    save_memory --> END([END])
+# 3. Start the web UI
+python api.py
+# Open http://127.0.0.1:7860
 ```
 
-<details>
-<summary>Branch responsibilities (click to expand)</summary>
+> The repository does not include data assets. Running locally requires `data/` (core library CSV, Chroma vector index, SQLite memory store) and `SemArt/` (images); if you only have the CSV, rebuild the index with `python scripts/index_core.py --csv data/core/artworks_core.csv`.
 
-- **comparison** (S①): `decompose` splits subjects & dimensions → `retrieve` per subject → `synthesize` organizes the comparison dimension by dimension
-- **timeline** (S②): `subject` extracts the topic → `periods` groups evidence by era + attaches images → `synthesize` builds the narrative
-- **recommendation** (S③): `extract` reasons out a style profile → `search` retrieves by profile (excluding already-liked painters) → `filter` for relevance → `synthesize` recommends only in-list painters
-- **general**: ReAct tool loop, `agent ⇄ tools` autonomously decides which tools to call and how many times
-- **reflection → web_fallback**: if reflection finds the info insufficient and no retry has happened yet, it triggers a web-backed re-answer (S④)
+## Use Cases
 
-</details>
+| Use case | What it does |
+|---|---|
+| Artwork & artist lookup | Search artworks and artists by title, artist, date, or movement |
+| Style comparison & evolution | Compare styles of artists or artworks; trace an artist's or movement's evolution |
+| Preference-based recommendation | Recommend artists and works based on your stated aesthetic preferences |
+| Visual analysis | Analyze composition, color, and brushwork |
+| Expert skills | In-depth artwork analysis, document summarization, exhibition research |
+| Document & spreadsheet Q&A | Upload PDF / Excel files and ask questions with page-level citations |
+| Data statistics | Aggregate statistics on movements, dates, and techniques across the library |
+| Memory & collections | Remember preferences across sessions; manage saved collections |
 
-**Why a hybrid architecture?**
-- Pure ReAct: planning/reflection are hidden inside the LLM — invisible and hard to control, tough to demo or debug.
-- Pure explicit graph: too rigid for open-ended questions.
-- **Hybrid**: when the task shape is known (comparison/timeline/recommendation) use explicit pipelines where every planning, retrieval, and reflection node is visible; hand open questions to ReAct for flexibility. You get both demonstrable orchestration and adaptability.
+## Highlights
 
-### Tech Stack
+- **Local library first**: answers are grounded in the merged core library (Wikidata + SemArt + AIC), with web fallback (Tavily / Wikipedia / Met Museum API) only when local data is insufficient — no fabrication.
+- **Intent routing + ReAct**: greetings, definitions, and arithmetic are answered directly; real-time questions go to the web; comparisons / timelines / recommendations use dedicated capability tools; it asks clarifying questions when information is missing.
+- **26 callable tools**: semantic search, exact lookup, painter knowledge, image lookup & visual analysis, PDF page reading, style comparison, timelines, preference recommendations, color analysis, aggregate statistics, museum search, Wikipedia lookup, web search, memory read/write/delete, collection CRUD, and 3 expert skills (deep artwork analysis / document summarization / exhibition research).
+- **Long-term memory (optional enhancements)**: explicit "remember / forget" works out of the box; optional auto-extraction (`MEMORY_AUTO_EXTRACT=1`), semantic conflict resolution (`MEMORY_SMART_MERGE=1`), and cross-session user profiles (`MEMORY_PROFILE_REFRESH=1`); everything is stored in local SQLite and can be viewed or deleted per item in the memory panel.
+- **Documents & spreadsheets**: upload PDF / Excel, optional MinerU precise parsing and visual reading of scanned pages; answers can cite a specific page of a document.
+- **Web UI**: SSE streaming with visible reasoning steps, background generation across chats (start a new conversation before the answer finishes), stop generation, collapsible / resizable sidebar, dark mode, source citation cards, memory panel, and feedback.
+
+## Data
+
+The core library (`dataset_id=core`, the default runtime dataset) is a merged, normalized dataset from three sources:
+
+| Source | Content | Count |
+|---|---|---:|
+| Wikidata | Structured works / artists / movements / collections | 30,041 |
+| SemArt | Descriptions of 8th–19th century European paintings | 19,862 |
+| Art Institute of Chicago | Open collection data | 3,085 |
+
+> Some records come from multiple sources (e.g., the same work matches both Wikidata and SemArt).
+
+After merging and deduplication: **53,912 artwork records** and **10,107 artists**, of which **39,314 have descriptions and are indexed in Chroma** (BGE-M3 multilingual vectors). The collection is primarily 8th–19th century European painting (~83%), with a small number of early-20th-century works and about 7,000 records without a year; every record carries an image reference (local image or collection URL).
+
+## Tech Stack
 
 | Module | Choice |
 |---|---|
-| Agent orchestration | LangGraph (multi-branch StateGraph + MemorySaver for multi-turn memory) |
-| LLM | DeepSeek / Qwen (OpenAI-compatible endpoint, swappable) |
-| Vision model | Qwen-Omni (`qwen3.5-omni-plus`, image analysis) |
-| Vector store | Chroma (local persistent, 21,382 vectors) |
-| Embedding | BGE `bge-small-en-v1.5` |
-| Long-term memory | SQLite (standard library, no extra dependency) |
-| Dataset | SemArt (21,384 European paintings, 8th–19th c., with art-commentary text) |
-| Web search | Tavily (optional, degrades gracefully when unset) |
-| Web UI | FastAPI + SSE + custom frontend |
+| Agent orchestration | LangGraph: load_memory → rewrite_split → classify → rag_gate → multi_retrieve → ReAct tool loop → reflection → save_memory |
+| Retrieval | Chroma + BGE-M3 local embeddings + weighted RRF fusion + Jina Reranker v3.5 (API / local) |
+| Chat model | DeepSeek / Qwen (OpenAI-compatible API with primary / backup failover) |
+| Vision model | Qwen-Omni (image analysis, PDF page images) |
+| Memory & sessions | SQLite (memory_items / memory_events / memory_episodes / conversations) |
+| Web frontend | FastAPI + SSE + vanilla HTML/CSS/JS (no Gradio) |
+| Testing | pytest fast suite (54 test files, offline, CI integrated) |
 
----
+## Evaluation
 
-## 🧰 Tools
+```bash
+python eval/agent_eval_v2.py --retrieval-n 100   # offline retrieval Recall@5
+python eval/agent_eval_v2.py                     # full run (requires API quota)
+pytest                                           # fast offline tests
+```
 
-The agent can autonomously call these 5 tools in the `general` branch; explicit pipelines call them internally as needed:
+Latest baseline (2026-08):
 
-| Tool | Purpose |
+| Dimension | Result |
 |---|---|
-| `semantic_search` | Semantic vector retrieval (fuzzy topic/style/description queries) |
-| `exact_lookup` | Structured exact lookup (by artist/title/date/school) |
-| `query_painter_knowledge` | Structured painter stats (works count/school/timeframes/techniques/samples); the agent writes the answer itself |
-| `image_lookup` | Locate representative works from the local image library; `analyze=True` triggers vision-model analysis |
-| `web_search` | Web fallback search (when local can't answer) |
+| Answer quality (30 golden cases) | avg 4.67/5 · pass rate (≥4) 93% |
+| Factual accuracy | 27/31 (87%) |
+| Multi-turn dialogue | 6/6 |
+| Tool selection | 42/48 (88%) |
+| Adversarial & safety | 8/10 |
+| Intent diagnosis (soft signal) | 36/40 (90%) |
+| Routing decisions | 13/15 |
+| Retrieval Recall@5 | 88.0% (core · Jina API rerank) |
 
----
+## Roadmap
 
-## 📁 Project Structure
+**Completed**
 
-```
-ArtAgent/
-├── api.py                      # FastAPI backend (SSE streaming, main entry)
-├── web/                        # service layer: LangGraph inference & rendering, UI-agnostic
-│   └── service.py
-├── static/                     # custom frontend: index.html + app.css + app.js + ornaments
-├── requirements.txt
-├── .env                        # API key & path config
-├── scripts/
-│   └── build_index.py          # one-time Chroma index builder
-├── src/
-│   ├── agent/
-│   │   ├── graph.py            # hybrid graph core (intent routing + 4 branches + reflection fallback)
-│   │   ├── state.py            # AgentState (shared state across all branches)
-│   │   ├── prompts.py          # prompts for every node
-│   │   └── nodes/
-│   │       ├── common.py       # routing/memory/reflection/web-fallback + helpers
-│   │       ├── comparison.py   # S① comparison pipeline
-│   │       ├── timeline.py     # S② timeline pipeline
-│   │       ├── recommendation.py # S③ recommendation pipeline (key highlight)
-│   │       └── general.py      # ReAct tool-loop branch
-│   ├── tools/                  # 5 tool implementations
-│   ├── memory/
-│   │   └── store.py            # SQLite long-term preference store (S⑤)
-│   ├── data/
-│   │   ├── access.py           # data-access layer (fuzzy match / row-to-dict / evidence formatting)
-│   │   └── loader.py           # SemArt loading/cleaning
-│   └── utils/
-│       └── llm.py              # LLM client wrapper
-├── tests/                      # tool tests, multi-turn, multi-tool, four-branch smoke tests
-├── SemArt/                     # dataset (CSV + Images/)
-└── data/index/chroma/          # prebuilt vector index
-```
+- **Hybrid retrieval & reranking**: unified vector search over the core art library and user documents, with API / local reranking options;
+- **Mature tool belt**: intent routing + 26 tools covering lookup, comparison, timelines, recommendations, visual analysis, statistics, memory, and collections;
+- **Long-term memory**: explicit memory, auto-extraction, semantic conflict resolution, and cross-session profiles, visible and controllable;
+- **Document understanding**: dual-channel PDF parsing (text layer + page images), spreadsheet Q&A, with page-level citations;
+- **Evaluation system**: multi-dimensional test sets covering answer quality, facts, tools, multi-turn dialogue, adversarial cases, intent, routing, and retrieval;
+- **Quality loop**: LLM judge scoring, rule-based checks, and state assertions; thumbs up/down feedback stored and exportable as evaluation candidates.
 
----
+**Planned**
 
-## 🚀 Quick Start
+- **Multi-user & data isolation**: user accounts with session and knowledge-base isolation;
+- **OpenAI-compatible API**: public streaming chat API with OpenAPI docs;
+- **MCP tool integration**: import third-party tools;
+- **Deployment & operations**: one-command Docker startup, CI gates, cost & latency observability.
 
-### 1. Install dependencies
+## Project Structure
 
-```bash
-pip install -r requirements.txt
-```
-
-> Developed and verified on Python 3.11.
-
-### 2. Configure `.env`
-
-```ini
-# LLM (OpenAI-compatible endpoint, example uses Qwen)
-DEEPSEEK_API_KEY=your-api-key
-DEEPSEEK_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-DEEPSEEK_MODEL=deepseek-v3
-
-SEMART_DATA_DIR=./SemArt
-INDEX_DIR=./data/index
-
-# S④ web fallback (optional; degrades gracefully if unset)
-# TAVILY_API_KEY=tvly-xxxxxxxx
-```
-
-### 3. Build the vector index (first run; skip if `data/index/chroma/` already exists)
-
-```bash
-python scripts/build_index.py
-```
-
-First run takes ~5–10 min (downloads the embedding model + vectorizes ~21k rows); loads in seconds afterward.
-
-### 4. Launch the web UI
-
-```bash
-python api.py
-```
-
-Open `http://localhost:7860` in your browser to chat.
-
----
-
-## 🧪 Tests
-
-```bash
-python tests/test_access.py      # data-access layer unit tests (no LLM/network, instant)
-python tests/test_tools.py       # tool unit tests
-python tests/test_pipelines.py   # four-branch end-to-end smoke (comparison/recommendation/timeline/general + memory)
-python tests/test_multi_turn.py  # multi-turn conversation memory
-python tests/test_multi_tool.py  # multi-tool chained calls
-```
-
----
-
-## 🔍 Observability
-
-A multi-step agent fires several LLM calls per turn; without logs you can't answer "which branch ran / how many docs retrieved / reflection verdict / which node was slow." Every node emits structured logs + latency (see [`docs/sample_trace.md`](docs/sample_trace.md) for real traces):
-
-```
-[classify] query=compare Monet and Van Gogh's color intent=comparison
-[decompose] subjects=['Claude Monet', 'Vincent van Gogh'] dimensions=['color use', 'brushwork']
-[retrieve] hits_per_subject={'Claude Monet': 4, 'Vincent van Gogh': 4}
-[comp_retrieve] done in 15687ms → comparison_retrieve   ← bottleneck at a glance
-[reflection] verdict=PASS answer_len=1105
-```
-
-```bash
-ARTAGENT_LOG_LEVEL=DEBUG ARTAGENT_LOG_FILE=run.log python api.py
-```
-
-## 📊 Evaluation
-
-Not just "it runs" — quantifiable, reproducible metrics (see [`eval/`](eval/README.md)):
-
-| Metric | Result | Method |
-|---|---|---|
-| **Intent classification accuracy** | **96.0%** (Macro-F1 0.962) | 50 hand-labeled queries (10+ boundary cases), run against the real `classify_intent` node |
-| **Known-item retrieval Recall@5** | **64.0%** | Random artworks queried by a description snippet; check if the source painting lands in top-5 (auto-labeled, fixed seed, reproducible) |
-
-```bash
-python eval/run_eval.py                 # run everything
-python eval/run_eval.py --no-retrieval  # intent only (no vector DB, faster)
-```
-
-The label set deliberately includes ambiguous cases (e.g. "recommend a book about Rembrandt" — contains "recommend" but is really a knowledge question), keeping accuracy in a believable range rather than a suspicious 100%. Both misclassifications are explainable general→recommendation boundary cases triggered by preference keywords.
-
-## 💡 Design Trade-offs & Known Limits
-
-- **Data coverage**: SemArt only covers 8th–19th-century European painting — **no 20th-century painters such as Picasso**. A single painter typically spans only 1–2 fifty-year periods, so single-painter timelines are thin — the timeline scenario states its coverage honestly and supplements with the LLM's art-history knowledge.
-- **Reflection cost**: every branch ends with one reflection LLM call (an extra round-trip per turn), in exchange for making the reflection capability visible and demonstrable. In production this could fire only when an answer looks insufficient.
-- **Chinese-name translation**: SemArt stores English only, so the agent translates Chinese painter/artwork names to English before retrieval (a common-name table is built into the prompt).
-- **Web fallback**: with no `TAVILY_API_KEY` set it doesn't error — it degrades to local + model-knowledge answers.
-- **Encoding**: the SemArt CSV is latin-1 encoded (handled correctly by the loader); the Windows console is GBK, so printing Chinese/accented characters in the terminal may look garbled, but the in-memory data and web UI display are both correct.
-
----
-
-## 📚 Dataset Citation
-
-```bibtex
-@InProceedings{Garcia2018How,
-  author    = {Noa Garcia and George Vogiatzis},
-  title     = {How to Read Paintings: Semantic Art Understanding with Multi-Modal Retrieval},
-  booktitle = {Proceedings of the European Conference in Computer Vision Workshops},
-  year      = {2018},
-}
+```text
+api.py                 # FastAPI backend (SSE streaming; python api.py)
+web/                   # service layer: LangGraph inference & rendering
+static/                # vanilla frontend (index.html + app.js + app.css)
+src/
+├─ agent/              # LangGraph graph, intent tree, rewriting, nodes, context
+├─ memory/             # long-term memory: items / extraction / conflicts / profiles / episodes
+├─ tools/              # tool belt (retrieval / analysis / memory / collections / skills)
+├─ retrieval/          # hybrid retrieval: Chroma + BGE + RRF + reranking
+├─ ingestion/          # PDF / Excel parsing (MinerU / Qwen-VL / tables)
+├─ tasks/              # document parsing task queue
+└─ observability/      # run traces & /api/metrics
+agent_skills/          # expert skill definitions (SKILL.md)
+eval/                  # evaluation entry & test sets
+tests/                 # pytest fast suite
 ```
