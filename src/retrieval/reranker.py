@@ -60,7 +60,7 @@ RERANK_LOCAL_DEVICE = os.getenv("RERANK_LOCAL_DEVICE", "cpu").strip().lower()
 # 描述 p99≈2472 字符，1200 截断对重排质量影响有限）
 RERANK_LOCAL_DOC_CHAR_LIMIT = int(os.getenv("RERANK_LOCAL_DOC_CHAR_LIMIT", "3000"))
 # 兼容端点可整体切换（额度耗尽时指向其他 OpenAI 兼容 rerank 服务）；
-# API Key 独立可配，默认沿用 DEEPSEEK_API_KEY。
+# API Key 独立可配，默认沿用 LLM_API_KEY。
 RERANK_API_URL = os.getenv("RERANK_API_URL", COMPAT_URL)
 # DashScope 兼容端点接受 return_documents；第三方端点（如 Jina）可能拒绝
 # 未知字段，非 DashScope 时省略该参数。
@@ -75,15 +75,15 @@ DOC_CHAR_LIMIT = 3000  # 单文档 ≤4000 token 的字符级保守截断
 
 
 def _active_api_key() -> str:
-    """rerank 专用 key 优先，默认沿用 DEEPSEEK_API_KEY（调用时动态读取）。"""
+    """rerank 专用 key 优先，默认沿用 LLM_API_KEY（调用时动态读取）。"""
     return (
         os.getenv("RERANK_API_KEY", "").strip()
-        or os.getenv("DEEPSEEK_API_KEY", "").strip()
+        or os.getenv("LLM_API_KEY", "").strip()
     )
 
 
 def rerank_available() -> bool:
-    """本地后端恒可用；API 后端依赖 rerank key（默认 DEEPSEEK_API_KEY）。"""
+    """本地后端恒可用；API 后端依赖 rerank key（默认 LLM_API_KEY）。"""
     if RERANK_BACKEND == "local":
         return True
     return bool(_active_api_key())

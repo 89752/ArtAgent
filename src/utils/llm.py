@@ -38,7 +38,7 @@ class FailoverChatOpenAI(ChatOpenAI):
             return None
         return ChatOpenAI(
             model=self._backup_model,
-            api_key=self._backup_api_key or os.getenv("DEEPSEEK_API_KEY"),
+    api_key=self._backup_api_key or os.getenv("LLM_API_KEY"),
             base_url=self._backup_base_url or self.base_url,
             temperature=self.temperature,
             request_timeout=getattr(self, "request_timeout", 180),
@@ -78,13 +78,13 @@ def get_llm(temperature: float = 0.7) -> ChatOpenAI:
     Return a cached DeepSeek chat model instance.
     lru_cache keys on temperature, so different temperatures get different instances.
     """
-    api_key = os.getenv("DEEPSEEK_API_KEY")
+    api_key = os.getenv("LLM_API_KEY")
     base_url = os.getenv("DEEPSEEK_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-v3")
 
     if not api_key:
         raise ValueError(
-            "DEEPSEEK_API_KEY not found. "
+            "LLM_API_KEY not found. "
             "Please set it in your .env file."
         )
 
@@ -120,7 +120,7 @@ def get_vision_llm() -> ChatOpenAI:
     model = os.getenv("VISION_MODEL", "qwen3.5-omni-plus-2026-03-15")
     return FailoverChatOpenAI(
         model=model,
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
+    api_key=os.getenv("LLM_API_KEY"),
         base_url=os.getenv(
             "DEEPSEEK_BASE_URL",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",

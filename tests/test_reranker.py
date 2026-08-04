@@ -88,17 +88,17 @@ def test_empty_documents_returns_empty_without_call():
 
 
 def test_unavailable_without_api_key():
-    old_env = os.environ.get("DEEPSEEK_API_KEY")
+    old_env = os.environ.get("LLM_API_KEY")
     old_rk = os.environ.get("RERANK_API_KEY")
-    os.environ["DEEPSEEK_API_KEY"] = ""
+    os.environ["LLM_API_KEY"] = ""
     os.environ["RERANK_API_KEY"] = ""
     try:
         assert reranker_mod.rerank("q", ["doc"]) is None
     finally:
         if old_env is None:
-            os.environ.pop("DEEPSEEK_API_KEY", None)
+            os.environ.pop("LLM_API_KEY", None)
         else:
-            os.environ["DEEPSEEK_API_KEY"] = old_env
+            os.environ["LLM_API_KEY"] = old_env
         if old_rk is None:
             os.environ.pop("RERANK_API_KEY", None)
         else:
