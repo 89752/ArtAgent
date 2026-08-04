@@ -5,6 +5,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import pytest
+
+# 重型/在线：真实加载 bge-m3 模型 + Jina 联网精排，默认 pytest 不跑。
+# 需要验证真实检索链路时：pytest -m slow tests/test_tools.py
+pytestmark = pytest.mark.slow
+
 
 def test_semantic_search():
     print("\n=== Test 1: Semantic Search ===")
@@ -16,7 +22,7 @@ def test_semantic_search():
     # Stage 3 起语义检索融合用户 PDF（带 source 键的文档片段，无 author 字段），
     # 画作形状只对 semart 结果保证；断言只针对画作，文档片段不影响测试。
     semart_hits = [r for r in results if "author" in r]
-print(f"  core hits: {len(semart_hits)}/{len(results)}")
+    print(f"  core hits: {len(semart_hits)}/{len(results)}")
     for r in semart_hits:
         print(f"  - {r['title']} by {r['author']} ({r['date']})")
     assert semart_hits, "语义检索应至少返回 1 条画作结果"

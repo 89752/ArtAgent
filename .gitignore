@@ -8,6 +8,12 @@ SemArt/
 /data/
 *.db
 
+# design docs: keep local only (user 2026-08-04)
+/docs/
+
+# dev/ops helper scripts: keep local only (user 2026-08-04)
+/scripts/
+
 # ── AI 工具本地配置/产物（不入库） ──
 .claude/
 .agents/

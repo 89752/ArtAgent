@@ -1,13 +1,14 @@
 ---
 name: artwork_deep_analysis
-description: 对一幅画作做深度结构化分析：构图/色彩/笔触/主题四维 + 点评，输出结构化 JSON
-when_to_use: 用户要求"深度分析/详细解读/评析"某幅画
+description: 对一幅画作做深度结构化分析：构图/色彩/笔触/主题四维 + 点评，输出结构化 JSON（触发词：深度分析/详细解读/评析/赏析/深度解读/这幅画怎么样）
+when_to_use: 用户要求"深度分析/详细解读/评析/赏析/深度解读"某幅画
 version: 2
-tools: [exact_lookup, query_painter_knowledge, image_lookup]
+tools: [exact_lookup, query_painter_knowledge, image_lookup, color_analysis]
 max_steps: 8
 steps_json: ["定位画作（exact_lookup），记录 title/author/date/technique",
              "取画家背景（query_painter_knowledge）",
              "仅当用户明确要求看图时做视觉分析（image_lookup analyze=True）",
+             "需要量化颜色/明度/构图属性时用 color_analysis（本地免费）",
              "按构图/色彩/笔触/主题四个维度组织分析",
              "输出完整 JSON（含一句话点评）"]
 output_schema_json: {"title": "画作标题", "author": "画家", "date": "年代", "composition": "构图分析", "color": "色彩分析", "brushwork": "笔触与技法分析", "subject": "主题与内容", "verdict": "一句话点评"}

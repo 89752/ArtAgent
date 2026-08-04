@@ -130,17 +130,22 @@ def load_skills(skills_dir: Path = Path("agent_skills")) -> list[Skill]:
 # ── 工具注册表：技能允许调用的工具集（原子工具） ────────────────
 def _build_tool_registry() -> dict[str, object]:
     from src.tools.capabilities import compare_subjects, timeline_by_periods
+    from src.tools.aggregate_stats import aggregate_stats
+    from src.tools.color_analysis import color_analysis
     from src.tools.image_lookup import image_lookup
     from src.tools.knowledge import query_painter_knowledge
+    from src.tools.museum_search import museum_search
     from src.tools.page_reader import read_page_image
     from src.tools.retrieval import exact_lookup, semantic_search
     from src.tools.web_search import web_search
+    from src.tools.wiki_lookup import wiki_lookup
 
     return {
         tool.name: tool
         for tool in (
             semantic_search, exact_lookup, query_painter_knowledge, image_lookup,
             read_page_image, web_search, compare_subjects, timeline_by_periods,
+            aggregate_stats, color_analysis, museum_search, wiki_lookup,
         )
     }
 

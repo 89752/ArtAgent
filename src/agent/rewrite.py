@@ -147,6 +147,11 @@ def rewrite_and_split(
     rq = normalize_query(data.get("rewritten_question") or "")
     if not rq:
         rq = normalized
+    # 改写过度压缩守卫：LLM 压缩可能把"他晚年怎么了？"压成"莫奈晚年"（<6 字），
+    # 会触发下游 _info_gap 的"信息不足"误判（mt-002 证据）。原文足够完整时回退原文，
+    # 保留疑问语义；子问题同步回退。
+    if len(rq) < 6 and len(normalized) >= 6:
+        rq = normalized
     subs_raw = data.get("sub_questions")
     subs = (
         [normalize_query(s) for s in subs_raw if normalize_query(s)]
@@ -154,6 +159,8 @@ def rewrite_and_split(
         else []
     )
     if not subs:
+        subs = [rq]
+    elif len(subs) == 1 and subs[0] != rq:
         subs = [rq]
     entities_raw = data.get("key_entities")
     entities = (

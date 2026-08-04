@@ -37,7 +37,7 @@ def group_by_artist(candidates: list[dict], per_artist: int = 2) -> dict[str, li
 def compare_subjects(
     subjects: list[str],
     dimensions: Optional[list[str]] = None,
-) -> list[dict]:
+) -> dict:
     """按维度对比两个或多个画家/画作：对每个对象分别检索评论证据，按对象分组返回。
 
     适用场景：用户要求对比两位画家、两幅画或两种风格的差异。
@@ -48,6 +48,7 @@ def compare_subjects(
 
     Returns:
         每个对象的检索证据分组：{subject, query, evidence[]}
+        并附 {llm_used, llm_calls} 成本标注（P2-1 可归因）。
     """
     from src.retrieval.relevance import llm_relevance_filter
     from src.tools.retrieval import semantic_search
@@ -55,6 +56,7 @@ def compare_subjects(
     dims = dimensions or ["style", "color", "technique"]
     dim_str = " ".join(dims)
     out: list[dict] = []
+    llm_calls = 0
     for subject in subjects:
         query = f"{subject} {dim_str} painting style characteristics"
         try:
@@ -62,8 +64,13 @@ def compare_subjects(
         except Exception:
             results = []
         docs = llm_relevance_filter(query, results, min_keep=2)
+        llm_calls += 1  # 相关性过滤为一次 LLM 子调用
         out.append({"subject": subject, "query": query, "evidence": docs})
-    return out
+    return {
+        "results": out,
+        "llm_used": llm_calls > 0,
+        "llm_calls": llm_calls,
+    }
 
 
 @tool
@@ -138,7 +145,7 @@ def recommend_with_exclusions(preference: str, exclude_artists: list[str]) -> di
 
     Returns:
         {features, liked_artists, candidates: [{author, title, description_snippet}],
-         by_artist: {author: [top titles]}}
+         by_artist: {author: [top titles]}, llm_used, llm_calls}
     """
     from src.agent.nodes.common import parse_json
     from src.agent.prompts import RECOMMENDATION_FEATURE_PROMPT
@@ -158,6 +165,7 @@ def recommend_with_exclusions(preference: str, exclude_artists: list[str]) -> di
     features = parsed.get("features", "") if isinstance(parsed, dict) else ""
     if not features:
         features = raw.strip()
+    llm_calls = 1  # 风格特征提取一次 LLM 子调用
 
     # 2) 特征检索 + 排除（用户明确排除的 + 特征提炼出的已喜欢画家）
     exclude = list(exclude_artists) + [str(a) for a in liked]
@@ -174,4 +182,6 @@ def recommend_with_exclusions(preference: str, exclude_artists: list[str]) -> di
         "liked_artists": liked,
         "candidates": filtered[:10],
         "by_artist": group_by_artist(filtered[:10]),
+        "llm_used": llm_calls > 0,
+        "llm_calls": llm_calls,
     }

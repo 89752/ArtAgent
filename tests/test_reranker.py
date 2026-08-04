@@ -9,6 +9,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.retrieval.base import RetrievalResult
@@ -46,7 +48,7 @@ class _PostRecorder:
         self.calls = []
 
     def __call__(self, url, headers=None, json=None, timeout=None):
-        self.calls.append({"url": url, "json": json, "timeout": timeout})
+        self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
         for frag, behavior in self.by_url.items():
             if frag in url:
                 if isinstance(behavior, Exception):
@@ -64,6 +66,16 @@ def _patch(module, name, value):
     return old
 
 
+@pytest.fixture(autouse=True)
+def _api_backend_by_default():
+    """默认走 API 后端，避免受 .env 里 RERANK_BACKEND=local 影响；
+    本地后端专项测试会自行切回 local。"""
+    old = reranker_mod.RERANK_BACKEND
+    reranker_mod.RERANK_BACKEND = "api"
+    yield
+    reranker_mod.RERANK_BACKEND = old
+
+
 # ── reranker.rerank ──────────────────────────────────────────────
 def test_empty_documents_returns_empty_without_call():
     rec = _PostRecorder()
@@ -77,7 +89,9 @@ def test_empty_documents_returns_empty_without_call():
 
 def test_unavailable_without_api_key():
     old_env = os.environ.get("DEEPSEEK_API_KEY")
+    old_rk = os.environ.get("RERANK_API_KEY")
     os.environ["DEEPSEEK_API_KEY"] = ""
+    os.environ["RERANK_API_KEY"] = ""
     try:
         assert reranker_mod.rerank("q", ["doc"]) is None
     finally:
@@ -85,6 +99,145 @@ def test_unavailable_without_api_key():
             os.environ.pop("DEEPSEEK_API_KEY", None)
         else:
             os.environ["DEEPSEEK_API_KEY"] = old_env
+        if old_rk is None:
+            os.environ.pop("RERANK_API_KEY", None)
+        else:
+            os.environ["RERANK_API_KEY"] = old_rk
+
+
+# ── 额度耗尽方案：本地后端 / 兼容端点切换 ──
+def test_local_backend_reranks_offline(monkeypatch):
+    old_backend = reranker_mod.RERANK_BACKEND
+    old_model = reranker_mod.RERANK_LOCAL_MODEL
+    reranker_mod.RERANK_BACKEND = "local"
+    reranker_mod.RERANK_LOCAL_MODEL = "fake-local"
+    calls: dict = {}
+
+    def fake_local(query, docs, top_n):
+        calls["query"] = query
+        return [(1, 0.8), (0, 0.6)]
+
+    old_fn = _patch(reranker_mod, "_rerank_local", fake_local)
+    try:
+        assert reranker_mod.rerank("q", ["a", "b"]) == [(1, 0.8), (0, 0.6)]
+        assert calls["query"] == "q"
+        assert reranker_mod.rerank_available() is True  # 本地后端无 key 也可用
+    finally:
+        _patch(reranker_mod, "_rerank_local", old_fn)
+        reranker_mod.RERANK_BACKEND = old_backend
+        reranker_mod.RERANK_LOCAL_MODEL = old_model
+
+
+def test_local_backend_failure_degrades_to_none():
+    old_backend = reranker_mod.RERANK_BACKEND
+    reranker_mod.RERANK_BACKEND = "local"
+    old_fn = _patch(reranker_mod, "_rerank_local", lambda q, d, n: None)
+    try:
+        assert reranker_mod.rerank("q", ["a"]) is None  # 本地失败→粗排原序
+    finally:
+        _patch(reranker_mod, "_rerank_local", old_fn)
+        reranker_mod.RERANK_BACKEND = old_backend
+
+
+def test_local_backend_jina_listwise_rerank():
+    old_backend = reranker_mod.RERANK_BACKEND
+    old_model = reranker_mod.RERANK_LOCAL_MODEL
+    reranker_mod.RERANK_BACKEND = "local"
+    reranker_mod.RERANK_LOCAL_MODEL = "jinaai/fake"
+    calls: dict = {}
+
+    class _FakeJina:
+        def rerank(self, query, documents, top_n=None):
+            calls["query"] = query
+            calls["top_n"] = top_n
+            return [
+                {"index": 3, "relevance_score": 0.9, "document": documents[3]},
+                {"index": 0, "relevance_score": 0.7, "document": documents[0]},
+            ]
+
+    old_fn = _patch(reranker_mod, "_get_local_reranker", lambda name: _FakeJina())
+    try:
+        out = reranker_mod.rerank("q", ["a", "b", "c", "d"])
+        assert out == [(3, 0.9), (0, 0.7)]  # listwise 结果已按分降序
+        assert calls["query"] == "q"
+        assert calls["top_n"] == 4
+    finally:
+        _patch(reranker_mod, "_get_local_reranker", old_fn)
+        reranker_mod.RERANK_BACKEND = old_backend
+        reranker_mod.RERANK_LOCAL_MODEL = old_model
+
+
+def test_api_backend_honors_custom_url_and_key(monkeypatch):
+    rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 0.9}]})
+    old_post = _patch(reranker_mod.requests, "post", rec)
+    old_url = reranker_mod.RERANK_API_URL
+    old_backend = reranker_mod.RERANK_BACKEND
+    old_model = reranker_mod.RERANK_MODEL
+    reranker_mod.RERANK_API_URL = "https://other-vendor.example/reranks"
+    reranker_mod.RERANK_BACKEND = "api"
+    reranker_mod.RERANK_MODEL = "qwen3-rerank"  # 兼容端点模型，验证 URL 覆盖
+    monkeypatch.setenv("RERANK_API_KEY", "sk-other")
+    try:
+        reranker_mod.rerank("q", ["a"])
+        assert rec.calls[0]["url"] == "https://other-vendor.example/reranks"
+        assert rec.calls[0]["headers"]["Authorization"] == "Bearer sk-other"
+    finally:
+        _patch(reranker_mod.requests, "post", old_post)
+        reranker_mod.RERANK_API_URL = old_url
+        reranker_mod.RERANK_BACKEND = old_backend
+        reranker_mod.RERANK_MODEL = old_model
+
+
+def test_compat_payload_skips_dashscope_only_fields_for_third_party(monkeypatch):
+    rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 0.9}]})
+    old_post = _patch(reranker_mod.requests, "post", rec)
+    old_url = reranker_mod.RERANK_API_URL
+    old_backend = reranker_mod.RERANK_BACKEND
+    old_model = reranker_mod.RERANK_MODEL
+    old_flag = reranker_mod._USE_RETURN_DOCUMENTS
+    reranker_mod.RERANK_API_URL = "https://api.jina.ai/v1/rerank"
+    reranker_mod.RERANK_BACKEND = "api"
+    reranker_mod.RERANK_MODEL = "qwen3-rerank"  # 兼容端点模型
+    reranker_mod._USE_RETURN_DOCUMENTS = False
+    monkeypatch.setenv("RERANK_API_KEY", "jina_xxx")
+    try:
+        reranker_mod.rerank("q", ["a"], instruct="按艺术史相关性排序")
+        payload = rec.calls[0]["json"]
+        assert rec.calls[0]["url"] == "https://api.jina.ai/v1/rerank"
+        assert "return_documents" not in payload
+        assert "instruct" not in payload  # 第三方端点不带非通用字段
+    finally:
+        _patch(reranker_mod.requests, "post", old_post)
+        reranker_mod.RERANK_API_URL = old_url
+        reranker_mod.RERANK_BACKEND = old_backend
+        reranker_mod.RERANK_MODEL = old_model
+        reranker_mod._USE_RETURN_DOCUMENTS = old_flag
+
+
+def test_compat_payload_keeps_dashscope_fields_for_dashscope(monkeypatch):
+    rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 0.9}]})
+    old_post = _patch(reranker_mod.requests, "post", rec)
+    old_backend = reranker_mod.RERANK_BACKEND
+    old_model = reranker_mod.RERANK_MODEL
+    old_flag = reranker_mod._USE_RETURN_DOCUMENTS
+    old_url = reranker_mod.RERANK_API_URL
+    reranker_mod.RERANK_BACKEND = "api"
+    reranker_mod.RERANK_MODEL = "qwen3-rerank"  # 兼容端点模型
+    reranker_mod.RERANK_API_URL = reranker_mod.COMPAT_URL
+    reranker_mod._USE_RETURN_DOCUMENTS = True
+    monkeypatch.setenv("RERANK_API_KEY", "sk-dashscope")
+    try:
+        reranker_mod.rerank("q", ["a"], instruct="按艺术史相关性排序")
+        payload = rec.calls[0]["json"]
+        assert rec.calls[0]["url"] == reranker_mod.COMPAT_URL
+        assert payload["return_documents"] is False
+        assert payload["instruct"] == "按艺术史相关性排序"
+    finally:
+        _patch(reranker_mod.requests, "post", old_post)
+        reranker_mod.RERANK_BACKEND = old_backend
+        reranker_mod.RERANK_MODEL = old_model
+        reranker_mod.RERANK_API_URL = old_url
+        reranker_mod._USE_RETURN_DOCUMENTS = old_flag
 
 
 def test_success_parses_and_sorts_by_score():
@@ -137,14 +290,20 @@ def test_instruct_passed_through():
     rec = _PostRecorder({"results": []})
     old = _patch(reranker_mod.requests, "post", rec)
     old_primary = reranker_mod.RERANK_MODEL
+    old_flag = reranker_mod._USE_RETURN_DOCUMENTS
+    old_url = reranker_mod.RERANK_API_URL
     # instruct 只在兼容端点报文中传递，需避开原生模型
     reranker_mod.RERANK_MODEL = "qwen3-rerank"
+    reranker_mod.RERANK_API_URL = reranker_mod.COMPAT_URL
+    reranker_mod._USE_RETURN_DOCUMENTS = True
     try:
         reranker_mod.rerank("q", ["a"], instruct="按艺术史相关性排序")
         assert rec.calls[0]["json"]["instruct"] == "按艺术史相关性排序"
     finally:
         _patch(reranker_mod.requests, "post", old)
         reranker_mod.RERANK_MODEL = old_primary
+        reranker_mod.RERANK_API_URL = old_url
+        reranker_mod._USE_RETURN_DOCUMENTS = old_flag
 
 
 def test_http_error_retries_then_returns_none():
@@ -178,6 +337,12 @@ def test_fallback_model_takes_over_on_primary_failure():
     })
     old_post = _patch(reranker_mod.requests, "post", rec)
     old_sleep = _patch(reranker_mod.time, "sleep", lambda s: None)
+    old_url = reranker_mod.RERANK_API_URL
+    old_primary = reranker_mod.RERANK_MODEL
+    old_fallback = reranker_mod.RERANK_FALLBACK_MODEL
+    reranker_mod.RERANK_API_URL = reranker_mod.COMPAT_URL
+    reranker_mod.RERANK_MODEL = "qwen3-rerank"      # 兼容端点主模型
+    reranker_mod.RERANK_FALLBACK_MODEL = "gte-rerank-v2"  # 原生端点后备
     try:
         ranked = reranker_mod.rerank("q", ["a", "b"])
         assert ranked == [(1, 0.8), (0, 0.3)]  # 原生端点结果解析并按分降序
@@ -186,6 +351,9 @@ def test_fallback_model_takes_over_on_primary_failure():
     finally:
         _patch(reranker_mod.requests, "post", old_post)
         _patch(reranker_mod.time, "sleep", old_sleep)
+        reranker_mod.RERANK_API_URL = old_url
+        reranker_mod.RERANK_MODEL = old_primary
+        reranker_mod.RERANK_FALLBACK_MODEL = old_fallback
 
 
 def test_native_model_routes_to_native_endpoint():
