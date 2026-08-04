@@ -303,7 +303,7 @@ def test_capability_gate_downgrades_unsupported_table():
         tp.confirm_table_schema("doc1", {"entity_col": "书名"})  # 无轴无描述
         assert _capability_supported("timeline", "table_doc1") is False
         assert _capability_supported("recommendation", "table_doc1") is False
-        assert _capability_supported("timeline", "semart") is True  # SemArt 不受影响
+        assert _capability_supported("timeline", "core") is True  # 内置库不受影响
         assert _capability_supported("timeline", "table_未注册") is False  # 未注册也降级
     finally:
         restore(); restore_h(); _REGISTRY.pop("table_doc1", None); _cleanup(tmp)

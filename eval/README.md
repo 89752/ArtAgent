@@ -1,30 +1,40 @@
 # 评估（Evaluation）
 
-用可量化指标衡量 Agent 效果，而非"能跑通"级别的冒烟测试。
+评价体系设计见 `docs/ArtAgent-评价体系设计-2026-08-03.md`。
+验收口径 = **最终答案质量 + 状态校验**；意图分类仅作诊断，不作主指标。
 
-```bash
-python eval/run_eval.py                 # 跑全部（意图分类 + 检索）
-python eval/run_eval.py --no-retrieval  # 只跑意图分类（快，不加载向量库）
-python eval/run_eval.py --retrieval-n 30
+## 结构
+
+```text
+eval/
+├─ agent_eval_v2.py          # 主评估入口（自包含）
+├─ agent_eval_report.md      # 最新报告
+├─ metrics_history.jsonl     # 历史趋势（每次运行追加一条）
+├─ sets/                     # 全部 JSON 测试数据集
+│  ├─ answer_golden.json     # 30 条分域黄金集（验收主集）
+│  ├─ fact_testset.json      # 60 条 core 可验证事实题（build_fact_testset.py 生成）
+│  ├─ behavior_testset.json  # 9 类行为用例
+│  ├─ tool_testset.json      # 30 条工具选择（含零工具负例）
+│  ├─ multi_turn_golden.json # 6 条多轮轨迹
+│  ├─ adversarial.json       # 10 条对抗/安全用例
+│  └─ intent_diag.json       # 40 条意图诊断（软信号，非验收）
+└─ ArtAgent-ABtest-2026-08-03.md  # A/B 测试汇总
 ```
 
-结果打印到控制台并写入 [`results.md`](results.md)。
+## 用法
 
-## 指标 1 · 意图分类准确率
+```bash
+python eval/agent_eval_v2.py --pr                # PR 门禁档：离线检索 20 + 意图诊断
+python eval/agent_eval_v2.py                     # 全量（需 API 额度）
+python eval/agent_eval_v2.py --answers 30 --facts --behavior-runs 3 --tools --multi-turn --adversarial --retrieval-n 100 --diag
+python eval/agent_eval_v2.py --retrieval-n 100   # 只跑检索（离线）
+python eval/agent_eval_v2.py --out eval/agent_eval_report_adversarial.md --adversarial   # 单跑对抗
+```
 
-- **数据**：[`intent_testset.json`](intent_testset.json),50 条人工标注 query,四类意图均衡覆盖,含 10+ 条边界/歧义样本(如"推荐一本介绍伦勃朗的书"——含"推荐"但实为知识问答)。
-- **方法**:对每条 query 调用真实的 `classify_intent` 节点(确定性 LLM,temperature=0),与金标签比对。
-- **产出**:总准确率、各类 Precision/Recall/F1、混淆矩阵、误分类样本清单。
-- **当前结果**:**准确率 96.0%,Macro-F1 0.962**。2 处误分类均为 general→recommendation,由偏好类关键词("推荐"/"喜欢")触发,是可解释的边界情况。
+## 约定
 
-## 指标 2 · 已知项检索 Recall@k
+- 单条用例 API 失败只跳过不中断，报告标注有效样本数；
+- 状态校验：记忆写 `preferences` 表、收藏写 `collections` 表，跑完自动清理；
+- 检索指标：core · seed=42 · n=100 · Jina API 精排（88% 基线）；
+- 跳过占比高时先恢复 API 额度再重跑，勿把不完整报告当正式基线。
 
-- **方法**:从 SemArt 随机抽 N 幅画,取其**描述中段片段**(非标题)作 query,检验原画能否命中 `semantic_search` 的 top-k。
-- **为何客观**:标签由数据本身自动生成(query 来自哪幅画,金标就是哪幅),无需人工标注,也无主观性。
-- **当前结果**:**Recall@5 = 64%**。片段检索(而非标题精确匹配)下的合理量级,反映真实语义检索质量,而非虚高数字。
-
-## 诚实性说明
-
-- 指标在**真实系统组件**上运行(同一个 `classify_intent`、同一个 `semantic_search`),不是离线仿真。
-- 检索评估用固定随机种子(`seed=42`)保证可复现。
-- 标注集有意加入歧义样本,让准确率落在可信区间而非刻意的 100%。

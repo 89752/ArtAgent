@@ -1,7 +1,7 @@
 ---
 name: document_summary
-description: 总结用户上传的文档（PDF/表格）：定位 → 读取 → 结构化摘要（JSON）
-when_to_use: 用户要求总结/概括自己上传的文档或画册
+description: 总结用户上传的文档（PDF/表格）：定位 → 读取 → 结构化摘要（JSON）（触发词：总结/概括/归纳/这篇文档讲了什么/画册内容）
+when_to_use: 用户要求总结/概括/归纳自己上传的文档或画册，或问"这份文档/画册讲了什么"
 version: 2
 tools: [semantic_search, read_page_image]
 max_steps: 8

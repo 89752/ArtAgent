@@ -1,12 +1,13 @@
 ---
 name: exhibition_research
-description: 调研一位画家或流派：本地库 + 联网多源交叉核对，输出带来源标注的研究笔记（JSON）
-when_to_use: 用户要"调研/研究/全面了解"某画家或流派，或本地资料不足需要补充
+description: 调研一位画家或流派：本地库 + 联网多源交叉核对，输出带来源标注的研究笔记（JSON）（触发词：调研/研究/全面了解/背景研究/研究一下/做功课）
+when_to_use: 用户要"调研/研究/全面了解/背景研究/研究一下"某画家或流派，或本地资料不足需要补充
 version: 2
-tools: [query_painter_knowledge, semantic_search, exact_lookup, web_search]
+tools: [query_painter_knowledge, semantic_search, exact_lookup, web_search, wiki_lookup, museum_search]
 max_steps: 10
 steps_json: ["本地统计与代表作品（query_painter_knowledge + exact_lookup）",
              "本地评论证据（semantic_search）",
+             "定义/生平类用 wiki_lookup，馆藏类用 museum_search 补充",
              "本地不足或需实时信息时 web_search 补充",
              "交叉核对：本地与网页信息冲突时分别标注",
              "输出完整 JSON（含来源标注）"]

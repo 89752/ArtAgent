@@ -10,14 +10,35 @@ import tempfile
 from pathlib import Path
 
 _TMP = tempfile.mkdtemp(prefix="artagent_web_test_")
-os.environ["INDEX_DIR"] = _TMP
-os.environ["ARTAGENT_MEMORY_DIR"] = _TMP
 
 import pytest
 from fastapi.testclient import TestClient
 
 import api
 from src.data import documents_store
+from src.memory import conversations as conv_mod
+from src.memory import summary as summary_mod
+from src.memory import store as prefs_mod
+from src.memory import feedback as fb_mod
+from src.observability import runs as runs_mod
+from src.tasks import store as tasks_mod
+
+# 隔离方式：直接设置各存储模块的路径属性（不用 env）。
+# 模块级改 env 会在 pytest collection 阶段污染全局，影响后续检索测试。
+documents_store.DB_PATH = Path(_TMP) / "documents.db"
+documents_store._LEGACY_STATUS_FILE = Path(_TMP) / "doc_status.json"
+conv_mod._DB_PATH = Path(_TMP) / "conversations.db"
+conv_mod._conn = None
+summary_mod._DB_PATH = Path(_TMP) / "conversations.db"
+summary_mod._conn = None
+prefs_mod._DB_PATH = Path(_TMP) / "preferences.db"
+prefs_mod._conn = None
+fb_mod._DB_PATH = Path(_TMP) / "feedback.db"
+fb_mod._conn = None
+runs_mod._DB_PATH = Path(_TMP) / "observability.db"
+runs_mod._conn = None
+tasks_mod._DB_PATH = Path(_TMP) / "tasks.db"
+tasks_mod._conn = None
 
 
 @pytest.fixture(scope="module")

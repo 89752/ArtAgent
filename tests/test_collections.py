@@ -33,6 +33,25 @@ def test_save_collection_overwrites_same_name():
     assert cols[0]["items"] == ["b", "c"]
 
 
+def test_get_delete_rename_collection():
+    _tmp_db()
+    col.save_collection("u1", "印象派", ["睡莲"])
+    got = col.get_collection("u1", "印象派")
+    assert got is not None and got["items"] == ["睡莲"]
+    assert col.get_collection("u1", "不存在") is None
+
+    assert col.rename_collection("u1", "印象派", "最爱") is True
+    assert col.get_collection("u1", "印象派") is None
+    assert col.get_collection("u1", "最爱") is not None
+    # 新名占用 / 旧名不存在 → False
+    assert col.rename_collection("u1", "最爱", "最爱") is False
+    assert col.rename_collection("u1", "不存在", "X") is False
+
+    assert col.delete_collection("u1", "最爱") is True
+    assert col.delete_collection("u1", "最爱") is False
+    assert col.list_collections("u1") == []
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

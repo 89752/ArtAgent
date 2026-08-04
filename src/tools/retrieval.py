@@ -141,9 +141,18 @@ def _artwork_from_schema_row(schema, row: dict) -> dict:
 
 
 @tool
-def semantic_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
+def semantic_search(
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    filters: Optional[dict] = None,
+) -> list[dict]:
     """
     通过自然语言语义检索相关画作与用户上传文档片段。
+
+    注意：用户上传文档（手稿/画册/回忆录等）的内容**只存在于本工具的结果中**，
+    query_painter_knowledge / exact_lookup 等工具看不到文档内容；涉及文档细节
+    的问题（如"莫奈在葛列尔画室的同学""布丹怎么发现莫奈"）必须调用本工具。
+    常识/定义/算术类问题（如"什么是线性透视""1+1等于几"）不需要调用本工具。
 
     适用场景：
       - 按主题检索（如"描绘爱情的文艺复兴画作"）
@@ -155,6 +164,10 @@ def semantic_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     Args:
         query: 自然语言检索查询
         top_k: 返回结果数量（默认5）
+        filters: 可选结构化过滤，如 {"author": "Monet", "school": "Impressionism",
+                 "timeframe": "1851-1900", "source": "core"}；
+                 source 只查指定通道（core / user_pdf_text / user_pdf_image），
+                 author/school/timeframe 做大小写不敏感包含匹配
 
     Returns:
         匹配结果列表：画作（标题、画家、年代、技法、流派、图片路径、描述摘要）
@@ -163,10 +176,34 @@ def semantic_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
     from src.retrieval.hybrid import get_hybrid_retriever
 
     hybrid = get_hybrid_retriever()
-    # Stage 5：限定当前生效的结构化数据源（semart 或用户切换的表格）；
-    # 用户 PDF 两路无 dataset_id 属性，不受切换影响始终参与
-    results = hybrid.search(query, top_k=top_k, dataset_id=hybrid.active_dataset)
-    return [_format_result(r) for r in results]
+    f = dict(filters or {})
+    src_val = f.pop("source", None)
+    sources = [str(src_val)] if src_val else None
+    # P0-4：带结构化过滤时多取候选，后置过滤避免漏召回
+    fetch_k = max(top_k * 3, 20) if f else top_k
+    results = hybrid.search(
+        query,
+        top_k=fetch_k,
+        dataset_id=hybrid.active_dataset,
+        sources=sources,
+    )
+    out = [_format_result(r) for r in results]
+    if f:
+        out = [d for d in out if _result_hit_filters(d, f)][:top_k]
+    else:
+        out = out[:top_k]
+    return out
+
+
+def _result_hit_filters(d: dict, filters: dict) -> bool:
+    """对格式化结果做结构化过滤（author/school/timeframe 包含匹配）。"""
+    for key, value in filters.items():
+        if not value:
+            continue
+        field = d.get(key) or ""
+        if str(value).lower() not in str(field or "").lower():
+            return False
+    return True
 
 
 @tool

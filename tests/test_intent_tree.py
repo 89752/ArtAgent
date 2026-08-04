@@ -9,7 +9,9 @@ from src.agent.intent_tree import (
     INTENT_LEAVES,
     NodeScore,
     classify_intents,
+    all_leaves,
     get_leaf,
+    get_tool_leaves,
     intent_tool_suggestions,
     parse_scores,
     top_scores,
@@ -57,16 +59,19 @@ def test_classify_intents_primary_is_top_capability():
         assert "comparison" in prompt  # 叶子列表进了 prompt
         return _raw_with_fence()
 
-    scores, primary = classify_intents("对比莫奈和梵高", llm=fake_llm)
+    scores, primary, route, reason = classify_intents("对比莫奈和梵高", llm=fake_llm)
     assert primary == "comparison"
+    assert route == "comparison"
+    assert reason
     assert scores[0].leaf.id == "comparison"
 
 
 def test_classify_intents_falls_back_when_capability_below_threshold():
     raw = '[{"id": "comparison", "score": 0.1}, {"id": "tool_web_search", "score": 0.95}]'
 
-    scores, primary = classify_intents("某问题", llm=lambda p: raw)
+    scores, primary, route, reason = classify_intents("某问题", llm=lambda p: raw)
     assert primary == "general"
+    assert route == "tool:web_search"  # 工具叶子最高 → 工具路由
     assert scores[0].leaf.id == "tool_web_search"
 
 
@@ -74,8 +79,9 @@ def test_classify_intents_llm_failure_falls_back_to_general():
     def boom(prompt):
         raise RuntimeError("llm down")
 
-    scores, primary = classify_intents("任何问题", llm=boom)
+    scores, primary, route, reason = classify_intents("任何问题", llm=boom)
     assert primary == "general"
+    assert route == "rag"
     assert scores == []
 
 
@@ -94,6 +100,22 @@ def test_node_score_to_dict():
     assert d["score"] == 0.9123
     assert d["id"] == INTENT_LEAVES[0].id
     assert d["kind"] == INTENT_LEAVES[0].kind
+
+
+def test_tool_leaves_align_with_general_tools():
+    from src.agent.nodes.general import GENERAL_TOOLS
+
+    leaves = {leaf.id for leaf in all_leaves() if leaf.kind == "tool"}
+    for t in GENERAL_TOOLS:
+        assert f"tool_{t.name}" in leaves, f"缺少工具叶子：{t.name}"
+    # 1:1 对齐：工具叶子数 == 工具数（含静态 tool 叶子，无多余）
+    assert len(get_tool_leaves()) == len(GENERAL_TOOLS)
+
+
+def test_system_knowledge_leaf_exists():
+    leaf = get_leaf("system_knowledge")
+    assert leaf is not None
+    assert leaf.kind == "system"
 
 
 def _leaf(kind: str, leaf_id: str, score: float, tool_name=None) -> dict:

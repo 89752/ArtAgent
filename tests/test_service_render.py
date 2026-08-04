@@ -5,13 +5,24 @@ import tempfile
 from pathlib import Path
 
 _TMP = tempfile.mkdtemp(prefix="artagent_render_test_")
-os.environ["INDEX_DIR"] = _TMP
-os.environ["ARTAGENT_MEMORY_DIR"] = _TMP
 
 from langchain_core.messages import ToolMessage
 
 from web import service as svc
 from src.data import documents_store
+from src.memory import conversations as conv_mod
+from src.memory import summary as summary_mod
+from src.memory import store as prefs_mod
+
+# 隔离方式：直接设置路径属性（不用 env，避免 collection 阶段全局污染）
+documents_store.DB_PATH = Path(_TMP) / "documents.db"
+documents_store._LEGACY_STATUS_FILE = Path(_TMP) / "doc_status.json"
+conv_mod._DB_PATH = Path(_TMP) / "conversations.db"
+conv_mod._conn = None
+summary_mod._DB_PATH = Path(_TMP) / "conversations.db"
+summary_mod._conn = None
+prefs_mod._DB_PATH = Path(_TMP) / "preferences.db"
+prefs_mod._conn = None
 
 
 def test_thumb_url_variants():

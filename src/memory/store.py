@@ -151,6 +151,18 @@ def load_preferences(user_id: str, top_k: int = 5) -> dict[str, list[str]]:
     if not user_id:
         return result
 
+    # 记忆系统 Phase 1：优先读 memory_items（主存储）；无数据回退旧 preferences 表
+    try:
+        from src.memory.memory_items import list_memories
+
+        items = list_memories(user_id, scope="user")
+        prefs = [i for i in items if i.get("kind") == "preference"]
+        if prefs:
+            result["artists"] = [str(i["content"]) for i in prefs[:top_k]]
+            return result
+    except Exception:  # noqa: BLE001 —— 新表不可用时回退旧表
+        pass
+
     with _lock:
         conn = _get_conn()
         for kind, out_key in (("artist", "artists"), ("style", "styles")):
@@ -173,3 +185,70 @@ def clear_preferences(user_id: str) -> None:
         conn = _get_conn()
         conn.execute("DELETE FROM preferences WHERE user_id = ?", (user_id,))
         conn.commit()
+
+
+def list_preferences(user_id: str) -> list[dict]:
+    """返回该用户的全部偏好分项（G2 记忆面板：kind/value/weight/updated_at）。"""
+    if not user_id:
+        return []
+    try:
+        from src.memory.memory_items import list_memories
+
+        items = list_memories(user_id, scope="user")
+        prefs = [i for i in items if i.get("kind") == "preference"]
+        if prefs:
+            return [
+                {
+                    "kind": "preference",
+                    "value": str(i["content"]),
+                    "weight": float(i.get("importance") or 0.5),
+                    "updated_at": i.get("updated_at") or "",
+                }
+                for i in prefs
+            ]
+    except Exception:  # noqa: BLE001
+        pass
+    with _lock:
+        conn = _get_conn()
+        rows = conn.execute(
+            """
+            SELECT kind, value, weight, updated_at FROM preferences
+            WHERE user_id = ? ORDER BY kind, weight DESC, updated_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    return [
+        {"kind": r[0], "value": r[1], "weight": r[2], "updated_at": r[3]}
+        for r in rows
+    ]
+
+
+def delete_preference(user_id: str, kind: str, value: str) -> bool:
+    """单项删除一条偏好；返回是否删到。"""
+    kind = (kind or "").strip().lower()
+    value = (value or "").strip()
+    if kind not in VALID_KINDS or not value or not user_id:
+        return False
+    deleted = False
+    with _lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "DELETE FROM preferences WHERE user_id = ? AND kind = ? AND value = ?",
+            (user_id, kind, value),
+        )
+        conn.commit()
+        deleted = cur.rowcount > 0
+    # 同步删除新表中等价内容条目（记忆系统 Phase 1 双库兼容）
+    try:
+        from src.memory.memory_items import list_memories
+
+        items = list_memories(user_id, scope="user")
+        for item in items:
+            if item.get("kind") == "preference" and item.get("content") == value:
+                from src.memory.memory_items import delete_memory as _del
+
+                _del(user_id, item["id"])
+                deleted = True
+    except Exception:  # noqa: BLE001
+        pass
+    return deleted
