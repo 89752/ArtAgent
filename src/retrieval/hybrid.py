@@ -14,7 +14,7 @@ search 流程:
      跨数据源的 score 绝对值不可比，排名可比
   3. 按 page_id/doc_id 去重（应对 Stage 3 双路线页面被多路命中）；
      无 page_id/doc_id 的结果（如核心库行）不参与去重
-  4. （Stage 4）qwen3-rerank 精排：粗排 top 15–20 重排后取 top_k；
+  4. （Stage 4）本地 Jina Reranker v3.5 精排：粗排 top 15–20 重排后取 top_k；
      整页图等非文本候选不参与精排、保持原槽位；精排失败降级粗排原序；
      RERANK_ENABLED=0 或 search(rerank=False) 可关闭（eval A/B 用）
 """
@@ -36,8 +36,11 @@ load_dotenv()
 
 logger = get_logger("retrieval.hybrid")
 
-CHROMA_DIR = Path(os.getenv("INDEX_DIR", "./data/index")) / "chroma"
-# 核心库用多语言模型（中文提问 + 英文描述）：1024 维，~2.2GB，首次运行需联网下载
+def _chroma_dir() -> Path:
+    """惰性解析 Chroma 目录（首次使用时），避免测试在 import 期修改 INDEX_DIR
+    导致全局索引路径被污染（2026-08-04 全量套件串扰修复）。"""
+    return Path(os.getenv("INDEX_DIR", "./data/index")) / "chroma"
+# 核心库用多语言模型（中文提问 + 英文描述）：1024 维，~2.2GB，本地缓存后全离线
 EMBEDDING_MODEL_M3 = "BAAI/bge-m3"
 # bge-m3 默认 max_seq_length=8192：长文本 padding 会让批量编码极慢。
 # 作品描述 p99≈2472 字符（约 620 token），1024 token 截断对质量几乎无损，
@@ -75,10 +78,15 @@ def _channel_weight(source: str) -> float:
     return CHANNEL_WEIGHTS.get(source, 1.0)
 
 
-# Stage 4 精排：RRF 粗排后送 qwen3-rerank 重排的候选池大小。
+# Stage 4 精排：RRF 粗排后送 reranker 重排的候选池大小。
 # 实测（2026-08-01，n=25 基线口径）：pool=20 时池召回 68.0%、pool=40 时
-# 76.0%，精排两次都 100% 兑现池内召回——瓶颈在池召回不在排序，取 40。
-RERANK_POOL = 40
+# 76.0%，精排两次都 100% 兑现池内召回——瓶颈在池召回不在排序，默认取 40。
+# 本地精排（RERANK_BACKEND=local）在 CPU 上耗时随池子线性增长，
+# 可调小（如 15）换取延迟，池召回会略降。
+try:
+    RERANK_POOL = int(os.getenv("RERANK_POOL", "40"))
+except ValueError:
+    RERANK_POOL = 40
 
 # 不参与文本精排的源：整页图 content 只是占位标签，精排打分无意义且会
 # 把多模态高相似页错误压底——它们保持粗排原槽位
@@ -99,11 +107,13 @@ _chroma_local = threading.local()
 
 def _get_thread_local_chroma_client():
     client = getattr(_chroma_local, "client", None)
-    if client is None:
+    path = str(_chroma_dir())
+    if client is None or getattr(_chroma_local, "path", None) != path:
         import chromadb
 
-        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        client = chromadb.PersistentClient(path=path)
         _chroma_local.client = client
+        _chroma_local.path = path
     return client
 
 
@@ -270,6 +280,7 @@ class HybridRetriever:
         sources: Optional[list[str]] = None,
         dataset_id: Optional[str] = None,
         rerank: Optional[bool] = None,
+        filters: Optional[dict] = None,
     ) -> list[RetrievalResult]:
         """
         统一检索入口。
@@ -279,6 +290,8 @@ class HybridRetriever:
                     同一 source 标签下按 dataset_id 选具体表）；None 不限。
         rerank:     Stage 4 精排开关；None 取 env RERANK_ENABLED（默认开），
                     显式 False 跳过精排（eval A/B 用）。
+        filters:    结构化过滤条件（{字段: 值}），透传给各数据源实现；
+                    与向量检索的 metadata 过滤语义一致（P0-4）。
         """
         use_rerank = _rerank_enabled(rerank)
         # 精排开启时各源多取候选（池化后再重排）；否则保持原样按需取
@@ -292,7 +305,7 @@ class HybridRetriever:
             if dataset_id is not None and r_dataset is not None and r_dataset != dataset_id:
                 continue
             try:
-                hits = retriever.search(query, top_k=fetch_k, filters=None)
+                hits = retriever.search(query, top_k=fetch_k, filters=filters)
             except Exception as e:  # 单源失败不拖垮整体检索
                 logger.warning("[hybrid] source=%s 检索失败：%s", name, e)
                 hits = []

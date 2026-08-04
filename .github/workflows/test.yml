@@ -17,4 +17,7 @@ jobs:
           pip install -r requirements.txt pytest
       - name: Run web/API and render tests
         run: |
-          pytest tests/test_service_render.py tests/test_web_api.py tests/test_core_integration.py -q
+          pytest tests/test_service_render.py tests/test_web_api.py tests/test_core_integration.py tests/test_feedback.py tests/test_preferences_store.py tests/test_tasks_store.py tests/test_governance.py tests/test_llm_failover.py tests/test_agent_runs.py tests/test_app_upgrades_api.py tests/test_route_layer.py tests/test_new_tools.py tests/test_tools_schema.py tests/test_capability_tools.py tests/test_intent_tree.py tests/test_collections.py -q
+      - name: Tool-belt alignment gate (T2)
+        run: |
+          python -c "from src.agent.intent_tree import get_tool_leaves; from src.agent.nodes.general import GENERAL_TOOLS; assert len(get_tool_leaves()) == len(GENERAL_TOOLS); print('tool alignment OK')"

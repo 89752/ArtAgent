@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 EVIDENCE_CHAR_BUDGET = 4500
 SNIPPET_LEN = 200
 PROFILE_CHAR_BUDGET = 800
+MEMORY_CHAR_BUDGET = 800
 SESSION_CHAR_BUDGET = 600
 SUMMARY_CHAR_BUDGET = 1200
 HISTORY_MAX_TURNS = 8
@@ -37,6 +38,7 @@ class ContextBudget:
     evidence_chars: int = EVIDENCE_CHAR_BUDGET
     subtasks_chars: int = 3000
     summary_chars: int = SUMMARY_CHAR_BUDGET
+    memory_chars: int = MEMORY_CHAR_BUDGET
 
 
 def estimate_context_chars(blocks: ContextBlocks) -> int:
@@ -44,7 +46,7 @@ def estimate_context_chars(blocks: ContextBlocks) -> int:
     body = sum(
         len(s)
         for s in (blocks.system, blocks.profile, blocks.summary,
-                  blocks.session, blocks.evidence, blocks.subtasks)
+                  blocks.session, blocks.evidence, blocks.subtasks, blocks.memory)
     )
     history = sum(
         len(str(getattr(m, "content", "") or "")) for m in blocks.history
@@ -63,6 +65,7 @@ def apply_budget(blocks: ContextBlocks, budget: ContextBudget | None = None) -> 
         session=blocks.session,
         evidence=blocks.evidence,
         subtasks=blocks.subtasks,
+        memory=blocks.memory,
         history=list(blocks.history),
     )
     # 1) 自适应历史窗口：从最大轮数递减到最小轮数，找到首个不超预算的窗口
@@ -76,6 +79,7 @@ def apply_budget(blocks: ContextBlocks, budget: ContextBudget | None = None) -> 
         ("summary", budget.summary_chars),
         ("evidence", budget.evidence_chars),
         ("subtasks", budget.subtasks_chars),
+        ("memory", budget.memory_chars),
     ):
         cur = getattr(out, field)
         if len(cur) > cap:
@@ -223,6 +227,39 @@ def build_profile_block(
     return block[:budget]
 
 
+def build_memory_block(
+    items: list[dict],
+    budget: int = MEMORY_CHAR_BUDGET,
+) -> str:
+    """用户记忆块（记忆系统 Phase 1）：检索注入的相关记忆，带来源与时间。"""
+    if not items:
+        return ""
+    lines: list[str] = []
+    used = 0
+    for item in items:
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        source = "用户明确" if item.get("source") == "user_explicit" else (
+            "自动抽取" if item.get("source") == "extracted" else "评估数据"
+        )
+        try:
+            from datetime import datetime
+
+            updated = datetime.fromisoformat(str(item.get("updated_at") or ""))
+            days = max(0, int((datetime.now().astimezone() - updated).total_seconds() // 86400))
+            time_hint = "今天" if days == 0 else f"{days} 天前"
+        except (TypeError, ValueError):
+            time_hint = ""
+        suffix = f"（来源：{source}" + (f" · {time_hint}" if time_hint else "") + "）"
+        line = f"- {content}{suffix}"
+        if used + len(line) > budget:
+            break
+        lines.append(line)
+        used += len(line)
+    return "\n".join(lines)
+
+
 def build_session_block(
     ledger: dict,
     budget: int = SESSION_CHAR_BUDGET,
@@ -367,6 +404,7 @@ class ContextBlocks:
     session: str = ""
     evidence: str = ""
     subtasks: str = ""
+    memory: str = ""
     history: list = field(default_factory=list)
 
     def to_system_messages(self):
@@ -381,6 +419,7 @@ class ContextBlocks:
             ("session", self.session),
             ("evidence", self.evidence),
             ("subtasks", self.subtasks),
+            ("memory", self.memory),
         ):
             if not content:
                 continue

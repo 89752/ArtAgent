@@ -22,10 +22,17 @@ class AgentState(BaseModel):
     # 多轮对话消息历史（LangGraph 托管，自动 append）
     messages: Annotated[list, add_messages] = Field(default_factory=list)
     user_query: str = ""
+    # 本轮改写前的原始用户问题（供信息缺口判定使用，避免压缩后的短句误判）
+    original_user_query: str = ""
 
     # ── 路由 ───────────────────────────────────────────────────
     # 意图类型：general / comparison / timeline / recommendation
     intent: str = ""
+    # 路由决策（§6.3）：direct / rag / web / comparison / timeline /
+    # recommendation / tool:<name>
+    route: str = ""
+    # 路由决策理由（可观测，写入 trace / route_diag）
+    route_reason: str = ""
     # 意图树打分结果（P0-②）：[{id, path, kind, score, reason, tool_name}]
     intent_scores: list[dict] = Field(default_factory=list)
     # 查询改写结果（P0-③）：改写后的独立完整问题
@@ -40,6 +47,16 @@ class AgentState(BaseModel):
     multi_evidence: dict[str, list[dict]] = Field(default_factory=dict)
     # 会话滚动摘要（Phase 4 起由增量摘要器写入，注入 context.summary 块）
     conversation_summary: str = ""
+    # 记忆系统 Phase 1：load_memory 检索注入的记忆块文本（token 预算内）
+    memory_block: str = ""
+    # 记忆系统 Phase 1.5：自动抽取已推进到第几轮（节流计数，跨轮持久）
+    memory_extracted_turns: int = 0
+    # 最近一次自动抽取结果（可观测/调试）
+    memory_extract_result: dict = Field(default_factory=dict)
+    # 记忆系统 Phase 3：最近一次用户画像聚合结果（可观测/调试）
+    memory_profile_result: dict = Field(default_factory=dict)
+    # 记忆检索原始条目（[{id, kind, content, entity, source, importance, ...}]）
+    memory_items: list[dict] = Field(default_factory=list)
     # 当前会话已上传的文档清单（[{doc_name, pages, kind, text_chunks, image_pages}]）
     uploaded_docs: list[dict] = Field(default_factory=list)
     # 信息缺口澄清路由信号（P1-1.5）："ask"=追问用户并短路；"continue"=放行

@@ -6,6 +6,9 @@ general 分支：ReAct 工具循环。
 """
 
 import json
+import re
+import time
+import uuid
 from typing import Literal
 
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -21,17 +24,34 @@ from src.tools.web_search import web_search
 from src.tools.guard import ToolDecision, guard_tool_message, validate_args
 from src.skills.loader import register_skills
 from src.tools.memory import remember, recall, forget
-from src.tools.collections import save_collection, list_collections, list_preferences
+from src.tools.collections import (
+    save_collection,
+    list_collections,
+    get_collection,
+    delete_collection,
+    rename_collection,
+    list_preferences,
+)
 from src.tools.capabilities import (
     compare_subjects,
     timeline_by_periods,
     recommend_with_exclusions,
 )
+from src.tools.color_analysis import color_analysis
+from src.tools.aggregate_stats import aggregate_stats
+from src.tools.compare_images import compare_images
+from src.tools.museum_search import museum_search
+from src.tools.wiki_lookup import wiki_lookup
 from src.retrieval.relevance import llm_relevance_filter
 from src.utils.llm import get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
 
 logger = get_logger("general")
+
+# 记忆系统 Phase 1：用户明确要求记忆的触发词（守卫强制落库用）
+_MEMORY_INTENT_RE = re.compile(
+    r"(记住|记下|记得|以后.*(说|提)|收藏到记忆|别忘)", re.IGNORECASE
+)
 
 # Phase 5：ReAct 工具轮次上限（实测出现过 29 次调用不收敛的循环）
 MAX_TOOL_ROUNDS = 5
@@ -58,10 +78,110 @@ GENERAL_TOOLS = [
     # Phase 5：收藏与偏好
     save_collection,
     list_collections,
+    get_collection,
+    delete_collection,
+    rename_collection,
     list_preferences,
+    # P1：能力器扩展
+    color_analysis,
+    aggregate_stats,
+    compare_images,
+    museum_search,
+    wiki_lookup,
 ] + register_skills()
 
 TOOL_BY_NAME: dict[str, object] = {t.name: t for t in GENERAL_TOOLS}
+
+
+# §6.3 路由决策注入：路由层判定后，向 general 分支下发"必须调用工具"的
+# 强指令（区别于 intent_tool_suggestions 的软建议），防止模型自行短路。
+ROUTE_DIRECTIVES: dict[str, str] = {
+    "rag": (
+        "路由决策：本问题需要本地知识/用户文档证据，优先调用 semantic_search；"
+        "本地不足时再用 exact_lookup / query_painter_knowledge 或 web_search 补充。"
+    ),
+    "web": (
+        "路由决策：本问题需要实时/时效信息，必须调用 web_search 获取，"
+        "不得直接凭记忆回答。"
+    ),
+    "comparison": (
+        "路由决策：本问题是对比类，必须调用 compare_subjects 收集双方证据后"
+        "再组织回答，不得直接凭记忆回答。"
+    ),
+    "timeline": (
+        "路由决策：本问题需要梳理风格演变，必须调用 timeline_by_periods 获取"
+        "分期证据后再组织回答，不得直接凭记忆编造分期。"
+    ),
+    "recommendation": (
+        "路由决策：本问题需要个性化推荐，必须调用 recommend_with_exclusions "
+        "生成候选后再组织回答（用户信息不足时先澄清）。"
+    ),
+}
+
+
+def _route_directive_message(route: str) -> SystemMessage | None:
+    """把路由决策转成 system 指令；未知/空路由不注入。"""
+    if not route:
+        return None
+    if route.startswith("tool:"):
+        name = route.split(":", 1)[1]
+        if not name:
+            return None
+        return SystemMessage(
+            content=(
+                f"路由决策：本问题应优先调用工具 {name}。"
+                "请按工具说明正确传参；若确实不适用再选择其他工具。"
+            )
+        )
+    text = ROUTE_DIRECTIVES.get(route)
+    if text:
+        return SystemMessage(content=text)
+    return None
+
+
+def _enforce_memory_write(response, state) -> object:
+    """守卫：用户明确要求记忆、但模型本轮没调 remember → 系统代调。
+
+    返回带强制 tool_call 的 AIMessage（内容保留原回复），使 ReAct 循环
+    走 general_tools 执行 remember（content=用户原话，落库可追溯）。
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    if getattr(response, "tool_calls", None):
+        return response
+    names = [tc.get("name") for tc in getattr(response, "tool_calls", None) or []]
+    if "remember" in names:
+        return response
+    # 本轮已执行过 remember（ToolMessage 已在消息历史）→ 不再强制，
+    # 否则"记住…"每轮都会重新触发，ReAct 循环直到轮次上限（2026-08-04）
+    if any(
+        isinstance(m, ToolMessage) and getattr(m, "name", None) == "remember"
+        for m in state.messages
+    ):
+        return response
+    q = state.user_query or ""
+    if not _MEMORY_INTENT_RE.search(q):
+        return response
+    content = q
+    try:
+        from src.memory.conflict import normalize_memory_text, smart_merge_enabled
+
+        if smart_merge_enabled():
+            content = normalize_memory_text(q)
+    except Exception:  # noqa: BLE001 —— 规范化失败回落用户原话
+        content = q
+    log_event(logger, "memory_guard", note="forced_remember", query=q[:100])
+    return AIMessage(
+        content=str(response.content or ""),
+        tool_calls=[
+            {
+                "name": "remember",
+                "args": {"content": content, "kind": "preference", "importance": 0.7},
+                "id": f"force-mem-{uuid.uuid4().hex[:8]}",
+                "type": "tool_call",
+            }
+        ],
+    )
 
 
 def _tool_schema(tool: object) -> dict:
@@ -152,15 +272,26 @@ def _guarded_tool_calls(state: AgentState, tool_node) -> tuple[list, list]:
 
     executed: list[ToolMessage] = []
     if valid_calls:
-        valid_ai = AIMessage(
-            content=getattr(last, "content", "") or "",
-            tool_calls=valid_calls,
-            id=f"{last.id}:valid" if last.id else "valid-calls",
-        )
-        copy_fn = getattr(state, "model_copy", None) or state.copy
-        valid_state = copy_fn(update={"messages": list(state.messages)[:-1] + [valid_ai]})
-        out = tool_node.invoke(valid_state)
-        executed = out.get("messages") if isinstance(out, dict) else []
+        # G6/2.2 工具执行治理：统一超时/重试/失败包装 + 耗时审计
+        from src.utils.governance import governed_invoke
+
+        for tc in valid_calls:
+            name = tc.get("name")
+            tool = TOOL_BY_NAME.get(name)
+            t0 = time.time()
+            output = governed_invoke(tool, tc.get("args") or {})
+            log_event(
+                logger, "tool_exec", tool=name,
+                ms=round((time.time() - t0) * 1000, 1),
+            )
+            executed.append(
+                ToolMessage(
+                    content=output,
+                    name=name,
+                    tool_call_id=tc.get("id"),
+                    id=f"gov:{tc.get('id')}",
+                )
+            )
     executed_by_id = {
         getattr(m, "tool_call_id", None): m
         for m in executed
@@ -234,18 +365,23 @@ def general_agent(state: AgentState) -> dict:
         ),
         evidence=format_evidence_block(extract_evidence_from_messages(state.messages)),
         subtasks=format_multi_evidence(state.multi_evidence),
+        memory=state.memory_block,
     )
     blocks = apply_budget(blocks)
     messages = blocks.to_system_messages()
     suggestion = _intent_suggestion_message(state)
     if suggestion is not None:
         messages.append(suggestion)
+    directive = _route_directive_message(state.route)
+    if directive is not None:
+        messages.append(directive)
     messages.extend(condense_tool_messages(history))
     context_chars = estimate_context_chars(blocks)
     log_event(logger, "context_volume", chars=context_chars,
               history_turns=len([m for m in blocks.history if getattr(m, "type", "") == "human"]))
 
     response = _get_llm_with_tools().invoke(messages)
+    response = _enforce_memory_write(response, state)
     tool_calls = [tc.get("name") for tc in getattr(response, "tool_calls", []) or []]
     if tool_calls:
         log_event(logger, "react", action="call_tools", tools=tool_calls)
