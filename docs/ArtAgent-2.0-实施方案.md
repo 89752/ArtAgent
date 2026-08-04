@@ -1,5 +1,9 @@
 # ArtAgent 2.0 实施方案（完善版 · 开发用）
 
+> 2026-08-04 注：文中引用的 `test_agent.py` / `test_pipelines.py` / `test_multi_turn.py` /
+> `test_multi_tool.py` 已随测试整理删除或迁移；回归改由 `eval/agent_eval_v2.py` 与
+> `scripts/regression.ps1`（默认快档 `pytest -m "not slow"`）负责。
+>
 > 本文档 = 原《ArtAgent-2.0-设计方案》+ 2026-07-31 代码级评估的 8 项补充 + Stage 1–6 实施记录。
 > 是 Stage 3–7 后续开发的**唯一事实来源**；每个新会话开工前先读「§1 当前状态」和「§13 陷阱速查」。
 >

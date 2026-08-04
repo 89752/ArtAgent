@@ -120,6 +120,16 @@ INTENT_LEAVES: list[IntentLeaf] = [
         kind="system",
         examples=["你好", "你是谁", "谢谢"],
     ),
+    IntentLeaf(
+        id="system_knowledge",
+        path="system > knowledge",
+        description=(
+            "常识/定义/算术类知识问答（如'什么是线性透视''1+1等于几'），"
+            "无需检索即可直接回答"
+        ),
+        kind="system",
+        examples=["什么是线性透视", "油画颜料和丙烯颜料有什么区别"],
+    ),
 ]
 
 _LEAF_BY_ID: dict[str, IntentLeaf] = {leaf.id: leaf for leaf in INTENT_LEAVES}
@@ -132,6 +142,65 @@ _CAPABILITY_TOOL = {
     "recommendation": "recommend_with_exclusions",
     "general": "semantic_search / exact_lookup",
 }
+
+
+# ------------------------------------------------------------------ #
+# 工具叶子自动对齐（T2）：GENERAL_TOOLS → 意图树 tool 叶子 1:1           #
+# ------------------------------------------------------------------ #
+
+_TOOL_LEAVES_CACHE: Optional[list[IntentLeaf]] = None
+
+
+def get_tool_leaves() -> list[IntentLeaf]:
+    """从 GENERAL_TOOLS + register_skills() 自动生成 tool 叶子（懒加载）。
+
+    与工具带保持 1:1 对齐：新增工具后无需手工维护意图树。
+    description 取工具 docstring 首段（压缩 ≤180 字符，控制分类 prompt 体积）。
+    """
+    global _TOOL_LEAVES_CACHE
+    if _TOOL_LEAVES_CACHE is None:
+        from src.agent.nodes.general import GENERAL_TOOLS
+
+        leaves: list[IntentLeaf] = []
+        for t in GENERAL_TOOLS:
+            name = getattr(t, "name", "") or ""
+            if not name:
+                continue
+            desc = str(getattr(t, "description", "") or "").strip()
+            first_line = desc.splitlines()[0] if desc else f"调用工具 {name}"
+            if len(first_line) > 180:
+                first_line = first_line[:180] + "..."
+            leaves.append(
+                IntentLeaf(
+                    id=f"tool_{name}",
+                    path=f"tool > {name}",
+                    description=first_line,
+                    kind="tool",
+                    tool_name=name,
+                )
+            )
+        _TOOL_LEAVES_CACHE = leaves
+    return _TOOL_LEAVES_CACHE
+
+
+def all_leaves() -> list[IntentLeaf]:
+    """静态叶子 + 自动生成工具叶子（工具叶子优先，保留静态 examples）。"""
+    by_id = {leaf.id: leaf for leaf in INTENT_LEAVES}
+    for tl in get_tool_leaves():
+        existing = by_id.get(tl.id)
+        by_id[tl.id] = (
+            IntentLeaf(
+                id=tl.id,
+                path=tl.path,
+                description=tl.description,
+                kind="tool",
+                examples=existing.examples,
+                tool_name=tl.tool_name,
+            )
+            if existing
+            else tl
+        )
+    return list(by_id.values())
 
 
 # ------------------------------------------------------------------ #
@@ -158,7 +227,7 @@ CLASSIFIER_SYSTEM_PROMPT = """你是艺术领域 Agent 的意图识别模块。�
 def build_classifier_prompt() -> str:
     """按当前意图树生成分类 prompt 的叶子列表段。"""
     lines: list[str] = []
-    for leaf in INTENT_LEAVES:
+    for leaf in all_leaves():
         lines.append(f"- id={leaf.id}")
         lines.append(f"  path={leaf.path}")
         lines.append(f"  description={leaf.description}")
@@ -198,7 +267,7 @@ def parse_scores(raw: str) -> list[NodeScore]:
             continue
         leaf_id = item.get("id")
         score = item.get("score")
-        leaf = _LEAF_BY_ID.get(str(leaf_id)) if leaf_id is not None else None
+        leaf = get_leaf(str(leaf_id)) if leaf_id is not None else None
         if leaf is None:
             continue
         try:
@@ -266,14 +335,57 @@ def _primary_intent(scores: list[NodeScore]) -> str:
     return "general"
 
 
+def _primary_route(scores: list[NodeScore]) -> tuple[str, str]:
+    """从 LLM 打分推导路由决策（classify 的 LLM 路径）。
+
+    优先级：
+      1. system 叶子（寒暄/常识定义）≥0.7 且高于其他 → direct；
+      2. tool 叶子 ≥0.6 且高于最佳 capability → tool:<name>；
+      3. capability 主意图 → comparison/timeline/recommendation；
+      4. general → rag（默认走检索）；
+      5. 无有效分数 → rag 兜底。
+    """
+    if not scores:
+        return "rag", "无有效打分，默认走检索"
+    best_system = next(
+        (s for s in scores if s.leaf.kind == "system" and s.score >= 0.7),
+        None,
+    )
+    best_cap = next(
+        (s for s in scores if s.leaf.kind == "capability"),
+        None,
+    )
+    best_tool = next(
+        (
+            s for s in scores
+            if s.leaf.kind == "tool" and s.score >= 0.6
+            and (best_cap is None or s.score > best_cap.score)
+        ),
+        None,
+    )
+    if best_system is not None and (
+        best_cap is None or best_system.score >= best_cap.score
+    ):
+        return "direct", f"system:{best_system.leaf.id}={best_system.score:.2f}"
+    if best_tool is not None:
+        return f"tool:{best_tool.leaf.tool_name}", (
+            f"tool:{best_tool.leaf.id}={best_tool.score:.2f}"
+        )
+    if best_cap is None:
+        return "rag", "无 capability 打分，默认检索"
+    if best_cap.leaf.id == "general":
+        return "rag", f"general={best_cap.score:.2f}"
+    return best_cap.leaf.id, f"{best_cap.leaf.id}={best_cap.score:.2f}"
+
+
 def classify_intents(
     query: str,
     llm: Optional[Callable[[str], str]] = None,
-) -> tuple[list[NodeScore], str]:
-    """对问题做意图打分，返回 (全部打分, 主意图)。
+) -> tuple[list[NodeScore], str, str, str]:
+    """对问题做意图打分，返回 (全部打分, 主意图, 路由决策, 路由理由)。
 
     llm 可注入（默认 get_deterministic_llm），便于单测。任何失败都回落：
-    scores=[] + primary="general"。
+    scores=[] + primary="general" + route="rag"。
     """
     if llm is None:
         from src.utils.llm import get_deterministic_llm
@@ -290,14 +402,18 @@ def classify_intents(
     try:
         raw = llm(prompt)
     except Exception:
-        return [], "general"
+        return [], "general", "rag", "LLM 分类失败，默认检索"
     scores = parse_scores(raw)
-    return scores, _primary_intent(scores)
+    route, reason = _primary_route(scores)
+    return scores, _primary_intent(scores), route, reason
 
 
 def get_leaf(leaf_id: str) -> Optional[IntentLeaf]:
     """按 id 取叶子节点。"""
-    return _LEAF_BY_ID.get(leaf_id)
+    leaf = _LEAF_BY_ID.get(leaf_id)
+    if leaf is not None:
+        return leaf
+    return next((l for l in get_tool_leaves() if l.id == leaf_id), None)
 
 
 def all_capability_ids() -> set[str]:

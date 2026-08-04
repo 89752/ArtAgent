@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    container_name: artagent-api
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      ARTAGENT_ENV: ${ARTAGENT_ENV:-dev}
+      # BGE 模型若已本地缓存可挂载，避免容器内重复下载
+      HF_HOME: /app/data/hf_cache
+    volumes:
+      - ./data:/app/data
+      - ./SemArt:/app/SemArt:ro
+    restart: unless-stopped

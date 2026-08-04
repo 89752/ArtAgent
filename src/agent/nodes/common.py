@@ -127,6 +127,7 @@ def rewrite_split(state: AgentState) -> dict:
         sub_questions=result.sub_questions,
     )
     return {
+        "original_user_query": state.user_query,
         "user_query": result.rewritten_question,
         "rewritten_question": result.rewritten_question,
         "sub_questions": result.sub_questions,
@@ -137,26 +138,86 @@ def rewrite_split(state: AgentState) -> dict:
 
 
 # ── 意图路由 ────────────────────────────────────────────────────
+
+# §6.3 确定性预筛：高置信场景规则短路（不花 LLM），未命中才走 LLM 打分。
+# 注意：只覆盖"几乎不会误判"的模式——知识定义/寒暄/算术、时效信息、
+# 强比较动词、演变/推荐动词；"区别/不同"类留给 LLM（领域比较 vs 常识区别）。
+_KNOWLEDGE_PREFIX_RE = re.compile(
+    r"^(什么是|啥是|什么叫|解释一下|简单解释)[^，。！？]{0,40}"
+    r"[!！。.？?～~呀啊呢吧 ]*$|"
+    r"^[0-9]+\s*[+\-*×÷/]\s*[0-9]+[^，。！？]{0,20}$",
+    re.IGNORECASE,
+)
+_WEB_TRIGGER_RE = re.compile(
+    r"(天气|气温|降雨|新闻|股价|汇率|现在几点|几点钟|最新行情|今日头条)",
+    re.IGNORECASE,
+)
+_COMPARE_PREFIX_RE = re.compile(
+    r"^(对比|比较|比一比|哪个更|谁更|孰更)[^，。！？]*$",
+    re.IGNORECASE,
+)
+_TIMELINE_TRIGGER_RE = re.compile(
+    r"(风格演变|发展历程|不同时期|阶段变化|时间线|早期.*晚期|晚期.*早期)",
+    re.IGNORECASE,
+)
+_RECOMMEND_TRIGGER_RE = re.compile(
+    r"(推荐|类似.*画家|喜欢.*(风格|画家).*(推荐|还有谁|还会喜欢))",
+    re.IGNORECASE,
+)
+
+
+def _prefilter_route(question: str) -> tuple[str, str] | None:
+    """确定性预筛：命中返回 (route, reason)，未命中返回 None。"""
+    q = (question or "").strip()
+    if not q:
+        return "rag", "空问题默认检索"
+    if _GREETING_RE.match(q) or _KNOWLEDGE_PREFIX_RE.match(q):
+        return "direct", "prefilter:寒暄/常识定义/算术"
+    if _WEB_TRIGGER_RE.search(q):
+        return "web", "prefilter:时效/实时信息"
+    if _COMPARE_PREFIX_RE.match(q):
+        return "comparison", "prefilter:强比较动词"
+    if _TIMELINE_TRIGGER_RE.search(q):
+        return "timeline", "prefilter:演变/时间线"
+    if _RECOMMEND_TRIGGER_RE.search(q):
+        return "recommendation", "prefilter:推荐动词"
+    return None
+
+
 def classify_intent(state: AgentState) -> dict:
-    """意图树打分分类（P0-②）：对所有叶子打分，主意图仍路由到现有分支。
+    """意图打分 + 路由决策（§6.3）：对所有叶子打分，输出 route。
 
     分数写入 state.intent_scores（供 UI 展示与后续多意图并行使用）；
     LLM 失败 / 畸形输出自动回落 general，行为与旧版一致。
     """
     from src.agent.intent_tree import classify_intents
 
-    scores, intent = classify_intents(state.user_query)
+    pref = _prefilter_route(state.user_query)
+    if pref is not None:
+        route, reason = pref
+        scores, intent = [], "general"
+        # 预筛命中时仍给一个轻量 LLM 打分供 UI/建议使用（失败不阻塞）
+        try:
+            scores, intent, _, _ = classify_intents(state.user_query)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        scores, intent, route, reason = classify_intents(state.user_query)
     log_event(
         logger,
         "classify",
         query=state.user_query,
         intent=intent,
+        route=route,
+        route_reason=reason,
         top_scores="; ".join(f"{s.leaf.id}={s.score:.2f}" for s in scores[:3]),
     )
     return {
         "intent": intent,
+        "route": route,
+        "route_reason": reason,
         "intent_scores": [s.to_dict() for s in scores],
-        "current_step": f"classify→{intent}",
+        "current_step": f"classify→{route}",
     }
 
 
@@ -249,7 +310,10 @@ def ask_user(state: AgentState) -> dict:
             "例如想了解哪位画家、哪幅画或哪种风格。"
         )
     else:
-        gap, message = _info_gap(state.user_query or "", state.intent)
+        # 用改写前的原始问题判断信息缺口：改写可能压缩掉疑问词（如"莫奈晚年"），
+        # 长度启发式不应作用在内部压缩句上（mt-002 回归）
+        raw_question = state.original_user_query or state.user_query or ""
+        gap, message = _info_gap(raw_question, state.intent)
     if not gap:
         return {
             "ask_user": "continue",
@@ -305,21 +369,71 @@ def multi_retrieve(state: AgentState) -> dict:
 
 # ── 长期记忆读取（S5） ──────────────────────────────────────────
 def load_memory(state: AgentState) -> dict:
-    """从持久化存储读取用户偏好与会话摘要，注入 state。"""
+    """记忆系统 Phase 1：检索注入相关记忆 + 读取会话摘要。
+
+    - 记忆检索：按当前问题对 memory_items 打分（相关度+新鲜度+重要性），
+      只注入相关条目（解决"读到无关旧记忆"），带来源/时间；
+    - 身份：统一走 get_memory_user_id()（与 remember/recall 工具一致），
+      避免 web 端 state.user_id 与工具层 MEMORY_USER_ID 不一致（2026-08-04）；
+    - 兼容：user_preferences 仍返回（旧 profile/API 消费），但画像块已
+      由 memory_block 承载更完整的记忆语义。
+    """
+    from src.agent.context import build_memory_block
+    from src.memory.memory_items import search_memories
+    from src.memory.memory_items import get_memory_user_id
+    from src.memory.episodes import load_episode
+    from src.memory.profile import load_profile_item
     from src.memory.summary import load_summary
 
-    prefs = load_preferences(state.user_id)
+    uid = get_memory_user_id()
+    prefs = load_preferences(uid)
     summary = load_summary(state.conversation_id)
+    items = search_memories(
+        uid,
+        state.user_query or "",
+        scope="user",
+        top_k=5,
+    )
+    # 跨轮引用兜底：问题与记忆词面不重叠时，检索可能命中不足；
+    # 补 top 最近/最重要条目，保证"我喜欢什么/我住在哪"也能引用
+    if len(items) < 3:
+        fallback = search_memories(
+            uid, "", scope="user", top_k=3, min_score=0.0,
+        )
+        have = {i["id"] for i in items}
+        items = items + [i for i in fallback if i["id"] not in have]
+    # 情景记忆（Phase 2/L3）：同一会话上次的滚动摘要，预算内注入
+    memory_block = build_memory_block(items, budget=600)
+    # Phase 3：跨线程用户画像（"记住你"）优先注入，预算内
+    profile_item = load_profile_item(uid)
+    if profile_item and (profile_item.get("content") or "").strip():
+        memory_block = (
+            f"【用户画像】{str(profile_item['content']).strip()[:200]}"
+            + ("\n\n" + memory_block if memory_block else "")
+        )
+    episode = load_episode(uid, state.conversation_id) if state.conversation_id else None
+    if episode and (episode.get("summary") or "").strip():
+        ep_text = (
+            f"【上次对话回顾 · {episode.get('turn_count', 0)} 轮】"
+            f"{str(episode['summary']).strip()[:150]}"
+        )
+        memory_block = (memory_block + "\n\n" + ep_text).strip()
     log_event(
         logger, "load_memory",
-        user=state.user_id,
+        user=uid,
         artists=prefs.get("artists", []),
         styles=prefs.get("styles", []),
+        memory_hits=len(items),
+        memory_block_chars=len(memory_block),
         summary_len=len(summary),
+        episode=bool(episode),
+        profile=bool(profile_item),
     )
     return {
         "user_preferences": prefs,
         "conversation_summary": summary,
+        "memory_items": items,
+        "memory_block": memory_block,
         "current_step": "load_memory",
     }
 
@@ -368,26 +482,103 @@ def web_fallback(state: AgentState) -> dict:
     }
 
 
+# ── 工具升级兜底（§6.3：reflection RETRY 不再只走联网） ──────────
+def tool_upgrade(state: AgentState) -> dict:
+    """反思 RETRY 后的工具升级：按 route 意向先补本地证据，再补联网。
+
+    - route=web → 直接联网兜底（与旧 web_fallback 等价）；
+    - 其余 → 先 semantic_search 补本地证据，无结果再升级联网。
+    """
+    from src.agent.prompts import LOCAL_EVIDENCE_SYNTHESIZE_PROMPT
+    from src.tools.retrieval import semantic_search
+    from src.utils.llm import get_llm
+
+    if state.route == "web":
+        return web_fallback(state)
+
+    try:
+        results = semantic_search.invoke(
+            {"query": state.user_query, "top_k": 5}
+        )
+    except Exception:  # noqa: BLE001
+        results = []
+    evidence = format_evidence_block(results)
+    if not evidence.strip():
+        return web_fallback(state)
+
+    prompt = LOCAL_EVIDENCE_SYNTHESIZE_PROMPT.format(
+        user_query=state.user_query,
+        prev_answer=state.final_answer or "(无)",
+        evidence=evidence,
+    )
+    answer = get_llm(0.4).invoke(prompt).content
+    log_event(
+        logger, "tool_upgrade",
+        query=state.user_query, route=state.route, hits=len(results),
+    )
+    return {
+        "final_answer": answer,
+        "messages": [AIMessage(content=answer)],
+        "retry_count": state.retry_count + 1,
+        "current_step": "tool_upgrade",
+    }
+
+
 # ── 长期记忆写入（S5） ──────────────────────────────────────────
 def save_memory(state: AgentState) -> dict:
     """
     Phase 4/5：触发会话滚动摘要（达到轮数后增量压缩并落库）。
+    Phase 1.5：自动抽取稳定偏好/事实（MEMORY_AUTO_EXTRACT=1 开启，默认关）。
 
     说明：旧版"推荐场景写偏好"逻辑已删除——扁平化后 state.subjects 不再由
     管线填充，偏好记忆改由 Agent 用 remember 工具显式记录（Phase 4）。
     """
     from src.memory.summary import maybe_summarize
+    from src.memory.memory_items import get_memory_user_id
+    from src.memory.episodes import upsert_episode
+    from src.memory.profile import maybe_refresh_profile
 
+    uid = get_memory_user_id()
     summary = maybe_summarize(
-        state.messages, state.conversation_id, state.user_id,
+        state.messages, state.conversation_id, uid,
         volume_chars=state.context_chars,
     )
+    turns = sum(1 for m in state.messages if getattr(m, "type", "") == "human")
+    try:
+        if summary and state.conversation_id:
+            upsert_episode(uid, state.conversation_id, summary, turns)
+    except Exception as e:  # noqa: BLE001 —— 情景记忆失败不阻塞主流程
+        log_event(logger, "save_memory", note="episode_failed", error=str(e))
+    profile_result: dict = {}
+    try:
+        profile_result = maybe_refresh_profile(uid)
+    except Exception as e:  # noqa: BLE001 —— 画像聚合失败不阻塞主流程
+        profile_result = {"error": str(e)}
+    extracted_turns = state.memory_extracted_turns
+    extract_result: dict = {}
+    try:
+        from src.memory.extract import maybe_extract
+
+        extracted_turns, extract_result = maybe_extract(
+            state.messages,
+            extracted_turns=state.memory_extracted_turns,
+        )
+    except Exception as e:  # noqa: BLE001 —— 抽取失败不阻塞主流程
+        extract_result = {"error": str(e)}
     log_event(
         logger, "save_memory",
         user=state.user_id,
-        turns=sum(1 for m in state.messages if getattr(m, "type", "") == "human"),
+        turns=turns,
         tool_rounds=state.tool_rounds,
         context_chars=state.context_chars,
         summary_len=len(summary),
+        auto_extract=bool(extract_result),
+        auto_profile=bool(profile_result),
     )
-    return {"current_step": "save_memory", "conversation_summary": summary}
+    return {
+        "current_step": "save_memory",
+        "conversation_summary": summary,
+        "memory_extracted_turns": extracted_turns,
+        "memory_extract_result": extract_result,
+        "memory_profile_result": profile_result,
+    }

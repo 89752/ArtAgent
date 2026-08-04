@@ -75,10 +75,11 @@ graph TD;
 | 模块 | 选型 |
 |---|---|
 | Agent 编排 | LangGraph（StateGraph 多分支流程 + MemorySaver 多轮记忆） |
-| LLM | DeepSeek / 通义千问（OpenAI 兼容接口，可切换） |
-| 视觉模型 | Qwen-Omni（图像分析） |
-| 向量库 | Chroma（本地持久化，21,382 条向量） |
-| Embedding | BGE `bge-small-en-v1.5` |
+| LLM | DeepSeek / 通义千问（OpenAI 兼容 API，可切换） |
+| 视觉模型 | Qwen-Omni（图像分析，API） |
+| 向量库 | Chroma（本地持久化，39,314 条 core 向量） |
+| Embedding | BGE `bge-m3`（文本，本地缓存后全离线；图片通道走多模态 API，额度不足时降级） |
+| 精排 | Jina Reranker v3.5（API；本地兜底可切换） |
 | 长期记忆 | SQLite（标准库，无额外依赖） |
 | 数据集 | SemArt（21,384 幅欧洲绘画，8–19 世纪，含艺术评论文本） |
 | 联网搜索 | Tavily（可选，未配置时优雅降级） |
@@ -88,15 +89,27 @@ graph TD;
 
 ## 🧰 工具（Tools）
 
-Agent 在 `general` 分支可自主调用以下 5 个工具，显式管线则按需内部调用：
+Agent 在 `general` 分支可自主调用全部工具（意图树 tool 叶子与工具带 1:1 自动对齐）：
 
 | 工具 | 用途 |
 |---|---|
-| `semantic_search` | 语义向量检索（主题/风格/描述类模糊查询） |
+| `semantic_search` | 语义向量检索（主题/风格/描述/用户文档），支持 `filters`（author/school/timeframe/source） |
 | `exact_lookup` | 结构化精确查询（按画家/标题/年代/画派） |
-| `query_painter_knowledge` | 画家结构化统计（作品数/流派/时期/技法/代表作），由 Agent 组织成回答 |
-| `image_lookup` | 从本地图库定位代表作配图；`analyze=True` 时触发视觉模型看图分析 |
-| `web_search` | 联网兜底搜索（本地查不到时） |
+| `query_painter_knowledge` | 画家结构化统计（作品数/流派/时期/技法/代表作） |
+| `image_lookup` | 定位配图；`analyze=True` 触发视觉模型看图分析 |
+| `read_page_image` | 读取用户上传 PDF 整页图内容（视觉模型） |
+| `web_search` | 联网搜索（本地查不到/时效信息时） |
+| `compare_subjects` | 按对象分组收集对比证据（画家/画作/风格） |
+| `timeline_by_periods` | 按年代分组轴梳理风格演变与配图 |
+| `recommend_with_exclusions` | 偏好特征提炼 → 检索 → 排除已喜欢画家 |
+| `color_analysis` | 本地计算：主色调/明度对比/饱和度/构图网格（免费） |
+| `aggregate_stats` | 本地统计：按流派/时期/技法分组计数与占比 |
+| `compare_images` | 两幅画同帧视觉对比（笔触/色彩/构图，一次视觉调用） |
+| `museum_search` | Met 开放馆藏检索（CC0，免费） |
+| `wiki_lookup` | 维基百科摘要（画家/流派/术语定义） |
+| `remember` / `recall` / `forget` | 跨会话记忆读写删 |
+| `save_collection` 等 6 项 | 收藏清单与偏好管理（增删查改） |
+| `skill_*`（3 项） | 深度画作分析 / 文档总结 / 展览研究技能 |
 
 ---
 
@@ -185,13 +198,16 @@ python api.py
 
 ## 🧪 测试
 
+测试分两层（`pytest.ini` 已配置，默认只跑快档）：
+
 ```bash
-python tests/test_access.py      # 数据访问层单测（无 LLM/无网络，秒级）
-python tests/test_tools.py       # 工具单测
-python tests/test_pipelines.py   # 四分支端到端冒烟测试（对比/推荐/时间线/general + 记忆）
-python tests/test_multi_turn.py  # 多轮对话记忆
-python tests/test_multi_tool.py  # 多工具链式调用
+pytest                # 快档：411 个纯单测/API 集成测试（无 LLM/无网络/无模型，约 1-2 分钟）
+pytest -m slow        # 慢档：真实检索冒烟（加载 bge-m3 + Jina 联网，见 tests/test_tools.py）
+pytest -m "not slow or slow"   # 全量
 ```
+
+慢档需要本地数据/模型与网络，默认不跑；CI 与 `scripts/regression.ps1` 均只跑快档。
+老式脚本入口（`python tests/test_xxx.py`）仍可用，适合单文件调试。
 
 ---
 
@@ -217,8 +233,8 @@ ARTAGENT_LOG_LEVEL=DEBUG ARTAGENT_LOG_FILE=run.log python api.py
 
 | 指标 | 结果 | 方法 |
 |---|---|---|
-| **意图分类准确率** | **96.0%**（Macro-F1 0.962） | 50 条人工标注集（含 10+ 边界样本），跑真实 `classify_intent` 节点 |
-| **已知项检索 Recall@5** | **64.0%** | 随机抽画作用描述片段作 query，检验原画能否命中 top-5（自动标注、固定种子可复现） |
+| **意图分类准确率** | **96.0%**（Macro-F1 0.962，v1 50 条基线） | v2 已扩容 203 条（含跨域负样本），新基线待跑；跑真实 `classify_intent` 节点 |
+| **已知项检索 Recall@5** | **88.0%**（qwen3-rerank API）/ 85.0%（本地精排或粗排） | 核心库（core）随机抽 100 幅画，用描述片段作 query，检验原画能否命中 top-5（自动标注、seed=42 可复现；本地精排零额度） |
 
 ```bash
 python eval/run_eval.py                 # 跑全部
@@ -247,3 +263,39 @@ python eval/run_eval.py --no-retrieval  # 只跑意图分类（不加载向量�
   year      = {2018},
 }
 ```
+
+---
+
+## 🚀 成熟 Agent 应用升级（2026-08）
+
+依据 `docs/ArtAgent-成熟Agent应用升级方案-2026-08.md` 落地，聚焦应用体验、可靠性与可观测性（平台层不接线）：
+
+### 体验闭环
+- 👍/👎 反馈：助手气泡下方点赞/点踩 + 原因标签（不准确/引用不充分/过于冗长/其他）+ 补充说明，落 `feedback` 表；导出脚本 `python scripts/export_feedback.py`（eval 候选池）。
+- 记忆面板：侧栏「🧠 记忆」查看 Agent 记住了哪些画家/风格（含权重），支持单项删除与一键清空（`GET/DELETE /api/preferences`）。
+- 可交互引用：回答中的 `[N]` 变为可点击角标，联动展开来源卡。
+- 错误态：模型超时/额度/网络错误给出用户可读文案与「重试」按钮。
+
+### 安全
+- 本地白名单 HTML 消毒器 `static/lib/sanitize.js`：所有 `marked.parse` 输出先消毒（剥事件属性、拦截 `javascript:`、非白名单标签丢弃）。
+
+### 可靠性与治理
+- 任务化：文档/表格解析落 `tasks` 表（`pending→processing→done/failed/interrupted`），启动恢复中断任务，`POST /api/tasks/{id}/retry` 重试；上传响应形状不变。
+- 工具执行治理：统一超时（`TOOL_TIMEOUT_SEC`）、瞬时失败重试（`TOOL_RETRIES`）、失败包装为结构化错误不中断整轮。
+- 并发与限流：解析信号量（`TASK_PARSE_CONCURRENCY`）+ 每 IP 令牌桶限流（`RATE_LIMIT_RPM/BURST`，429）。
+- 模型主备降级：`LLM_BACKUP_MODEL` / `VISION_BACKUP_MODEL` 等 env 配置，主模型超时/额度失败自动切备份。
+
+### 可观测性
+- 每轮对话落 `agent_runs` 表（request_id/意图/节点步骤/工具/上下文体积/耗时/成本估算/反思与兜底标记/错误）。
+- `GET /api/metrics` 汇总 P50/P95 延迟、成本、工具分布、反思与兜底率、错误率。
+- 全请求带 `X-Request-Id`，SSE `done` 事件返回 `request_id`，可按会话回放轨迹。
+
+### 运行与验证
+```bash
+# 回归门禁（纯单测 + eval 相关测试 + 可选真实 API 冒烟）
+powershell -ExecutionPolicy Bypass -File scripts/regression.ps1
+
+# 容器化启动
+docker compose up --build
+```
+新增配置项见 `.env.example`（模型降级/限流/任务并发/工具超时/成本单价/运行环境）。

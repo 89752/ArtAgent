@@ -1,5 +1,9 @@
 # ArtAgent 成熟 Agent 应用升级方案（2026-08 · 应用版 v2.0）
 
+> 2026-08-04 注：文中回归命令引用的 `test_pipelines.py` / `test_multi_tool.py` 已删除，
+> 回归改由 `scripts/regression.ps1`（默认快档 `pytest -m "not slow"`）与
+> `eval/agent_eval_v2.py` 负责。
+>
 > 版本：v2.0（应用版）｜ 编制：Codex（资深项目经理视角）｜ 日期：2026-08-03
 > 范围确认：**只做成熟 Agent 应用**。平台层增量（`src/platform/`、`agents/`、/v1 API、多用户隔离、MCP 等）明确不在本方案范围，已有代码保持不动、不纳入计划。
 > 依据：2026-08-03 代码复核（git status/diff、api.py、web/service.py、static/、tests/、.github/）

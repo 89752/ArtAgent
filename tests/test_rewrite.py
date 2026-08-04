@@ -84,6 +84,21 @@ def test_missing_new_fields_default_safe():
     assert result.ambiguous is False
 
 
+def test_over_compressed_rewrite_falls_back_to_original():
+    """mt-002 回归：改写把"他晚年怎么了？"压成"莫奈晚年"（<6 字）时回退原文，
+    避免下游 _info_gap 的长度启发式误判为信息不足。"""
+
+    def fake_llm(prompt):
+        return (
+            '{"rewritten_question": "莫奈晚年", "sub_questions": ["莫奈晚年"], '
+            '"key_entities": ["莫奈"], "ambiguous": false}'
+        )
+
+    result = rewrite_and_split("他晚年怎么了？", llm=fake_llm)
+    assert result.rewritten_question == "他晚年怎么了？"
+    assert result.sub_questions == ["他晚年怎么了？"]
+
+
 def test_rewrite_prompt_asks_compression_and_extraction():
     def fake_llm(prompt):
         assert "压缩" in prompt or "去掉口头禅" in prompt
