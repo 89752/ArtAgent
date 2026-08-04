@@ -32,7 +32,7 @@ def get_mm_embed_fn():
         import dashscope
         from dashscope import MultiModalEmbedding
 
-    dashscope.api_key = os.getenv("LLM_API_KEY")
+        dashscope.api_key = os.getenv("LLM_API_KEY")
         resp = MultiModalEmbedding.call(model=MM_EMBED_MODEL, input=[item])
         if resp.status_code != 200:
             raise RuntimeError(f"多模态编码失败：{resp.code} {resp.message}")
