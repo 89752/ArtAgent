@@ -8,6 +8,23 @@ SemArt/
 /data/
 *.db
 
+# design docs: keep local only (user 2026-08-04)
+/docs/
+
+# dev/ops helper scripts: keep local only (user 2026-08-04)
+/scripts/
+
+# tests: keep local only (user 2026-08-04; CI workflow will need adjusting)
+/tests/
+
+# deployment / generated / personal artifacts: keep local only (user 2026-08-04)
+/Dockerfile
+/docker-compose.yml
+.dockerignore
+eval/agent_eval_report.md
+eval/results.md
+tests/fixtures/*.xlsx
+
 # ── AI 工具本地配置/产物（不入库） ──
 .claude/
 .agents/

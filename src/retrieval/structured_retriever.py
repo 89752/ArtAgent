@@ -73,6 +73,25 @@ CORE_SCHEMA = TableSchema(
 # 核心库归一化后的作品表（normalize_core.py 产出；不存在则不注册 core）
 CORE_DATA_PATH = Path(os.getenv("CORE_DATA_PATH", "./data/core/artworks_core.csv"))
 
+# P0-4：semantic_search filters 的字段别名（Chroma metadata 与 df 列名差异）
+_FILTER_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "author": ("author", "artist"),
+    "school": ("school", "movement", "genre"),
+    "timeframe": ("timeframe", "year_bucket"),
+}
+
+
+def _metadata_hit_filters(meta: dict, filters: dict) -> bool:
+    """向量检索结果的后置过滤：按别名列做大小写不敏感包含匹配。"""
+    for key, value in filters.items():
+        if not value:
+            continue
+        aliases = _FILTER_KEY_ALIASES.get(key, (key,))
+        haystacks = [str(meta.get(a) or "") for a in aliases]
+        if not any(str(value).lower() in h.lower() for h in haystacks):
+            return False
+    return True
+
 
 def _entity_tokens(names: list[str]) -> list[str]:
     """实体排除名单的分词：长度 > 2 的词转小写（与 Stage 1 前 recommendation
@@ -207,17 +226,22 @@ class StructuredTableRetriever:
         if collection is not None and embed_fn is not None:
             if collection.count() == 0:
                 return []  # 空集合短路（core 未索引时），避免 n_results=0 报错
-            return self._vector_search(collection, embed_fn, query, top_k)
+            return self._vector_search(collection, embed_fn, query, top_k, filters)
         return self._fuzzy_search(query, top_k, filters)
 
     def _vector_search(
         self, collection: Any, embed_fn: Callable[[str], list[float]],
-        query: str, top_k: int,
+        query: str, top_k: int, filters: dict | None = None,
     ) -> list[RetrievalResult]:
         """BGE 向量空间检索（SemArt 路径，与原 semantic_search 行为一致）。"""
+        # P0-4：带结构化过滤时多取候选，后置过滤避免漏召回
+        if filters:
+            fetch_k = min(max(top_k * 4, top_k + 20), max(collection.count(), 1))
+        else:
+            fetch_k = top_k
         results = collection.query(
             query_embeddings=[embed_fn(query)],
-            n_results=min(top_k, collection.count()),
+            n_results=min(fetch_k, collection.count()),
             include=["metadatas", "distances"],
         )
         out: list[RetrievalResult] = []
@@ -233,6 +257,11 @@ class StructuredTableRetriever:
                     image_refs=[meta["file"]] if meta.get("file") else [],
                 )
             )
+        if filters:
+            out = [
+                r for r in out
+                if _metadata_hit_filters(r.metadata, filters)
+            ][:top_k]
         return out
 
     def _fuzzy_search(
