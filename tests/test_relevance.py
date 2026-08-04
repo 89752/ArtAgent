@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+import src.utils.governance as gov_mod
+
 from src.agent.state import AgentState
 from src.agent.nodes import general as general_mod
 from src.retrieval import relevance as relevance_mod
@@ -172,9 +174,10 @@ def test_general_tools_filters_semantic_search_message():
     items = _items(4)
     state = _make_state_with_search_call()
 
-    class _StubToolNode:
-        def invoke(self, s):
-            return _make_tool_output(items)
+    def _fake_governed(tool, args):
+        if tool.name == "semantic_search":
+            return json.dumps(items, ensure_ascii=False)
+        return json.dumps([{"title": "Monet"}], ensure_ascii=False)
 
     # 假过滤器：只留第 0、2 条（验证节点把 query 传对、消息被重写）
     seen = {}
@@ -183,7 +186,7 @@ def test_general_tools_filters_semantic_search_message():
         seen["query"] = query
         return [got_items[0], got_items[2]]
 
-    old_node = _patch(general_mod, "_tool_node", _StubToolNode())
+    old_gov = _patch(gov_mod, "governed_invoke", _fake_governed)
     old_filter = _patch(general_mod, "llm_relevance_filter", _fake_filter)
     try:
         out = general_mod.general_tools(state)
@@ -191,11 +194,11 @@ def test_general_tools_filters_semantic_search_message():
         kept = json.loads(msgs[0].content)
         assert [d["title"] for d in kept] == ["Work 0", "Work 2"]
         assert seen["query"] == "星空 画作"  # query 取自 tool_call args
-        assert msgs[0].tool_call_id == "call-1" and msgs[0].id == "m1"  # 身份字段保留
+        assert msgs[0].tool_call_id == "call-1" and msgs[0].id == "gov:call-1"
         # 非 semantic_search 的消息原样不动
         assert json.loads(msgs[1].content) == [{"title": "Monet"}]
     finally:
-        _patch(general_mod, "_tool_node", old_node)
+        _patch(gov_mod, "governed_invoke", old_gov)
         _patch(general_mod, "llm_relevance_filter", old_filter)
 
 
@@ -205,13 +208,10 @@ def test_general_tools_untouched_when_no_search_call():
         tool_calls=[{"name": "exact_lookup", "args": {"author": "Monet"}, "id": "c9"}],
     )
     state = AgentState(user_query="莫奈的画", messages=[HumanMessage(content="莫奈的画"), ai])
-    payload = {"messages": [ToolMessage(content="[]", name="exact_lookup", tool_call_id="c9", id="m9")]}
+    def _fake_governed(tool, args):
+        return "[]"
 
-    class _StubToolNode:
-        def invoke(self, s):
-            return payload
-
-    old_node = _patch(general_mod, "_tool_node", _StubToolNode())
+    old_gov = _patch(gov_mod, "governed_invoke", _fake_governed)
 
     def _boom(*a, **kw):
         raise AssertionError("无 semantic_search 调用不应触发过滤")
@@ -221,7 +221,7 @@ def test_general_tools_untouched_when_no_search_call():
         out = general_mod.general_tools(state)
         assert out["messages"][0].content == "[]"
     finally:
-        _patch(general_mod, "_tool_node", old_node)
+        _patch(gov_mod, "governed_invoke", old_gov)
         _patch(general_mod, "llm_relevance_filter", old_filter)
 
 

@@ -6,7 +6,7 @@
   <meta name="description" content="西方艺术智能助手：围绕艺术作品、艺术家、风格流派与历史背景的 AI 问答与资料管理"/>
   <title>西方艺术智能助手</title>
   <link rel="icon" href="/static/emblem.svg"/>
-  <link rel="stylesheet" href="/static/app.css?v=12"/>
+  <link rel="stylesheet" href="/static/app.css?v=27"/>
   <script>
     /* marked 本地优先，CDN 兜底（离线/内网仍可用） */
     (function () {
@@ -20,6 +20,7 @@
       document.head.appendChild(s);
     })();
   </script>
+  <script src="/static/lib/sanitize.js"></script>
 </head>
 <body>
   <div class="grain" aria-hidden="true"></div>
@@ -28,13 +29,22 @@
     <!-- ══════════ 侧栏：品牌 / 新建对话 / 历史（主导航） ══════════ -->
     <div id="side-overlay" class="side-overlay" hidden></div>
     <aside id="sidebar" aria-label="主导航">
-      <div class="brand">
-        <img class="brand-mark" src="/static/emblem.svg" alt=""/>
-        <div class="brand-name">西方艺术智能助手</div>
+      <div class="side-top">
+        <div class="brand">
+          <img class="brand-mark" src="/static/emblem.svg" alt=""/>
+          <div class="brand-name">西方艺术智能助手</div>
+        </div>
+        <button id="btn-side-collapse" class="btn-side-collapse" type="button"
+                aria-label="收起侧边栏" data-tip="收起/展开侧边栏">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16"/>
+          </svg>
+        </button>
       </div>
 
-      <button id="btn-new" class="btn-new" type="button">
-        <span class="plus">＋</span> 新建对话
+      <button id="btn-new" class="btn-new" type="button" data-tip="新建对话">
+        <span class="plus">＋</span><span class="btn-new-label">新建对话</span>
       </button>
 
       <div class="side-search">
@@ -48,39 +58,39 @@
 
       <nav id="history" class="history" aria-label="历史对话"></nav>
 
-      <button id="btn-theme" class="side-theme" type="button" aria-label="切换深色模式" title="切换深色模式">
-        <span class="theme-ico-moon" aria-hidden="true">☾</span>
-        <span class="theme-ico-sun" aria-hidden="true">☀</span>
-      </button>
-
       <div id="user-card" class="user-card">
-        <div class="u-avatar">
+        <button type="button" id="btn-memory" class="u-avatar"
+                data-tip="查看/管理 Agent 记住了什么" aria-label="查看/管理 Agent 记住了什么">
           <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <g fill="none" stroke="currentColor" stroke-width="4">
               <circle cx="50" cy="36" r="18"/>
               <path d="M18 88 C18 64 34 56 50 56 C66 56 82 64 82 88"/>
             </g>
           </svg>
-        </div>
+        </button>
         <div class="u-meta">
           <div class="u-name">学者</div>
-          <div class="u-level" id="u-level">Lv.1 初见</div>
         </div>
       </div>
     </aside>
 
+    <!-- 侧栏拖拽调宽（桌面端） -->
+    <div id="side-resizer" class="side-resizer" aria-hidden="true"></div>
+
     <!-- ══════════ 主区 ══════════ -->
     <main id="main">
       <header id="topbar" class="topbar">
-        <button id="btn-menu" class="icon-btn btn-menu" type="button" aria-label="打开菜单" aria-expanded="false">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-               stroke-linecap="round" aria-hidden="true">
-            <path d="M4 7h16M4 12h16M4 17h16"/>
-          </svg>
-        </button>
         <div class="tb-title" id="tb-title">新对话</div>
         <div class="tb-actions">
-          <button id="btn-dataset" class="dataset-pill" type="button" title="切换数据源">
+          <button id="btn-theme" class="icon-btn" type="button" aria-label="切换深色模式" data-tip="切换深色模式">
+            <span class="theme-ico-moon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9 9-4.03 9-9c0-.46-.04-.92-.1-1.36-.98 1.37-2.58 2.26-4.4 2.26-2.98 0-5.4-2.42-5.4-5.4 0-1.81.89-3.42 2.26-4.4-.44-.06-.9-.1-1.36-.1z"/>
+              </svg>
+            </span>
+            <span class="theme-ico-sun" aria-hidden="true">☀</span>
+          </button>
+          <button id="btn-dataset" class="dataset-pill" type="button" data-tip="切换数据源">
             <span class="pill-dot" aria-hidden="true"></span>
             <span id="dataset-pill-label">核心库</span>
           </button>
@@ -92,7 +102,7 @@
             </svg>
             <span>资料库</span>
           </button>
-          <button id="btn-clear" class="tb-btn danger" type="button" title="删除当前会话历史">
+          <button id="btn-clear" class="tb-btn danger" type="button" data-tip="删除当前会话历史">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>
@@ -119,13 +129,13 @@
       </section>
 
       <!-- 对话态消息流 -->
-      <section id="chat" class="chat is-hidden" aria-label="对话内容" aria-live="polite"></section>
+      <section id="chat" class="chat is-hidden" aria-label="对话内容"></section>
 
       <!-- 输入区：附件 chip + 输入框 -->
       <div class="composer">
         <div id="chips" class="chips" hidden></div>
         <div class="composer-inner">
-          <button id="btn-attach" class="btn-attach" type="button" aria-label="上传文档" title="上传 PDF / CSV / Excel 文档">
+          <button id="btn-attach" class="btn-attach" type="button" aria-label="上传文档" data-tip="上传 PDF / CSV / Excel 文档">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -146,7 +156,30 @@
         <input type="file" id="file-input" accept=".pdf,.csv,.xlsx,.xls" hidden multiple/>
         <div class="disclaimer">内容由 AI 生成，仅供学习参考，请结合权威资料深入研究。</div>
       </div>
+
+      <!-- 一键回到最新消息（回滚查看历史后悬浮显示） -->
+      <button id="btn-jump" class="jump-bottom" type="button" aria-label="回到最新消息" data-tip="回到最新消息" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 4v16M6 14l6 6 6-6"/>
+        </svg>
+      </button>
     </main>
+  </div>
+
+  <!-- ══════════ 记忆面板：偏好可见可控（G2） ══════════ -->
+  <div id="memory-panel" class="mem-panel" hidden role="dialog" aria-modal="true" aria-label="Agent 记忆">
+    <div class="mem-card">
+      <div class="mem-head">
+        <h3>Agent 记住了什么</h3>
+        <button id="mem-close" class="drawer-close" type="button" aria-label="关闭记忆面板">×</button>
+      </div>
+      <p class="mem-hint">这些记忆来自您的对话（含自动抽取），跨会话累积。可单项删除或一键清空。</p>
+      <div id="mem-list" class="mem-list"></div>
+      <div class="mem-actions">
+        <button id="mem-clear" class="mem-clear danger" type="button">清空全部记忆</button>
+      </div>
+    </div>
   </div>
 
   <!-- ══════════ 资料库抽屉：上传 / 文档管理 / 数据源 ══════════ -->
@@ -167,7 +200,7 @@
             </svg>
             上传文档
           </button>
-          <p class="lib-hint">支持 PDF / CSV / XLSX，上传后自动解析入库</p>
+          <p class="lib-hint">支持 PDF / CSV / XLSX；上传后自动解析入库，同时出现在输入框待发送区</p>
         </section>
 
         <section class="lib-block">
@@ -221,6 +254,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=12"></script>
+  <script src="/static/app.js?v=23"></script>
 </body>
 </html>

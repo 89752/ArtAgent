@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import html
+import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import quote
@@ -24,7 +26,19 @@ from urllib.parse import quote
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from src.agent.graph import get_graph
-from src.memory.store import load_preferences, clear_preferences
+from src.memory.store import (
+    load_preferences,
+    clear_preferences,
+    list_preferences,
+    delete_preference,
+)
+from src.memory.memory_items import (
+    clear_user_memories,
+    delete_memory,
+    list_memories,
+)
+from src.observability import runs as runs_store
+from src.tasks import store as tasks_store
 from src.memory.conversations import (
     save_conversation,
     list_conversations,
@@ -38,6 +52,9 @@ from src.utils.logging_config import get_logger
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 WEB_USER_ID = "web_user"  # 稳定用户标识：长期偏好跨会话累积
+# 记忆身份对齐：图节点 load_memory / 工具层 remember 统一走 MEMORY_USER_ID，
+# 避免 web 端 state.user_id 与工具写入身份不一致（2026-08-04）
+os.environ.setdefault("MEMORY_USER_ID", WEB_USER_ID)
 
 logger = get_logger("web.service")
 graph = get_graph()
@@ -334,9 +351,44 @@ def _clear_thread_checkpoint(thread_id: str) -> None:
 
 
 def memory_count() -> int:
-    """已记住的偏好项数（画家 + 风格）。"""
+    """已记住的记忆条目数（memory_items 全 kind；空则回退旧偏好表）。"""
+    items = list_memories(WEB_USER_ID)
+    if items:
+        return len(items)
     prefs = load_preferences(WEB_USER_ID)
     return len(prefs.get("artists") or []) + len(prefs.get("styles") or [])
+
+
+def memory_items_list() -> list[dict]:
+    """记忆面板 v2：全部有效记忆条目（含来源/重要性/时间，供 UI 展示与删除）。"""
+    return [
+        {
+            "id": i.get("id"),
+            "kind": i.get("kind"),
+            "content": i.get("content"),
+            "entity": i.get("entity") or "",
+            "source": i.get("source") or "user_explicit",
+            "importance": float(i.get("importance") or 0.5),
+            "scope": i.get("scope") or "user",
+            "updated_at": i.get("updated_at") or "",
+        }
+        for i in list_memories(WEB_USER_ID)
+    ]
+
+
+def delete_memory_item(item_id: str) -> bool:
+    """记忆面板：按条目 id 软删除（保留审计可追溯）。"""
+    return delete_memory(WEB_USER_ID, item_id)
+
+
+def clear_all_memories() -> int:
+    """记忆面板：清空该用户全部记忆（memory_items 硬删 + 旧偏好表兼容）。"""
+    from src.memory.episodes import clear_user_episodes
+
+    n = clear_user_memories(WEB_USER_ID)
+    clear_user_episodes(WEB_USER_ID)
+    clear_preferences(WEB_USER_ID)
+    return n
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -347,22 +399,27 @@ def stream_answer(
     sid: str,
     regenerate: bool = False,
     stop_event: threading.Event | None = None,
+    request_id: str | None = None,
 ) -> Iterator[dict]:
     """
     生成器：逐节点产出事件字典，API 层转 SSE。
       · {"type": "delta", "html": <助手气泡 HTML>}           —— 流式刷新
       · {"type": "done",  "html": ..., "session_id": sid,
-         "memory": <偏好数>, "sources": [...], "cancelled": bool} —— 收尾
+         "memory": <偏好数>, "sources": [...], "cancelled": bool,
+         "request_id": ..., "error": ...} —— 收尾（含可观测轨迹与错误态）
 
     regenerate=True：丢弃最后一个用户消息及其后的回复，用本轮消息替代
     （编辑 / 重新生成共用）。stop_event：客户端断开/停止时置位，生成器在
     节点边界提前收尾并持久化部分内容。
     """
+    request_id = request_id or uuid.uuid4().hex[:12]
     message = (message or "").strip()
     if not message:
         yield {"type": "done", "html": "", "session_id": sid, "memory": memory_count(),
-               "sources": [], "cancelled": False}
+               "sources": [], "cancelled": False, "request_id": request_id, "error": ""}
         return
+
+    start_ts = time.time()
 
     # 历史消息在库中（前端无状态）：读出→追加本轮→回写
     history = load_conversation(sid)
@@ -403,6 +460,12 @@ def stream_answer(
     tool_artworks: list[dict] = []
     tool_msgs: list = []
     evidence: list[dict] = []
+    context_chars = 0
+    tool_rounds = 0
+    tool_names: list[str] = []
+    reflection_triggered = False
+    web_fallback_used = False
+    error_msg = ""
     cancelled = False
 
     try:
@@ -447,6 +510,14 @@ def stream_answer(
                     continue
                 steps.append({"node": node, "detail": _chain_detail(node, out)})
                 if isinstance(out, dict):
+                    if out.get("context_chars"):
+                        context_chars = out["context_chars"]
+                    if out.get("tool_rounds"):
+                        tool_rounds = out["tool_rounds"]
+                    if node == "reflection" and out.get("reflection_notes") == "RETRY":
+                        reflection_triggered = True
+                    if node == "web_fallback":
+                        web_fallback_used = True
                     if out.get("intent"):
                         intent = out["intent"]
                     if out.get("final_answer"):
@@ -467,6 +538,12 @@ def stream_answer(
                         msgs = out["messages"]
                         tool_artworks.extend(_parse_artworks_from_messages(msgs))
                         tool_msgs.extend(m for m in msgs if isinstance(m, ToolMessage))
+                        for m in msgs:
+                            if getattr(m, "tool_calls", None):
+                                tool_names.extend(
+                                    str(tc.get("name"))
+                                    for tc in m.tool_calls if tc.get("name")
+                                )
                 history[-1]["content"] = _assistant_bubble(steps, "", [], False, done=False)
                 yield {"type": "delta", "html": history[-1]["content"]}
 
@@ -482,17 +559,34 @@ def stream_answer(
             _clear_thread_checkpoint(sid)
     except Exception as e:  # noqa: BLE001 — 面向用户兜底，避免整页崩溃
         logger.exception("graph.stream failed: %s", e)
+        error_msg = f"{type(e).__name__}: {e}"[:300]
         steps.append({"node": "error", "detail": f"<span class='hl'>{type(e).__name__}</span>"})
         history[-1]["content"] = _assistant_bubble(
-            steps, "😔 抱歉，处理时出错了。可能是模型接口超时或未配置 API Key，请稍后重试。",
+            steps, "😔 抱歉，处理时出错了。可能是模型接口超时、额度不足或未配置 API Key，请稍后重试。",
             [], False, done=True)
         history[-1]["sources"] = []
 
     title = next((m["content"] for m in history if m["role"] == "user"), message)
     save_conversation(sid, title, history)
+    runs_store.record_run(
+        request_id=request_id,
+        session_id=sid,
+        intent=intent,
+        steps=steps,
+        tools=list(dict.fromkeys(tool_names)),
+        context_chars=context_chars,
+        tool_rounds=tool_rounds,
+        latency_ms=(time.time() - start_ts) * 1000,
+        final_answer_len=len(final_answer or ""),
+        reflection_triggered=reflection_triggered,
+        web_fallback=web_fallback_used,
+        cancelled=cancelled,
+        error=error_msg,
+    )
     yield {"type": "done", "html": history[-1]["content"],
            "session_id": sid, "memory": memory_count(),
-           "sources": history[-1].get("sources", []), "cancelled": cancelled}
+           "sources": history[-1].get("sources", []), "cancelled": cancelled,
+           "request_id": request_id, "error": error_msg}
 
 
 # ── 会话 / 偏好：透传给 REST 端点 ──
@@ -549,7 +643,25 @@ def reset_preferences() -> None:
     clear_preferences(WEB_USER_ID)
 
 
+def preferences_items() -> list[dict]:
+    """记忆面板：该用户全部偏好分项（kind/value/weight/updated_at）。"""
+    return list_preferences(WEB_USER_ID)
+
+
+def delete_preference_item(kind: str, value: str) -> bool:
+    """记忆面板：单项删除偏好。"""
+    return delete_preference(WEB_USER_ID, kind, value)
+
+
 # ── 文档上传与入库（Stage 3 PDF / Stage 5 表格） ──
+
+# G7/2.3 并发治理：解析任务信号量（env TASK_PARSE_CONCURRENCY，默认 2），
+# 防止多文档同时跑 MinerU/视觉编码打爆单机资源。
+_parse_semaphore = threading.Semaphore(
+    max(1, int(os.getenv("TASK_PARSE_CONCURRENCY", "2")))
+)
+
+
 def save_upload(filename: str, data: bytes, kb_id: str = "default") -> dict:
     """把上传文件存到 uploads/{kb_id}/{doc_id}/；按类型路由存储名。
 
@@ -593,24 +705,57 @@ def save_upload(filename: str, data: bytes, kb_id: str = "default") -> dict:
     }
 
 
-def ingest_document(doc_id: str, doc_name: str, pdf_path: str, kb_id: str) -> None:
-    """后台任务入口（BackgroundTasks）：跑入库流水线，异常已落 failed 状态。"""
+def ingest_document(
+    doc_id: str,
+    doc_name: str,
+    pdf_path: str,
+    kb_id: str,
+    task_id: str | None = None,
+) -> None:
+    """后台任务入口（BackgroundTasks）：跑入库流水线，异常已落 failed 状态。
+
+    task_id 提供时同步维护任务表状态（G5/2.1），解析并发受信号量约束（G7/2.3）。
+    """
     from src.ingestion.pipeline import ingest_pdf
 
-    try:
-        ingest_pdf(pdf_path, doc_id, doc_name=doc_name, kb_id=kb_id)
-    except Exception:
-        logger.exception("ingest_document failed: %s", doc_id)
+    with _parse_semaphore:
+        if task_id:
+            tasks_store.update_task(task_id, status="processing")
+        try:
+            ingest_pdf(pdf_path, doc_id, doc_name=doc_name, kb_id=kb_id)
+            if task_id:
+                tasks_store.update_task(task_id, status="done", progress=100)
+        except Exception:
+            logger.exception("ingest_document failed: %s", doc_id)
+            if task_id:
+                tasks_store.update_task(
+                    task_id, status="failed", error="文档解析失败"
+                )
 
 
-def ingest_table_doc(doc_id: str, doc_name: str, table_path: str, kb_id: str) -> None:
+def ingest_table_doc(
+    doc_id: str,
+    doc_name: str,
+    table_path: str,
+    kb_id: str,
+    task_id: str | None = None,
+) -> None:
     """表格后台任务入口（Stage 5）：加载 + schema 推断 → 待确认状态。"""
     from src.ingestion.table_pipeline import ingest_table
 
-    try:
-        ingest_table(table_path, doc_id, doc_name=doc_name, kb_id=kb_id)
-    except Exception:
-        logger.exception("ingest_table_doc failed: %s", doc_id)
+    with _parse_semaphore:
+        if task_id:
+            tasks_store.update_task(task_id, status="processing")
+        try:
+            ingest_table(table_path, doc_id, doc_name=doc_name, kb_id=kb_id)
+            if task_id:
+                tasks_store.update_task(task_id, status="done", progress=100)
+        except Exception:
+            logger.exception("ingest_table_doc failed: %s", doc_id)
+            if task_id:
+                tasks_store.update_task(
+                    task_id, status="failed", error="表格解析失败"
+                )
 
 
 def confirm_table(doc_id: str, roles: dict) -> dict:
