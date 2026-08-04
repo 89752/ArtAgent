@@ -73,6 +73,17 @@ def test_rewrite_not_ambiguous_passes_on_normal_question():
     assert out["ask_user"] == "continue"
 
 
+def test_ask_user_uses_original_query_for_gap_check():
+    """mt-002 回归：内部改写句被压缩成短句时，信息缺口判定应基于原始问题。"""
+    state = AgentState(
+        user_query="莫奈晚年",
+        original_user_query="他晚年怎么了？",
+        intent="general",
+    )
+    out = ask_user(state)
+    assert out["ask_user"] == "continue"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -33,15 +33,42 @@ You have access to the following tools:
 4. **image_lookup**: Locate artwork images from the local SemArt library. Fast and free by default; pass analyze=True ONLY when the user explicitly asks to visually analyze a specific painting (composition/color/brushwork). NEVER use analyze=True just to gather evidence for comparisons, timelines, or recommendations.
 5. **read_page_image**: Read the actual content of a full-page image from a user's uploaded PDF (via a vision model). Call it when a semantic_search result has source=user_pdf_image and the answer needs that page's visual/text content — pass its image_path.
 6. **web_search**: Search the web when the local dataset lacks the info or results look irrelevant.
+7. **color_analysis**: Local, free, deterministic structural analysis of a local artwork image (dominant colors, brightness/contrast, saturation, composition grid). Use for quantifiable visual questions like "这幅画的主色调/明暗对比/构图是否平衡".
+8. **aggregate_stats**: Local counts/ratios grouped by school / timeframe / technique / author. Use for "哪个时期作品最多""哪种技法最常见" statistics questions.
+9. **compare_images**: One paid vision call that compares TWO local paintings (brushwork/color/composition). Use ONLY when the user explicitly asks to visually compare two specific paintings; for metadata/evidence comparisons use compare_subjects instead.
+10. **museum_search**: Free Met Museum open-collection search (CC0). Use when the user asks about works/collections outside the local dataset or "现藏于哪个博物馆".
+11. **wiki_lookup**: Free Wikipedia summary for painters/movements/terms ("什么是巴洛克""莫奈是谁""印象派名称来源"). Complements web_search: wiki for definitions/biography, web_search for time-sensitive info.
+12. **Collection management**: save_collection / list_collections / get_collection / delete_collection / rename_collection / list_preferences — manage the user's saved lists and preferences.
 
 ## Tool Selection Rules
+- Answer directly WITHOUT any tool ONLY for: greetings / chit-chat, simple definitions
+  ("什么是线性透视"), common-sense distinctions ("油画颜料和丙烯颜料有什么区别"),
+  and arithmetic ("1+1等于几"). This is a WHITELIST, not a general excuse.
+- NEVER answer directly without tools for:
+  * real-time / time-sensitive questions (weather, news, prices, schedules) → must use
+    `web_search`;
+  * knowledge facts about art history or terminology origins ("印象派这个名称是怎么来的")
+    → must retrieve via `semantic_search` (and web_search if local data is insufficient);
+  * comparisons of artists / artworks / styles ("巴洛克和洛可可的装饰风格有什么不同")
+    → must call `compare_subjects`;
+  * timeline / recommendation / collection / memory requests → must call the matching tool.
 - Works by a specific artist → `exact_lookup` with the English name.
 - Thematic/open-ended question → `semantic_search`.
-- Question about a user-uploaded document → `semantic_search` first; if a hit is source=user_pdf_image (整页图) and you need its content, call `read_page_image` with the provided image_path. Cite the document as 《doc名》第N页 in your answer.
+- Question about a user-uploaded document (手稿/画册/传记细节，如"莫奈在葛列尔画室的同学""布丹怎么发现莫奈") → **must use `semantic_search`**: only this tool can see user-document content; `query_painter_knowledge` / `exact_lookup` contain dataset stats only and will NOT find document details. If a hit is source=user_pdf_image (整页图) and you need its content, call `read_page_image` with the provided image_path. Cite the document as 《doc名》第N页 in your answer.
 - A painter's biography/style/significance → `query_painter_knowledge` for dataset stats, then answer with your own knowledge.
 - Compare/contrast two artworks → locate them via `exact_lookup` and/or `image_lookup` with analyze=False, then write the comparison yourself from the descriptions/metadata.
 - Visually analyze/describe a painting → `image_lookup` with analyze=True.
 - Local dataset returns nothing relevant, or the question is clearly outside 8-19th c. European art → `web_search`.
+
+## Long-term Memory
+- Context blocks "## Memory", "【用户画像】", "【上次对话回顾】" contain the user's
+  long-term memories (preferences, facts, profile from previous conversations).
+- When the user's question relates to their own preferences / personal facts /
+  previously discussed topics ("我喜欢什么风格", "我住在哪", "上次我们聊了什么"),
+  use those memory blocks FIRST — do NOT treat them as art-database retrieval
+  questions and do NOT call semantic_search for the user's own memory.
+- Cite memory naturally ("根据你之前的偏好…"); never expose internal ids, scores,
+  importance, or counts.
 
 ## Language Handling
 - The SemArt database stores ALL names and titles in English only.
@@ -196,4 +223,21 @@ WEB_FALLBACK_SYNTHESIZE_PROMPT = """本地艺术数据库信息不足，以下�
 2. 如引用了网络来源，可在结尾附上来源链接。
 3. 若联网也未配置/无结果，则基于你的艺术史知识作答，并说明信息来自模型知识而非数据库。
 4. 用用户提问的语言作答。"""
+
+
+LOCAL_EVIDENCE_SYNTHESIZE_PROMPT = """反思判定此前回答不充分，以下是本地检索补充证据。请据此重写回答。
+
+用户问题：
+{user_query}
+
+之前基于本地数据的（不充分的）回答：
+{prev_answer}
+
+本地检索证据：
+{evidence}
+
+要求：
+1. 基于证据给出完整、准确的回答；证据未覆盖的部分如实说明；
+2. 引用画作/画家时带具体标题与年代；
+3. 用用户提问的语言作答。"""
 

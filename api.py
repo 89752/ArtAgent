@@ -21,7 +21,10 @@ import json
 import asyncio
 import logging
 import threading
+import time
+import uuid
 from pathlib import Path
+from typing import Literal
 
 # 仅对本地地址绕过系统代理（沿用 app.py：避免启动自检走代理 502，又不断外部 API）。
 _LOCAL_NOPROXY = "localhost,127.0.0.1,0.0.0.0,::1"
@@ -46,6 +49,9 @@ from pydantic import BaseModel, Field
 
 from web import service
 from src.data import documents_store
+from src.memory import feedback as feedback_store
+from src.tasks import store as tasks_store
+from src.observability import runs as runs_store
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -80,16 +86,70 @@ class RenameIn(BaseModel):
     title: str = Field(min_length=1, max_length=60)
 
 
+class FeedbackIn(BaseModel):
+    session_id: str = Field(max_length=128)
+    rating: Literal[1, -1]
+    reason: str = Field(default="", max_length=40)
+    comment: str = Field(default="", max_length=500)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """启动时初始化 SQLite documents 表并迁移旧 JSON；然后恢复已确认表格数据源。"""
+    """启动时初始化各存储并恢复：documents/任务表（processing→interrupted）/表格数据源。"""
     documents_store.init_db()
+    tasks_store.mark_interrupted_on_startup()  # 进程崩溃恢复：中断任务可重试
     service.restore_tables()
     yield
 
 
 app = FastAPI(title="西方艺术智能助手", docs_url=None, redoc_url=None, lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+# ── 请求治理中间件：request_id 贯穿 + 令牌桶限流（G7/2.3） ──
+_rate_lock = threading.Lock()
+_rate_buckets: dict[str, list[float]] = {}
+
+
+def _rate_limited(client_ip: str) -> bool:
+    """令牌桶近似：时间窗口内每 IP 最多 burst 次（env 可调；RATE_LIMIT_RPM=0 关闭）。"""
+    try:
+        rpm = float(os.getenv("RATE_LIMIT_RPM", "60"))
+        burst = float(os.getenv("RATE_LIMIT_BURST", "20"))
+    except ValueError:
+        rpm, burst = 60.0, 20.0
+    if rpm <= 0 or burst <= 0:
+        return False
+    now = time.time()
+    window = max(1.0, 60.0 * burst / rpm)  # 桶容量折算窗口
+    with _rate_lock:
+        stamps = [t for t in _rate_buckets.get(client_ip, []) if now - t < window]
+        if len(stamps) >= burst:
+            _rate_buckets[client_ip] = stamps
+            return True
+        stamps.append(now)
+        _rate_buckets[client_ip] = stamps
+        return False
+
+
+@app.middleware("http")
+async def _platform_guard(request: Request, call_next):
+    """给每个请求生成/透传 X-Request-Id，并对 /api/* 做基础限流。"""
+    request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    path = request.url.path
+    if path.startswith("/api/") and not path.startswith("/api/images"):
+        client_ip = request.client.host if request.client else "unknown"
+        if _rate_limited(client_ip):
+            resp = JSONResponse(
+                {"ok": False, "error": "请求过于频繁，请稍后再试"},
+                status_code=429,
+                headers={"Retry-After": "30", "X-Request-Id": request_id},
+            )
+            return resp
+    response = await call_next(request)
+    response.headers["X-Request-Id"] = request_id
+    return response
 
 
 @app.exception_handler(RequestValidationError)
@@ -187,8 +247,71 @@ def del_preferences():
     return JSONResponse({"ok": True, "memory": service.memory_count()})
 
 
+@app.get("/api/preferences")
+def get_preferences():
+    """记忆面板：全部偏好分项（G2，kind/value/weight/updated_at）。"""
+    return JSONResponse({"items": service.preferences_items()})
+
+
+@app.delete("/api/preferences/{kind}/{value}")
+def del_preference_item(kind: str, value: str):
+    """记忆面板：单项删除偏好（kind ∈ artist/style，value 需 URL 编码）。"""
+    if kind not in ("artist", "style"):
+        return JSONResponse(
+            {"ok": False, "error": "kind 只支持 artist/style"}, status_code=400
+        )
+    ok = service.delete_preference_item(kind, value)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "偏好项不存在"}, status_code=404)
+    return JSONResponse({"ok": True, "memory": service.memory_count()})
+
+
+@app.get("/api/memory")
+def get_memory_items():
+    """记忆面板 v2：全部记忆条目（含自动抽取/来源/时间，按 id 删除）。"""
+    return JSONResponse({"items": service.memory_items_list()})
+
+
+@app.delete("/api/memory")
+def clear_memory_items():
+    """记忆面板 v2：清空全部记忆条目（含旧偏好表兼容）。"""
+    service.clear_all_memories()
+    return JSONResponse({"ok": True, "memory": service.memory_count()})
+
+
+@app.delete("/api/memory/{item_id}")
+def del_memory_item(item_id: str):
+    """记忆面板 v2：按条目 id 单项删除。"""
+    ok = service.delete_memory_item(item_id)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "记忆条目不存在"}, status_code=404)
+    return JSONResponse({"ok": True, "memory": service.memory_count()})
+
+
+@app.get("/api/feedback")
+def get_feedback(limit: int = 100, offset: int = 0):
+    """反馈列表（导出/人工审核用，G1）。"""
+    items, total = feedback_store.list_feedback(limit=limit, offset=offset)
+    return JSONResponse({"items": items, "total": total})
+
+
+@app.post("/api/feedback")
+def add_feedback(payload: FeedbackIn):
+    """用户反馈闭环：{session_id, rating(1/-1), reason?, comment?}。"""
+    fid = feedback_store.add_feedback(
+        payload.session_id, payload.rating, payload.reason, payload.comment
+    )
+    return JSONResponse({"ok": True, "id": fid})
+
+
+@app.get("/api/metrics")
+def get_metrics(limit: int = 500):
+    """可观测汇总：延迟/成本/工具分布/反思与兜底率（G8/2.4）。"""
+    return JSONResponse(runs_store.metrics(limit=limit))
+
+
 @app.post("/api/chat")
-async def chat(payload: ChatIn):
+async def chat(payload: ChatIn, request: Request):
     """SSE 流式对话。请求体：{message, session_id, regenerate}。
 
     实现：生产者线程驱动 sync 生成器（graph.stream 为阻塞调用），事件经
@@ -210,6 +333,7 @@ async def chat(payload: ChatIn):
             payload.session_id,
             regenerate=payload.regenerate,
             stop_event=stop_event,
+            request_id=getattr(request.state, "request_id", None),
         )
         try:
             for evt in it:
@@ -273,20 +397,79 @@ async def upload_document(file: UploadFile, background: BackgroundTasks):
         )
 
     saved = service.save_upload(filename, data)
+    # G5/2.1 任务化：task_id 复用 doc_id，后台解析全程可查可重试（响应形状不变）
+    task_id = tasks_store.create_task(
+        type=f"ingest_{kind}",
+        task_id=saved["doc_id"],
+        payload={
+            "doc_id": saved["doc_id"],
+            "doc_name": saved["doc_name"],
+            "file_path": saved["file_path"],
+            "kb_id": saved["kb_id"],
+            "kind": kind,
+        },
+    )
     if kind == "table":
         background.add_task(
             service.ingest_table_doc,
             saved["doc_id"], saved["doc_name"], saved["file_path"], saved["kb_id"],
+            task_id=task_id,
         )
     else:
         background.add_task(
             service.ingest_document,
             saved["doc_id"], saved["doc_name"], saved["file_path"], saved["kb_id"],
+            task_id=task_id,
         )
     return JSONResponse(
         {"ok": True, "doc_id": saved["doc_id"], "doc_name": saved["doc_name"],
          "kind": kind}
     )
+
+
+@app.get("/api/tasks")
+def get_tasks(status: str = ""):
+    """任务列表（G5/2.1）：可按状态过滤 pending/processing/done/failed/interrupted。"""
+    return JSONResponse({
+        "items": tasks_store.list_tasks(status=status.strip() or None)
+    })
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str):
+    task = tasks_store.get_task(task_id)
+    if not task:
+        return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    return JSONResponse({"ok": True, "task": task})
+
+
+@app.post("/api/tasks/{task_id}/retry")
+async def retry_task(task_id: str, background: BackgroundTasks):
+    """重试 failed/interrupted 的解析任务（进程崩溃/解析失败后的恢复入口）。"""
+    task = tasks_store.get_task(task_id)
+    if not task:
+        return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    if not tasks_store.reset_task(task_id):
+        return JSONResponse(
+            {"ok": False, "error": "只有 failed/interrupted 任务可重试"},
+            status_code=400,
+        )
+    payload = task.get("payload") or {}
+    doc_id = payload.get("doc_id") or task_id
+    doc_name = payload.get("doc_name") or "文档"
+    file_path = payload.get("file_path") or ""
+    kb_id = payload.get("kb_id") or "default"
+    if payload.get("kind") == "table":
+        background.add_task(
+            service.ingest_table_doc,
+            doc_id, doc_name, file_path, kb_id, task_id=task_id,
+        )
+    else:
+        background.add_task(
+            service.ingest_document,
+            doc_id, doc_name, file_path, kb_id, task_id=task_id,
+        )
+    return JSONResponse({"ok": True, "task": tasks_store.get_task(task_id)})
 
 
 @app.post("/api/documents/{doc_id}/schema")

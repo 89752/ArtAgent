@@ -57,9 +57,10 @@ def _capability_supported(intent: str, dataset_id: str) -> bool:
     return True
 
 
-def _route_after_reflection(state: AgentState) -> Literal["web_fallback", "save_memory"]:
+def _route_after_reflection(state: AgentState) -> Literal["tool_upgrade", "save_memory"]:
     if state.reflection_notes == "RETRY" and state.retry_count < 1:
-        return "web_fallback"
+        # §6.3：RETRY 先按 route 意向升级工具（本地证据→联网），不再只走 web
+        return "tool_upgrade"
     return "save_memory"
 
 
@@ -81,6 +82,7 @@ def build_graph():
     add("multi_retrieve", N.multi_retrieve)
     add("reflection", N.reflection)
     add("web_fallback", N.web_fallback)
+    add("tool_upgrade", N.tool_upgrade)
     add("save_memory", N.save_memory)
 
     # 唯一主路径：ReAct（子管线逻辑已下沉为工具，见 src/tools/capabilities.py）
@@ -94,7 +96,12 @@ def build_graph():
     builder.add_edge(START, "load_memory")
     builder.add_edge("load_memory", "rewrite_split")
     builder.add_edge("rewrite_split", "classify")
-    builder.add_edge("classify", "rag_gate")
+    # §6.3 路由决策：direct → 直接回答；其余 → rag_gate（保留寒暄双保险）
+    builder.add_conditional_edges(
+        "classify",
+        lambda s: "direct" if s.route == "direct" else "rag",
+        {"direct": "direct_answer", "rag": "rag_gate"},
+    )
     # RAG 开关：不需要检索 → 直接回答；需要 → 走澄清/检索主路径
     builder.add_conditional_edges(
         "rag_gate",
@@ -122,8 +129,9 @@ def build_graph():
     builder.add_conditional_edges(
         "reflection",
         _route_after_reflection,
-        {"web_fallback": "web_fallback", "save_memory": "save_memory"},
+        {"tool_upgrade": "tool_upgrade", "save_memory": "save_memory"},
     )
+    builder.add_edge("tool_upgrade", "save_memory")
     builder.add_edge("web_fallback", "save_memory")
     builder.add_edge("save_memory", END)
 
