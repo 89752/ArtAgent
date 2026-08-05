@@ -1,20 +1,20 @@
-"""上下文工程 v1：ContextBuilder 的纯函数层（docs/Agent化-规划.md §2.1）。
+"""上下文工程：ContextBuilder 的纯函数层（详见 docs/Agent化-规划.md）。
 
 职责：把散落在 state 里的偏好、会话台账、检索证据、历史，组装成结构化的
 上下文块（编号引用、按 artwork 去重、token/字符预算、历史窗口裁剪）。
 本模块只做纯计算（不调 LLM、不读库），供 general_agent 组装 messages 使用，
 也保证全部逻辑可单测。
 
-块结构（Phase 1 落地顺序）：
+块结构（按落地顺序）：
   system（角色/能力/技能/规则）→ profile（画像）→ summary（滚动摘要，
-  Phase 4 前为空）→ session（会话台账）→ evidence（编号引用 [N]）→ history。
+  未启用前为空）→ session（会话台账）→ evidence（编号引用 [N]）→ history。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# ── 预算常量（实测后可调，Phase 5 eval 校准） ────────────────────
+# ── 预算常量（实测后可调） ─────────────────────────────────────
 EVIDENCE_CHAR_BUDGET = 4500
 SNIPPET_LEN = 200
 PROFILE_CHAR_BUDGET = 800
@@ -125,13 +125,15 @@ def dedup_artworks(items: list[dict]) -> list[dict]:
     return list(best.values())
 
 
-def format_evidence_block(
+def format_numbered_evidence_block(
     items: list[dict],
     budget: int = EVIDENCE_CHAR_BUDGET,
 ) -> str:
     """编号引用证据块：- [N] title（author, date）：snippet。
 
     先按 _artwork_key 去重，再编号；超出预算时按顺序截断（保留前面高分者）。
+    通用模板版（无编号、可自定义字段）见 src/data/access.py 的
+    format_evidence_block，两者分工：本函数用于上下文证据注入。
     """
     unique = dedup_artworks(items)
     lines: list[str] = []
@@ -166,7 +168,7 @@ def format_multi_evidence(
     grouped: dict[str, list[dict]],
     budget: int = EVIDENCE_CHAR_BUDGET,
 ) -> str:
-    """多子任务证据块（P0-A）：按子问题分组、全局编号引用。
+    """多子任务证据块：按子问题分组、全局编号引用。
 
     【子任务1】对比莫奈和梵高的色彩
     - [1] ...
@@ -231,7 +233,7 @@ def build_memory_block(
     items: list[dict],
     budget: int = MEMORY_CHAR_BUDGET,
 ) -> str:
-    """用户记忆块（记忆系统 Phase 1）：检索注入的相关记忆，带来源与时间。"""
+    """用户记忆块：检索注入的相关记忆，带来源与时间。"""
     if not items:
         return ""
     lines: list[str] = []
@@ -295,7 +297,7 @@ def build_summary_block(
     summary: str,
     budget: int = SUMMARY_CHAR_BUDGET,
 ) -> str:
-    """会话滚动摘要块（Phase 4 前调用方传空字符串）。"""
+    """会话滚动摘要块（未生成时调用方传空字符串）。"""
     if not summary:
         return ""
     return str(summary)[:budget]

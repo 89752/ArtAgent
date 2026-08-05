@@ -2,20 +2,20 @@
 ArtAgent 混合架构 LangGraph。
 
   START
-    └─► load_memory            读取用户长期偏好（S5）
+    └─► load_memory            读取用户长期偏好
           └─► rewrite_split    查询改写+拆分（含指代消解）
                 └─► classify   意图打分（软指引，不再路由分支）
                       └─► rag_gate   RAG 开关（寒暄高分→直接回答，否则放行）
                             ├─(no_rag)→ direct_answer
                             └─(rag)→ ask_user   信息缺口澄清（不足→追问短路，否则放行）
-                            └─► multi_retrieve   复合问题并行预取证据（P0-A）
+                            └─► multi_retrieve   复合问题并行预取证据
                                   └─► general_agent ⇄ tools（ReAct + 工具守卫）
                               │
                               ▼
                       [reflection]
                    PASS │        │ RETRY
                         ▼        ▼
-                 save_memory  web_fallback（S4）
+                 save_memory  web_fallback
                         │        │
                         ▼        ▼
                        END    save_memory → END
@@ -36,12 +36,12 @@ logger = get_logger("graph")
 # ── 路由函数 ────────────────────────────────────────────────────
 def _capability_supported(intent: str, dataset_id: str) -> bool:
     """
-    路由层能力开关（Stage 2）：进入 timeline / recommendation 前，检查当前
+    路由层能力开关：进入 timeline / recommendation 前，检查当前
     生效数据源的 schema 是否声明了对应能力（分组轴 / 实体+描述列）。
 
     不支持则降级 general，而不是硬跑一个不成立的 groupby。只读 schema，
-    不触发数据集加载。Stage 2 阶段 SemArt 恒为 True，暂不会触发降级；
-    Stage 5 用户表格接入后真正生效。
+    不触发数据集加载。核心库恒为 True，暂不会触发降级；
+    用户表格接入后真正生效。
     """
     from src.retrieval.structured_retriever import get_structured_retriever
 
@@ -59,7 +59,7 @@ def _capability_supported(intent: str, dataset_id: str) -> bool:
 
 def _route_after_reflection(state: AgentState) -> Literal["tool_upgrade", "save_memory"]:
     if state.reflection_notes == "RETRY" and state.retry_count < 1:
-        # §6.3：RETRY 先按 route 意向升级工具（本地证据→联网），不再只走 web
+        # RETRY 先按 route 意向升级工具（本地证据→联网），不再只走 web
         return "tool_upgrade"
     return "save_memory"
 
@@ -87,7 +87,7 @@ def build_graph():
 
     # 唯一主路径：ReAct（子管线逻辑已下沉为工具，见 src/tools/capabilities.py）
     add("general_agent", N.general_agent)
-    # Stage 4：ToolNode 包成普通节点——执行后对 semantic_search 结果做相关性
+    # ToolNode 包成普通节点——执行后对 semantic_search 结果做相关性
     # 过滤（节点名不变，service.py 的"执行工具"标签无需同步）；包成普通函数
     # 后也自然获得 traced 节点耗时观测
     add("general_tools", N.general_tools)
@@ -96,7 +96,7 @@ def build_graph():
     builder.add_edge(START, "load_memory")
     builder.add_edge("load_memory", "rewrite_split")
     builder.add_edge("rewrite_split", "classify")
-    # §6.3 路由决策：direct → 直接回答；其余 → rag_gate（保留寒暄双保险）
+    # 路由决策：direct → 直接回答；其余 → rag_gate（保留寒暄双保险）
     builder.add_conditional_edges(
         "classify",
         lambda s: "direct" if s.route == "direct" else "rag",

@@ -1,4 +1,4 @@
-"""可观测轨迹与指标测试（G8/2.4）。"""
+"""可观测轨迹与指标测试。"""
 
 import tempfile
 from pathlib import Path

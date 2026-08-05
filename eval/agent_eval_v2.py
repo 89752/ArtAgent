@@ -44,7 +44,7 @@ OUT = EVAL_DIR / "agent_eval_report.md"
 HISTORY = EVAL_DIR / "metrics_history.jsonl"
 INTENTS = ["comparison", "timeline", "recommendation", "general"]
 SEED = 42
-# 记忆系统 Phase 1 隔离：评估全程使用 eval-test 身份，生产 web_user 不被污染
+# 记忆身份隔离：评估全程使用 eval-test 身份，生产 web_user 不被污染
 EVAL_MEMORY_USER = os.getenv("MEMORY_USER_ID", "eval-test")
 os.environ["MEMORY_USER_ID"] = EVAL_MEMORY_USER
 
@@ -232,10 +232,10 @@ def _clear_eval_state() -> None:
     try:
         from src.memory.collections import _get_conn
         from src.memory.memory_items import clear_user_memories
-        from src.memory.episodes import clear_user_episodes
+        from src.memory.summary import delete_user_summaries
 
         clear_user_memories(EVAL_MEMORY_USER)
-        clear_user_episodes(EVAL_MEMORY_USER)
+        delete_user_summaries(EVAL_MEMORY_USER)
         _get_conn().execute(
             "DELETE FROM collections WHERE user_id = ?", (EVAL_MEMORY_USER,)
         )
@@ -451,7 +451,7 @@ def run_multi_turn(graph, limit: int | None, offset: int = 0) -> dict:
     if limit:
         cases = cases[:limit]
     for i, case in enumerate(cases, offset):
-        _clear_eval_state()  # 记忆系统 Phase 1：多轮用例前清场，防串扰
+        _clear_eval_state()  # 多轮用例前清场，防串扰
         final_answer, all_tools, error = "", [], False
         for ti, turn in enumerate(case["turns"]):
             # 多轮必须共享同一 thread_id，否则 LangGraph 记忆/历史无法跨轮传递
@@ -517,7 +517,6 @@ def run_retrieval(n: int, top_k: int = 5) -> dict:
     import pandas as pd
 
     from src.retrieval.hybrid import get_hybrid_retriever
-    from src.retrieval.reranker import RERANK_BACKEND
 
     core_path = Path(os.getenv("CORE_DATA_PATH", "./data/core/artworks_core.csv"))
     df = pd.read_csv(core_path, encoding="utf-8-sig", keep_default_na=False)
@@ -548,7 +547,7 @@ def run_retrieval(n: int, top_k: int = 5) -> dict:
         "top_k": top_k,
         "seed": SEED,
         "rerank": rerank_on,
-        "rerank_backend": RERANK_BACKEND if rerank_on else "-",
+        "reranker": "jina-reranker-v3.5",
         "source": "core",
     }
 
@@ -582,7 +581,7 @@ def run_intent_diag(limit: int | None, offset: int = 0) -> dict:
     return {"rows": rows, "total": len(rows), "match": ok}
 
 
-# ── 9. 路由决策诊断（§6.3 软信号：direct/rag/web/comparison 等误判率）──
+# ── 9. 路由决策诊断（软信号：direct/rag/web/comparison 等误判率）──
 def run_route_diag(limit: int | None, offset: int = 0) -> dict:
     from src.agent.nodes.common import classify_intent
     from src.agent.state import AgentState
@@ -649,7 +648,7 @@ def render_sections(
             for t, scores in sorted(by_type.items()):
                 L.append(f"| {t} | {len(scores)} | {sum(scores) / len(scores):.2f} | {sum(1 for s in scores if s >= 4) / len(scores):.0%} |")
         else:
-            L.append(f"（无有效样本，跳过 {a['skipped']}——检查 API 额度）")
+            L.append(f"（无有效样本，跳过 {a['skipped']}——检查 API 可用性）")
         L.append("")
         sections.append(("答案质量（核心）", "\n".join(L)))
 
@@ -700,7 +699,7 @@ def render_sections(
         r = parts["retrieval"]
         L = ["## 7. 已知项检索 Recall@5", "",
              f"**{r['recall_at_k']:.1%}**（{r['hits']}/{r['total']}）· source=core · seed={r['seed']} "
-             f"· rerank={'on' if r['rerank'] else 'off'} · backend={r['rerank_backend']}", ""]
+             f"· rerank={'on' if r['rerank'] else 'off'} · reranker={r['reranker']}", ""]
         sections.append(("已知项检索 Recall@5", "\n".join(L)))
 
     if intent_diag and intent_diag["rows"]:
@@ -728,8 +727,8 @@ def render_sections(
     )
     if skip_total:
         L = ["## 附：数据有效性说明", "",
-             f"本场共 {skip_total} 条因 API 失败跳过（额度/内容审核）。",
-             "跳过占比高时请先恢复 API 额度再重跑，勿将本报告视为正式基线。", ""]
+             f"本场共 {skip_total} 条因 API 失败跳过（API 不可用/内容审核）。",
+             "跳过占比高时请先恢复 API 可用性再重跑，勿将本报告视为正式基线。", ""]
         sections.append(("数据有效性说明", "\n".join(L)))
     return sections
 
@@ -738,7 +737,7 @@ def render(parts: dict, intent_diag: dict | None, route_diag: dict | None, runs:
     header = [
         "# ArtAgent Agent 评估报告（v2）", "",
         f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"> 对话模型：{os.getenv('DEEPSEEK_MODEL', '-')} · 视觉：{os.getenv('VISION_MODEL', '-')} · 精排：{os.getenv('RERANK_MODEL', '-')}",
+        f"> 对话模型：{os.getenv('LLM_MODEL', '-')} · 视觉：{os.getenv('VISION_MODEL', '-')} · 精排：{os.getenv('RERANK_MODEL', 'jina-reranker-v3.5')}",
         "", "> 验收口径：最终答案质量 + 状态校验；意图分类仅作诊断。", "",
     ]
     return "\n".join(
@@ -831,13 +830,13 @@ def main() -> None:
     parser.add_argument("--multi-turn", action="store_true", help="跑多轮评估")
     parser.add_argument("--adversarial", action="store_true", help="跑对抗与安全")
     parser.add_argument("--retrieval-n", type=int, default=0, help="检索抽样数（0=关闭）")
-    parser.add_argument("--diag", action="store_true", help="附带意图诊断（不消耗对话额度）")
+    parser.add_argument("--diag", action="store_true", help="附带意图诊断")
     parser.add_argument("--route", action="store_true", help="附带路由决策诊断（少量分类调用）")
     parser.add_argument("--limit", type=int, default=None, help="每部分最大用例数（调试用）")
     parser.add_argument("--pr", action="store_true", help="PR 门禁档：离线检索 20 条 + 意图诊断")
     parser.add_argument("--out", default=str(OUT), help="报告输出路径")
     parser.add_argument("--append", action="store_true", help="增量合并到已有报告（同标题替换）")
-    parser.add_argument("--offset", type=int, default=0, help="本部分起始下标（额度不够时断点续跑）")
+    parser.add_argument("--offset", type=int, default=0, help="本部分起始下标（分批续跑时用）")
     args = parser.parse_args()
 
     if args.pr:
@@ -881,7 +880,7 @@ def main() -> None:
         parts["retrieval"] = run_retrieval(args.retrieval_n)
 
     # --diag 与 --route 解耦：各自只跑自己的用例集，避免 --route 连带跑
-    # 40 条意图诊断（耗额度且会意外覆盖报告分节）
+    # 40 条意图诊断（会意外覆盖报告分节）
     intent_diag = run_intent_diag(args.limit, args.offset) if args.diag else None
     route_diag = run_route_diag(args.limit, args.offset) if args.route else None
     if snap is not None:

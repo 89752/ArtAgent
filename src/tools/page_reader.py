@@ -1,5 +1,4 @@
-"""
-Tool: Read Page Image（Qwen-VL 读图，Stage 3 遗留项落地）
+"""页面读图工具（read_page_image，Qwen-VL 视觉模型）。
 
 当 semantic_search 命中用户上传 PDF 的整页图（source=user_pdf_image，
 结果里带 image_path 与 read_hint）时，Agent 调用本工具让视觉模型

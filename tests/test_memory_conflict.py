@@ -1,4 +1,4 @@
-"""记忆系统 Phase 2 单测：语义冲突解析（REPLACE/MERGE/SKIP）+ 守卫规范化。
+"""语义冲突解析单测：REPLACE/MERGE/SKIP 判定 + 守卫规范化。
 
 默认关闭（MEMORY_SMART_MERGE=0），全程 patch LLM 与 embedding，不耗额度。
 """

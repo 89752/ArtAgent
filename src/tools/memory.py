@@ -1,7 +1,8 @@
-"""Agent 主动记忆工具（记忆系统 Phase 1）：remember / recall / forget。
+"""记忆工具层（remember / recall / forget）：薄封装 memory_items 主存储。
 
 记忆条目走 memory_items 主表（kind/scope/entity/importance/审计/软删除），
-用户身份由 MEMORY_USER_ID 控制（默认 default_user，评估用 eval-test）。
+用户身份由 MEMORY_USER_ID 控制（默认 default_user，评估用 eval-test）；
+冲突合并由 memory.conflict 按 MEMORY_SMART_MERGE 开关启用。
 """
 
 from __future__ import annotations

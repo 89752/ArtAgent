@@ -1,4 +1,4 @@
-"""API 鉴权依赖（P0-1 首版：静态 API Key）。"""
+"""API 鉴权依赖（静态 API Key）。"""
 
 from __future__ import annotations
 

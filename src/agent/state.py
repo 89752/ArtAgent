@@ -28,14 +28,14 @@ class AgentState(BaseModel):
     # ── 路由 ───────────────────────────────────────────────────
     # 意图类型：general / comparison / timeline / recommendation
     intent: str = ""
-    # 路由决策（§6.3）：direct / rag / web / comparison / timeline /
+    # 路由决策：direct / rag / web / comparison / timeline /
     # recommendation / tool:<name>
     route: str = ""
     # 路由决策理由（可观测，写入 trace / route_diag）
     route_reason: str = ""
-    # 意图树打分结果（P0-②）：[{id, path, kind, score, reason, tool_name}]
+    # 意图树打分结果：[{id, path, kind, score, reason, tool_name}]
     intent_scores: list[dict] = Field(default_factory=list)
-    # 查询改写结果（P0-③）：改写后的独立完整问题
+    # 查询改写结果：改写后的独立完整问题
     rewritten_question: str = ""
     # 拆分出的子问题（多意图并行检索的输入）
     sub_questions: list[str] = Field(default_factory=list)
@@ -43,27 +43,27 @@ class AgentState(BaseModel):
     rewritten_key_entities: list[str] = Field(default_factory=list)
     # 改写判定"语义不明"标记（接 ask_user 澄清）
     rewrite_ambiguous: bool = False
-    # 多意图并行检索结果（P0-A）：{子问题: 证据列表}，供上下文分组注入
+    # 多意图并行检索结果：{子问题: 证据列表}，供上下文分组注入
     multi_evidence: dict[str, list[dict]] = Field(default_factory=dict)
-    # 会话滚动摘要（Phase 4 起由增量摘要器写入，注入 context.summary 块）
+    # 会话滚动摘要（由增量摘要器写入，注入 context.summary 块）
     conversation_summary: str = ""
-    # 记忆系统 Phase 1：load_memory 检索注入的记忆块文本（token 预算内）
+    # load_memory 检索注入的记忆块文本（token 预算内）
     memory_block: str = ""
-    # 记忆系统 Phase 1.5：自动抽取已推进到第几轮（节流计数，跨轮持久）
+    # 自动抽取已推进到第几轮（节流计数，跨轮持久）
     memory_extracted_turns: int = 0
     # 最近一次自动抽取结果（可观测/调试）
     memory_extract_result: dict = Field(default_factory=dict)
-    # 记忆系统 Phase 3：最近一次用户画像聚合结果（可观测/调试）
+    # 最近一次用户画像聚合结果（可观测/调试）
     memory_profile_result: dict = Field(default_factory=dict)
     # 记忆检索原始条目（[{id, kind, content, entity, source, importance, ...}]）
     memory_items: list[dict] = Field(default_factory=list)
     # 当前会话已上传的文档清单（[{doc_name, pages, kind, text_chunks, image_pages}]）
     uploaded_docs: list[dict] = Field(default_factory=list)
-    # 信息缺口澄清路由信号（P1-1.5）："ask"=追问用户并短路；"continue"=放行
+    # 信息缺口澄清路由信号："ask"=追问用户并短路；"continue"=放行
     ask_user: str = "continue"
     # RAG 开关（收尾项）：False = 无需检索，走直接回答
     rag_needed: bool = True
-    # ReAct 工具轮次计数（Phase 5：防循环失控上限）
+    # ReAct 工具轮次计数（防循环失控上限）
     tool_rounds: int = 0
     # 本轮已执行过的工具调用签名（防重复调用烧光预算）
     executed_tool_signatures: list[str] = Field(default_factory=list)
@@ -72,10 +72,10 @@ class AgentState(BaseModel):
     # 当前执行到的节点（便于 UI 展示 Agent 决策链）
     current_step: str = ""
 
-    # ── 数据源（Stage 2） ───────────────────────────────────────
+    # ── 数据源 ─────────────────────────────────────────────────
     # 当前生效的结构化数据源（对应 StructuredTableRetriever 注册表 key）。
     # timeline / recommendation 据此访问数据，路由层据此做能力开关判断；
-    # Stage 5 用户上传表格接入后可切换，默认核心库。
+    # 用户上传表格接入后可切换，默认核心库。
     dataset_id: str = "core"
 
     # ── 规划 / 拆解 ────────────────────────────────────────────
@@ -104,7 +104,7 @@ class AgentState(BaseModel):
     # 兜底重试次数（防止死循环）
     retry_count: int = 0
 
-    # ── 长期记忆（S5） ─────────────────────────────────────────
+    # ── 长期记忆 ───────────────────────────────────────────────
     # 稳定用户标识，跨会话记忆的 key
     user_id: str = "default_user"
     # 会话标识（Web 传 sid；用于滚动摘要按会话存取）

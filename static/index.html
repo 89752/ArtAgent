@@ -43,7 +43,7 @@
         </button>
       </div>
 
-      <button id="btn-new" class="btn-new" type="button" data-tip="新建对话">
+      <button id="btn-new" class="btn-new" type="button">
         <span class="plus">＋</span><span class="btn-new-label">新建对话</span>
       </button>
 
@@ -90,10 +90,6 @@
             </span>
             <span class="theme-ico-sun" aria-hidden="true">☀</span>
           </button>
-          <button id="btn-dataset" class="dataset-pill" type="button" data-tip="切换数据源">
-            <span class="pill-dot" aria-hidden="true"></span>
-            <span id="dataset-pill-label">核心库</span>
-          </button>
           <button id="btn-library" class="tb-btn" type="button">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -101,13 +97,6 @@
               <path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H20"/>
             </svg>
             <span>资料库</span>
-          </button>
-          <button id="btn-clear" class="tb-btn danger" type="button" data-tip="删除当前会话历史">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
-                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>
-            </svg>
-            <span>清除对话</span>
           </button>
         </div>
       </header>
@@ -204,9 +193,8 @@
         </section>
 
         <section class="lib-block">
-          <h3>当前数据源</h3>
-          <select id="dataset-select" class="dataset-select" aria-label="切换数据源"></select>
-          <div id="dataset-hint" class="dataset-hint"></div>
+          <h3>内置核心库</h3>
+          <p class="lib-hint">53,912 条作品 · 8–19 世纪西方艺术（Wikidata + SemArt + AIC），默认参与检索；已确认的表格和上传的 PDF 会自动参与，无需切换。</p>
         </section>
 
         <section class="lib-block">

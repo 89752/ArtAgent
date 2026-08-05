@@ -1,4 +1,4 @@
-"""§6.3 路由决策层 + P0-4 检索过滤纯单测（无 LLM / 无网络）。"""
+"""路由决策层 + 检索过滤纯单测（无 LLM / 无网络）。"""
 
 import sys
 from pathlib import Path
@@ -85,7 +85,10 @@ def test_semantic_search_filters_source_and_fetches_more():
         active_dataset = "core"
 
         def search(self, query, top_k=5, dataset_id=None, sources=None, rerank=None, filters=None):
-            captured.update({"top_k": top_k, "sources": sources, "filters": filters})
+            captured.update({
+                "top_k": top_k, "dataset_id": dataset_id,
+                "sources": sources, "filters": filters,
+            })
             return []
 
     with patch("src.retrieval.hybrid.get_hybrid_retriever", return_value=_Hybrid()):
@@ -93,6 +96,7 @@ def test_semantic_search_filters_source_and_fetches_more():
             {"query": "水景", "top_k": 3, "filters": {"author": "Monet", "source": "core"}}
         )
     assert captured["sources"] == ["core"]
+    assert captured["dataset_id"] is None  # 合并后不限定 active 数据源，表格默认全参与
     assert captured["filters"] is None  # 结构化过滤在工具层后置执行
     assert captured["top_k"] > 3  # 带过滤时多取候选
 

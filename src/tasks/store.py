@@ -1,4 +1,4 @@
-"""通用任务表（G5 / 2.1）。
+"""通用任务表。
 
 状态机：pending → processing → done | failed；重启时 processing → interrupted，
 失败/中断任务可 reset 后重试。文档解析与表格入库迁入本模型（旧 API 形状不变）。

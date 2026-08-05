@@ -48,18 +48,18 @@ from src.utils.logging_config import get_logger, log_event
 
 logger = get_logger("general")
 
-# 记忆系统 Phase 1：用户明确要求记忆的触发词（守卫强制落库用）
+# 用户明确要求记忆的触发词（守卫强制落库用）
 _MEMORY_INTENT_RE = re.compile(
     r"(记住|记下|记得|以后.*(说|提)|收藏到记忆|别忘)", re.IGNORECASE
 )
 
-# Phase 5：ReAct 工具轮次上限（实测出现过 29 次调用不收敛的循环）
+# ReAct 工具轮次上限（实测出现过 29 次调用不收敛的循环）
 MAX_TOOL_ROUNDS = 5
 
-# general 分支可用的全部工具（Stage 1 精简：7 → 5。
-# compare_artwork_styles 删除——外层 Agent 拿到两幅画的元数据后可自行组织对比；
-# analyze_image 并入 image_lookup 的 analyze 参数。
-# Stage 3 补：read_page_image——Qwen-VL 读取用户上传 PDF 整页图）
+# general 分支可用的全部工具：
+# compare_artwork_styles 已删除——外层 Agent 拿到两幅画的元数据后可自行组织对比；
+# analyze_image 并入 image_lookup 的 analyze 参数；
+# read_page_image——Qwen-VL 读取用户上传 PDF 整页图。
 GENERAL_TOOLS = [
     semantic_search,
     exact_lookup,
@@ -67,22 +67,22 @@ GENERAL_TOOLS = [
     image_lookup,
     read_page_image,
     web_search,
-    # Stage 7（能力工具化）：原子子管线逻辑下沉，agent 统一编排
+    # 能力工具化：原子子管线逻辑下沉，agent 统一编排
     compare_subjects,
     timeline_by_periods,
     recommend_with_exclusions,
-    # Phase 4：agent 主动记忆
+    # agent 主动记忆
     remember,
     recall,
     forget,
-    # Phase 5：收藏与偏好
+    # 收藏与偏好
     save_collection,
     list_collections,
     get_collection,
     delete_collection,
     rename_collection,
     list_preferences,
-    # P1：能力器扩展
+    # 能力器扩展
     color_analysis,
     aggregate_stats,
     compare_images,
@@ -93,7 +93,7 @@ GENERAL_TOOLS = [
 TOOL_BY_NAME: dict[str, object] = {t.name: t for t in GENERAL_TOOLS}
 
 
-# §6.3 路由决策注入：路由层判定后，向 general 分支下发"必须调用工具"的
+# 路由决策注入：路由层判定后，向 general 分支下发"必须调用工具"的
 # 强指令（区别于 intent_tool_suggestions 的软建议），防止模型自行短路。
 ROUTE_DIRECTIVES: dict[str, str] = {
     "rag": (
@@ -229,7 +229,7 @@ def _repeat_guard_message(tc: dict, name: str) -> ToolMessage:
 
 
 def _guarded_tool_calls(state: AgentState, tool_node) -> tuple[list, list]:
-    """P0-1 tool invocation guard: 3-state validation before execution.
+    """Tool invocation guard: 3-state validation before execution.
 
     - SUCCESS: args pass JSON-schema validation -> executed via tool_node
     - NEED_CLARIFICATION / FAILED: tool is NOT executed; a guard ToolMessage
@@ -272,7 +272,7 @@ def _guarded_tool_calls(state: AgentState, tool_node) -> tuple[list, list]:
 
     executed: list[ToolMessage] = []
     if valid_calls:
-        # G6/2.2 工具执行治理：统一超时/重试/失败包装 + 耗时审计
+        # 工具执行治理：统一超时/重试/失败包装 + 耗时审计
         from src.utils.governance import governed_invoke
 
         for tc in valid_calls:
@@ -339,7 +339,7 @@ def general_agent(state: AgentState) -> dict:
         condense_tool_messages,
         estimate_context_chars,
         extract_evidence_from_messages,
-        format_evidence_block,
+        format_numbered_evidence_block,
         format_multi_evidence,
         format_skills_index,
         trim_history,
@@ -363,7 +363,9 @@ def general_agent(state: AgentState) -> dict:
                 "uploaded_docs": state.uploaded_docs,
             }
         ),
-        evidence=format_evidence_block(extract_evidence_from_messages(state.messages)),
+        evidence=format_numbered_evidence_block(
+            extract_evidence_from_messages(state.messages)
+        ),
         subtasks=format_multi_evidence(state.multi_evidence),
         memory=state.memory_block,
     )
@@ -402,7 +404,7 @@ def general_should_continue(state: AgentState) -> Literal["tools", "done"]:
     return "done"
 
 
-# ── 工具执行节点（Stage 4 起带检索结果相关性过滤） ───────────────
+# ── 工具执行节点（带检索结果相关性过滤） ─────────────────────────
 _tool_node = ToolNode(GENERAL_TOOLS)
 
 
@@ -464,14 +466,14 @@ def _ledger_updates(merged, state: AgentState) -> dict:
 
 
 def general_tools(state: AgentState) -> dict:
-    """执行工具调用；对 semantic_search 结果做相关性过滤（Stage 4）。
+    """执行工具调用；对 semantic_search 结果做相关性过滤。
 
     过滤放在图节点层而非工具内部：semantic_search 工具保持确定性可测
     （eval Recall@5 与 test_tools 直接消费它，不含 LLM 波动），LLM 判断
     留在编排层且每次过滤日志可观测。过滤失败的降级在模块内部完成。
     执行后自动更新会话台账（shown_artworks / recommended_artists）。
     """
-    # Phase 5：轮次上限——停止执行并让模型基于已有信息直接回答
+    # 轮次上限——停止执行并让模型基于已有信息直接回答
     if state.tool_rounds >= MAX_TOOL_ROUNDS:
         last = state.messages[-1]
         guards = [

@@ -1,8 +1,8 @@
 # tests/test_reranker.py
 """
-qwen3-rerank 精排（src/retrieval/reranker.py + hybrid.py 精排段）纯单测：
+Jina Reranker v3.5 精排（src/retrieval/reranker.py + hybrid.py 精排段）纯单测：
 mock requests.post / rerank 函数验证成功解析、失败降级、槽位保持与开关逻辑，
-不加载 SemArt、不调 LLM、不联网，秒级完成。
+不加载模型、不联网，秒级完成。
 """
 
 import os
@@ -39,21 +39,15 @@ class _FakeResp:
 
 
 class _PostRecorder:
-    """替换 requests.post：记录 payload，按预设行为返回/抛错（可按 URL 分流）。"""
+    """替换 requests.post：记录 payload，按预设行为返回/抛错。"""
 
-    def __init__(self, payload=None, error=None, by_url=None):
+    def __init__(self, payload=None, error=None):
         self.payload = payload or {"results": []}
         self.error = error
-        self.by_url = by_url or {}  # {url片段: payload 或 Exception}
         self.calls = []
 
     def __call__(self, url, headers=None, json=None, timeout=None):
         self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
-        for frag, behavior in self.by_url.items():
-            if frag in url:
-                if isinstance(behavior, Exception):
-                    raise behavior
-                return _FakeResp(behavior)
         if self.error:
             raise self.error
         return _FakeResp(self.payload)
@@ -67,13 +61,8 @@ def _patch(module, name, value):
 
 
 @pytest.fixture(autouse=True)
-def _api_backend_by_default():
-    """默认走 API 后端，避免受 .env 里 RERANK_BACKEND=local 影响；
-    本地后端专项测试会自行切回 local。"""
-    old = reranker_mod.RERANK_BACKEND
-    reranker_mod.RERANK_BACKEND = "api"
-    yield
-    reranker_mod.RERANK_BACKEND = old
+def _jina_key(monkeypatch):
+    monkeypatch.setenv("RERANK_API_KEY", "jina_test_key")
 
 
 # ── reranker.rerank ──────────────────────────────────────────────
@@ -87,157 +76,42 @@ def test_empty_documents_returns_empty_without_call():
         _patch(reranker_mod.requests, "post", old)
 
 
-def test_unavailable_without_api_key():
-    old_env = os.environ.get("LLM_API_KEY")
-    old_rk = os.environ.get("RERANK_API_KEY")
-    os.environ["LLM_API_KEY"] = ""
-    os.environ["RERANK_API_KEY"] = ""
+def test_unavailable_without_api_key(monkeypatch):
+    monkeypatch.delenv("RERANK_API_KEY", raising=False)
+    assert reranker_mod.rerank_available() is False
+    assert reranker_mod.rerank("q", ["doc"]) is None
+
+
+def test_jina_payload_and_url():
+    rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 0.9}]})
+    old = _patch(reranker_mod.requests, "post", rec)
     try:
-        assert reranker_mod.rerank("q", ["doc"]) is None
+        reranker_mod.rerank("q", ["a"], top_n=1)
+        call = rec.calls[0]
+        assert call["url"] == reranker_mod.JINA_RERANK_URL
+        assert call["headers"]["Authorization"] == "Bearer jina_test_key"
+        assert call["json"] == {
+            "model": reranker_mod.RERANK_MODEL,
+            "query": "q",
+            "documents": ["a"],
+            "top_n": 1,
+        }
     finally:
-        if old_env is None:
-            os.environ.pop("LLM_API_KEY", None)
-        else:
-            os.environ["LLM_API_KEY"] = old_env
-        if old_rk is None:
-            os.environ.pop("RERANK_API_KEY", None)
-        else:
-            os.environ["RERANK_API_KEY"] = old_rk
+        _patch(reranker_mod.requests, "post", old)
 
 
-# ── 额度耗尽方案：本地后端 / 兼容端点切换 ──
-def test_local_backend_reranks_offline(monkeypatch):
-    old_backend = reranker_mod.RERANK_BACKEND
-    old_model = reranker_mod.RERANK_LOCAL_MODEL
-    reranker_mod.RERANK_BACKEND = "local"
-    reranker_mod.RERANK_LOCAL_MODEL = "fake-local"
-    calls: dict = {}
-
-    def fake_local(query, docs, top_n):
-        calls["query"] = query
-        return [(1, 0.8), (0, 0.6)]
-
-    old_fn = _patch(reranker_mod, "_rerank_local", fake_local)
-    try:
-        assert reranker_mod.rerank("q", ["a", "b"]) == [(1, 0.8), (0, 0.6)]
-        assert calls["query"] == "q"
-        assert reranker_mod.rerank_available() is True  # 本地后端无 key 也可用
-    finally:
-        _patch(reranker_mod, "_rerank_local", old_fn)
-        reranker_mod.RERANK_BACKEND = old_backend
-        reranker_mod.RERANK_LOCAL_MODEL = old_model
-
-
-def test_local_backend_failure_degrades_to_none():
-    old_backend = reranker_mod.RERANK_BACKEND
-    reranker_mod.RERANK_BACKEND = "local"
-    old_fn = _patch(reranker_mod, "_rerank_local", lambda q, d, n: None)
-    try:
-        assert reranker_mod.rerank("q", ["a"]) is None  # 本地失败→粗排原序
-    finally:
-        _patch(reranker_mod, "_rerank_local", old_fn)
-        reranker_mod.RERANK_BACKEND = old_backend
-
-
-def test_local_backend_jina_listwise_rerank():
-    old_backend = reranker_mod.RERANK_BACKEND
-    old_model = reranker_mod.RERANK_LOCAL_MODEL
-    reranker_mod.RERANK_BACKEND = "local"
-    reranker_mod.RERANK_LOCAL_MODEL = "jinaai/fake"
-    calls: dict = {}
-
-    class _FakeJina:
-        def rerank(self, query, documents, top_n=None):
-            calls["query"] = query
-            calls["top_n"] = top_n
-            return [
-                {"index": 3, "relevance_score": 0.9, "document": documents[3]},
-                {"index": 0, "relevance_score": 0.7, "document": documents[0]},
-            ]
-
-    old_fn = _patch(reranker_mod, "_get_local_reranker", lambda name: _FakeJina())
-    try:
-        out = reranker_mod.rerank("q", ["a", "b", "c", "d"])
-        assert out == [(3, 0.9), (0, 0.7)]  # listwise 结果已按分降序
-        assert calls["query"] == "q"
-        assert calls["top_n"] == 4
-    finally:
-        _patch(reranker_mod, "_get_local_reranker", old_fn)
-        reranker_mod.RERANK_BACKEND = old_backend
-        reranker_mod.RERANK_LOCAL_MODEL = old_model
-
-
-def test_api_backend_honors_custom_url_and_key(monkeypatch):
+def test_model_can_be_overridden_via_module_config():
+    """模型不写死：RERANK_MODEL（或模块常量）可覆盖，payload 随之变化。"""
     rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 0.9}]})
     old_post = _patch(reranker_mod.requests, "post", rec)
-    old_url = reranker_mod.RERANK_API_URL
-    old_backend = reranker_mod.RERANK_BACKEND
     old_model = reranker_mod.RERANK_MODEL
-    reranker_mod.RERANK_API_URL = "https://other-vendor.example/reranks"
-    reranker_mod.RERANK_BACKEND = "api"
-    reranker_mod.RERANK_MODEL = "qwen3-rerank"  # 兼容端点模型，验证 URL 覆盖
-    monkeypatch.setenv("RERANK_API_KEY", "sk-other")
+    reranker_mod.RERANK_MODEL = "jina-reranker-v3.5-custom"
     try:
         reranker_mod.rerank("q", ["a"])
-        assert rec.calls[0]["url"] == "https://other-vendor.example/reranks"
-        assert rec.calls[0]["headers"]["Authorization"] == "Bearer sk-other"
+        assert rec.calls[0]["json"]["model"] == "jina-reranker-v3.5-custom"
     finally:
-        _patch(reranker_mod.requests, "post", old_post)
-        reranker_mod.RERANK_API_URL = old_url
-        reranker_mod.RERANK_BACKEND = old_backend
         reranker_mod.RERANK_MODEL = old_model
-
-
-def test_compat_payload_skips_dashscope_only_fields_for_third_party(monkeypatch):
-    rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 0.9}]})
-    old_post = _patch(reranker_mod.requests, "post", rec)
-    old_url = reranker_mod.RERANK_API_URL
-    old_backend = reranker_mod.RERANK_BACKEND
-    old_model = reranker_mod.RERANK_MODEL
-    old_flag = reranker_mod._USE_RETURN_DOCUMENTS
-    reranker_mod.RERANK_API_URL = "https://api.jina.ai/v1/rerank"
-    reranker_mod.RERANK_BACKEND = "api"
-    reranker_mod.RERANK_MODEL = "qwen3-rerank"  # 兼容端点模型
-    reranker_mod._USE_RETURN_DOCUMENTS = False
-    monkeypatch.setenv("RERANK_API_KEY", "jina_xxx")
-    try:
-        reranker_mod.rerank("q", ["a"], instruct="按艺术史相关性排序")
-        payload = rec.calls[0]["json"]
-        assert rec.calls[0]["url"] == "https://api.jina.ai/v1/rerank"
-        assert "return_documents" not in payload
-        assert "instruct" not in payload  # 第三方端点不带非通用字段
-    finally:
         _patch(reranker_mod.requests, "post", old_post)
-        reranker_mod.RERANK_API_URL = old_url
-        reranker_mod.RERANK_BACKEND = old_backend
-        reranker_mod.RERANK_MODEL = old_model
-        reranker_mod._USE_RETURN_DOCUMENTS = old_flag
-
-
-def test_compat_payload_keeps_dashscope_fields_for_dashscope(monkeypatch):
-    rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 0.9}]})
-    old_post = _patch(reranker_mod.requests, "post", rec)
-    old_backend = reranker_mod.RERANK_BACKEND
-    old_model = reranker_mod.RERANK_MODEL
-    old_flag = reranker_mod._USE_RETURN_DOCUMENTS
-    old_url = reranker_mod.RERANK_API_URL
-    reranker_mod.RERANK_BACKEND = "api"
-    reranker_mod.RERANK_MODEL = "qwen3-rerank"  # 兼容端点模型
-    reranker_mod.RERANK_API_URL = reranker_mod.COMPAT_URL
-    reranker_mod._USE_RETURN_DOCUMENTS = True
-    monkeypatch.setenv("RERANK_API_KEY", "sk-dashscope")
-    try:
-        reranker_mod.rerank("q", ["a"], instruct="按艺术史相关性排序")
-        payload = rec.calls[0]["json"]
-        assert rec.calls[0]["url"] == reranker_mod.COMPAT_URL
-        assert payload["return_documents"] is False
-        assert payload["instruct"] == "按艺术史相关性排序"
-    finally:
-        _patch(reranker_mod.requests, "post", old_post)
-        reranker_mod.RERANK_BACKEND = old_backend
-        reranker_mod.RERANK_MODEL = old_model
-        reranker_mod.RERANK_API_URL = old_url
-        reranker_mod._USE_RETURN_DOCUMENTS = old_flag
 
 
 def test_success_parses_and_sorts_by_score():
@@ -250,142 +124,44 @@ def test_success_parses_and_sorts_by_score():
     }
     rec = _PostRecorder(payload)
     old = _patch(reranker_mod.requests, "post", rec)
-    old_primary = reranker_mod.RERANK_MODEL
-    reranker_mod.RERANK_MODEL = "qwen3-rerank"
     try:
         ranked = reranker_mod.rerank("q", ["a", "b", "c"])
         assert ranked == [(0, 0.9), (1, 0.7), (2, 0.5)]
     finally:
         _patch(reranker_mod.requests, "post", old)
-        reranker_mod.RERANK_MODEL = old_primary
 
 
 def test_top_n_capped_by_document_count():
     rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 1.0}]})
     old = _patch(reranker_mod.requests, "post", rec)
-    old_primary = reranker_mod.RERANK_MODEL
-    reranker_mod.RERANK_MODEL = "qwen3-rerank"
     try:
         reranker_mod.rerank("q", ["a", "b"], top_n=10)
         assert rec.calls[0]["json"]["top_n"] == 2  # top_n 不得超过候选数
     finally:
         _patch(reranker_mod.requests, "post", old)
-        reranker_mod.RERANK_MODEL = old_primary
 
 
 def test_long_documents_truncated_to_char_limit():
     rec = _PostRecorder({"results": [{"index": 0, "relevance_score": 1.0}]})
     old = _patch(reranker_mod.requests, "post", rec)
-    old_primary = reranker_mod.RERANK_MODEL
-    reranker_mod.RERANK_MODEL = "qwen3-rerank"
     try:
         reranker_mod.rerank("q", ["x" * (reranker_mod.DOC_CHAR_LIMIT + 500)])
         assert len(rec.calls[0]["json"]["documents"][0]) == reranker_mod.DOC_CHAR_LIMIT
     finally:
         _patch(reranker_mod.requests, "post", old)
-        reranker_mod.RERANK_MODEL = old_primary
-
-
-def test_instruct_passed_through():
-    rec = _PostRecorder({"results": []})
-    old = _patch(reranker_mod.requests, "post", rec)
-    old_primary = reranker_mod.RERANK_MODEL
-    old_flag = reranker_mod._USE_RETURN_DOCUMENTS
-    old_url = reranker_mod.RERANK_API_URL
-    # instruct 只在兼容端点报文中传递，需避开原生模型
-    reranker_mod.RERANK_MODEL = "qwen3-rerank"
-    reranker_mod.RERANK_API_URL = reranker_mod.COMPAT_URL
-    reranker_mod._USE_RETURN_DOCUMENTS = True
-    try:
-        reranker_mod.rerank("q", ["a"], instruct="按艺术史相关性排序")
-        assert rec.calls[0]["json"]["instruct"] == "按艺术史相关性排序"
-    finally:
-        _patch(reranker_mod.requests, "post", old)
-        reranker_mod.RERANK_MODEL = old_primary
-        reranker_mod.RERANK_API_URL = old_url
-        reranker_mod._USE_RETURN_DOCUMENTS = old_flag
 
 
 def test_http_error_retries_then_returns_none():
     rec = _PostRecorder(error=RuntimeError("boom"))
     old_post = _patch(reranker_mod.requests, "post", rec)
     old_sleep = _patch(reranker_mod.time, "sleep", lambda s: None)
-    old_primary = reranker_mod.RERANK_MODEL
-    old_fallback = reranker_mod.RERANK_FALLBACK_MODEL
-    reranker_mod.RERANK_MODEL = "primary-model"
-    reranker_mod.RERANK_FALLBACK_MODEL = "fallback-model"
     try:
         assert reranker_mod.rerank("q", ["a"]) is None
-        # 主模型（首次+MAX_RETRIES 重试）+ 后备模型（同次数），双失败才降级
-        assert len(rec.calls) == (reranker_mod.MAX_RETRIES + 1) * 2
-    finally:
-        _patch(reranker_mod.requests, "post", old_post)
-        _patch(reranker_mod.time, "sleep", old_sleep)
-        reranker_mod.RERANK_MODEL = old_primary
-        reranker_mod.RERANK_FALLBACK_MODEL = old_fallback
-
-
-# ── 双端点与主备接力（2026-08-01：gte-rerank-v2 实测未下线）─────────
-def test_fallback_model_takes_over_on_primary_failure():
-    native_payload = {"output": {"results": [
-        {"index": 1, "relevance_score": 0.8},
-        {"index": 0, "relevance_score": 0.3},
-    ]}}
-    rec = _PostRecorder(by_url={
-        "compatible-api": RuntimeError("403 FreeTierOnly"),
-        "services/rerank": native_payload,
-    })
-    old_post = _patch(reranker_mod.requests, "post", rec)
-    old_sleep = _patch(reranker_mod.time, "sleep", lambda s: None)
-    old_url = reranker_mod.RERANK_API_URL
-    old_primary = reranker_mod.RERANK_MODEL
-    old_fallback = reranker_mod.RERANK_FALLBACK_MODEL
-    reranker_mod.RERANK_API_URL = reranker_mod.COMPAT_URL
-    reranker_mod.RERANK_MODEL = "qwen3-rerank"      # 兼容端点主模型
-    reranker_mod.RERANK_FALLBACK_MODEL = "gte-rerank-v2"  # 原生端点后备
-    try:
-        ranked = reranker_mod.rerank("q", ["a", "b"])
-        assert ranked == [(1, 0.8), (0, 0.3)]  # 原生端点结果解析并按分降序
-        urls = [c["url"] for c in rec.calls]
-        assert any("services/rerank" in u for u in urls)  # 确实接力到了原生端点
-    finally:
-        _patch(reranker_mod.requests, "post", old_post)
-        _patch(reranker_mod.time, "sleep", old_sleep)
-        reranker_mod.RERANK_API_URL = old_url
-        reranker_mod.RERANK_MODEL = old_primary
-        reranker_mod.RERANK_FALLBACK_MODEL = old_fallback
-
-
-def test_native_model_routes_to_native_endpoint():
-    payload = {"output": {"results": [{"index": 0, "relevance_score": 1.0}]}}
-    rec = _PostRecorder(payload)
-    old_post = _patch(reranker_mod.requests, "post", rec)
-    old_model = _patch(reranker_mod, "RERANK_MODEL", "gte-rerank-v2")
-    try:
-        ranked = reranker_mod.rerank("q", ["a"])
-        assert ranked == [(0, 1.0)]
-        assert "services/rerank" in rec.calls[0]["url"]  # 按模型名自动选端点
-        # 原生报文形状：input 包 query/documents，parameters 包 top_n
-        assert rec.calls[0]["json"]["input"]["documents"] == ["a"]
-        assert rec.calls[0]["json"]["parameters"]["top_n"] == 1
-    finally:
-        _patch(reranker_mod.requests, "post", old_post)
-        _patch(reranker_mod, "RERANK_MODEL", old_model)
-
-
-def test_fallback_skipped_when_same_as_primary():
-    rec = _PostRecorder(error=RuntimeError("boom"))
-    old_post = _patch(reranker_mod.requests, "post", rec)
-    old_sleep = _patch(reranker_mod.time, "sleep", lambda s: None)
-    old_fb = _patch(reranker_mod, "RERANK_FALLBACK_MODEL", reranker_mod.RERANK_MODEL)
-    try:
-        assert reranker_mod.rerank("q", ["a"]) is None
-        # 主备同模型时不重复烧调用：只打一轮（首次+重试）
+        # 首次 + MAX_RETRIES 次重试，失败后直接降级
         assert len(rec.calls) == reranker_mod.MAX_RETRIES + 1
     finally:
         _patch(reranker_mod.requests, "post", old_post)
         _patch(reranker_mod.time, "sleep", old_sleep)
-        _patch(reranker_mod, "RERANK_FALLBACK_MODEL", old_fb)
 
 
 # ── hybrid._rerank_enabled ───────────────────────────────────────
@@ -431,7 +207,7 @@ def test_text_slots_reordered_image_keeps_slot():
         _hit("t1", source="semart"),
     ]
 
-    def _fake_rerank(query, documents, top_n=None, instruct=None):
+    def _fake_rerank(query, documents, top_n=None):
         assert documents == ["t0", "t1"]  # 整页图不送精排
         return [(1, 0.95), (0, 0.60)]  # t1 更相关
 
@@ -493,7 +269,7 @@ def test_search_rerank_on_fetches_pool():
     h = HybridRetriever()
     h.register("semart", r)
 
-    def _fake_rerank(query, documents, top_n=None, instruct=None):
+    def _fake_rerank(query, documents, top_n=None):
         # 把最后一个候选提到最前
         return [(len(documents) - 1, 0.99)] + [(i, 0.5) for i in range(len(documents) - 1)]
 
@@ -505,11 +281,3 @@ def test_search_rerank_on_fetches_pool():
         assert len(out) == 2
     finally:
         _patch(reranker_mod, "rerank", old)
-
-
-if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for fn in fns:
-        fn()
-        print(f"  ✅ {fn.__name__}")
-    print(f"\n🎉 reranker 全部 {len(fns)} 个单测通过！")

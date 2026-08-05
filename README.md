@@ -20,7 +20,7 @@ python api.py
 # 打开 http://127.0.0.1:7860
 ```
 
-> 仓库不包含数据资产。运行前需要本地 `data/`（核心库 CSV、Chroma 向量索引、SQLite 记忆库）与 `SemArt/`（图片）；只有 CSV 时可执行 `python scripts/index_core.py --csv data/core/artworks_core.csv` 重建索引。
+> 仓库不包含数据资产。运行前需要本地 `data/`（核心库 CSV、Chroma 向量索引、SQLite 记忆库、`data/core/images/` 图片）；只有 CSV 时可执行 `python scripts/index_core.py --csv data/core/artworks_core.csv` 重建索引。
 
 ## 应用场景
 
@@ -63,18 +63,18 @@ python api.py
 | 模块 | 选型 |
 |---|---|
 | Agent 编排 | LangGraph：load_memory → rewrite_split → classify → rag_gate → multi_retrieve → ReAct 工具循环 → reflection → save_memory |
-| 检索 | Chroma + BGE-M3 本地向量 + 加权 RRF 融合 + Jina Reranker v3.5 精排（API / 本地可选） |
-| 对话模型 | DeepSeek / Qwen（OpenAI 兼容 API，主备降级） |
+| 检索 | BGE-M3 语义向量 + 词法双通道（core FTS5 / PDF BM25，跨语言按需翻译）→ 加权 RRF 融合 → Jina Reranker v3.5 API 精排 |
+| 对话模型 | DeepSeek / Qwen（OpenAI 兼容 API） |
 | 视觉模型 | Qwen-Omni（图像分析、PDF 整页图） |
-| 记忆与会话 | SQLite（memory_items / memory_events / memory_episodes / conversations） |
-| Web 前端 | FastAPI + SSE + 原生 HTML/CSS/JS（无 Gradio 依赖） |
+| 记忆与会话 | SQLite（memory_items / memory_events / conversations / conversation_summary） |
+| Web 前端 | FastAPI + SSE + 原生 HTML/CSS/JS |
 | 测试 | pytest 快档（54 个测试文件，离线，CI 已接入） |
 
 ## 评估
 
 ```bash
 python eval/agent_eval_v2.py --retrieval-n 100   # 离线检索 Recall@5
-python eval/agent_eval_v2.py                     # 全量（需要 API 额度）
+python eval/agent_eval_v2.py                     # 全量（在线评估）
 pytest                                           # 快档离线测试
 ```
 
@@ -89,13 +89,13 @@ pytest                                           # 快档离线测试
 | 对抗与安全 | 8/10 |
 | 意图诊断（软信号） | 36/40（90%） |
 | 路由决策 | 13/15 |
-| 检索 Recall@5 | 88.0%（core · Jina API 精排） |
+| 检索 Recall@5 | 90.0%（core · 语义+词法混合 · Jina API 精排） |
 
 ## 路线图
 
 **已完成**
 
-- **混合检索与精排**：核心艺术库与用户文档统一向量检索，精排支持 API / 本地切换；
+- **混合检索与精排**：语义向量（BGE-M3）与词法（core FTS5 / PDF BM25）双通道召回，查询语言与索引语言不一致时按需翻译，RRF 融合后经 Jina Reranker v3.5 API 精排；
 - **成熟工具带**：意图路由 + 26 个工具，覆盖查询、对比、时间线、推荐、视觉分析、统计、记忆与收藏；
 - **长期记忆**：显式记忆、自动抽取、语义冲突合并与跨会话画像，记忆可见可控；
 - **文档理解**：PDF 文字层解析与整页图像识别双通道、表格上传问答，回答可溯源到具体页；
@@ -119,7 +119,7 @@ src/
 ├─ agent/              # LangGraph 图、意图树、改写、节点、上下文
 ├─ memory/             # 长期记忆：条目化存储 / 自动抽取 / 冲突 / 画像 / 情景
 ├─ tools/              # 工具带（检索 / 分析 / 记忆 / 收藏 / 技能）
-├─ retrieval/          # 混合检索：Chroma + BGE + RRF + 精排
+├─ retrieval/          # 混合检索：语义 + 词法双通道 + RRF 融合 + 精排
 ├─ ingestion/          # PDF / Excel 解析（MinerU / Qwen-VL / 表格）
 ├─ tasks/              # 文档解析任务队列
 └─ observability/      # 轨迹日志与 /api/metrics

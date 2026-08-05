@@ -1,4 +1,4 @@
-"""技能系统 v2（Phase 3 + A+B 升级）：SKILL.md 发现、解析、结构化执行。
+"""技能系统 v2：SKILL.md 发现、解析、结构化执行。
 
 技能 = 程序化多步能力。v2 在 v1（迷你 ReAct）基础上加两层：
 - A 结构化执行：front matter 声明 steps_json（步骤清单）与

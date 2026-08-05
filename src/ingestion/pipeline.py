@@ -1,5 +1,5 @@
 """
-PDF 入库流水线编排（Stage 3）。
+PDF 入库流水线编排。
 
 流程：页级路由 → 文字路线解析分块入 BGE 库 / 多模态路线整页图入 DashScope 库
      → 写解析结果元数据（路由分布/chunk 数/耗时/状态）。
@@ -8,8 +8,8 @@ PDF 入库流水线编排（Stage 3）。
 pdfplumber 兜底；公式密集页（force_mineru）在 MinerU 不可用/调用失败时
 退到多模态整页图，不用 pdfplumber 硬解。
 
-状态存储：Phase 1 用 JSON 文件（data/index/doc_status.json）支撑上传进度
-轮询；Stage 6 换 SQLite documents_store 时整体替换本模块的状态部分。
+状态存储：统一走 src/data/documents_store（SQLite documents 表），
+本模块不再维护独立的文档状态接口。
 """
 
 from __future__ import annotations
@@ -40,30 +40,7 @@ UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", "./data/uploads"))
 
 
 # ------------------------------------------------------------------ #
-# 状态存储（Stage 6：SQLite documents_store 替换 JSON）                #
-# ------------------------------------------------------------------ #
-
-
-def update_doc_status(doc_id: str, **fields) -> None:
-    """更新文档解析状态；首次调用时若记录不存在则自动创建。"""
-    if not documents_store.get_document(doc_id):
-        kind = fields.pop("kind", "pdf")
-        status = fields.pop("status", "processing")
-        documents_store.add_document(doc_id=doc_id, kind=kind, status=status, **fields)
-    else:
-        documents_store.update_document(doc_id, **fields)
-
-
-def get_doc_status(doc_id: str) -> Optional[dict]:
-    return documents_store.get_document(doc_id)
-
-
-def list_doc_status() -> list[dict]:
-    return documents_store.list_documents()
-
-
-# ------------------------------------------------------------------ #
-# 向量清理（Stage 6：删除文档时级联清理）                              #
+# 向量清理（删除文档时级联清理）                                       #
 # ------------------------------------------------------------------ #
 
 
@@ -152,10 +129,10 @@ def _parse_ocr_route(pdf_path: str, mm_pages: list[int], work_dir) -> list:
 
 
 def _context_header(doc_name: str, section: str) -> str:
-    """上下文头（Stage 4）：[文档 | 章节]——向量化与展示用，不写入原始 chunk。
+    """上下文头：[文档 | 章节]——向量化与展示用，不写入原始 chunk。
 
-    方案里的"实体"位无确定性来源（NER/LLM 抽取留给 Phase 2），
-    Phase 1 用文档名 + MinerU 标题层级（section）两档。
+    方案里的"实体"位无确定性来源（NER/LLM 抽取后续再做），
+    先用文档名 + MinerU 标题层级（section）两档。
     """
     parts = [f"《{doc_name}》"] if doc_name else []
     if section:
@@ -166,9 +143,9 @@ def _context_header(doc_name: str, section: str) -> str:
 def index_text_chunks(chunks, doc_name: str = "") -> int:
     """BGE 批量编码 chunk 并写入 user_pdf_text collection。
 
-    Stage 4 上下文头：向量化时拼接 [文档 | 章节] 头（只影响向量与展示，
+    上下文头：向量化时拼接 [文档 | 章节] 头（只影响向量与展示，
     不改存储——documents 仍是原始 content，header 落 metadata 供展示复用；
-    旧文档无 context_header 字段，展示端兼容缺省，Stage 6 重解析时覆盖）。
+    旧文档无 context_header 字段，展示端兼容缺省，重解析时覆盖）。
     """
     if not chunks:
         return 0
@@ -218,8 +195,9 @@ def ingest_pdf(
     file_path = str(work_dir / "document.pdf")
     file_size = Path(file_path).stat().st_size if Path(file_path).exists() else None
 
-    update_doc_status(
+    documents_store.upsert_document(
         doc_id,
+        kind="pdf",
         doc_name=doc_name,
         kb_id=kb_id,
         status="processing",
@@ -266,13 +244,13 @@ def ingest_pdf(
             "error": "",
             "metadata": {"route_distribution": plan.distribution},
         }
-        update_doc_status(doc_id, **summary)
+        documents_store.upsert_document(doc_id, **summary)
         log_event(logger, "ingest_done", doc_id=doc_id, **summary)
         return {"doc_id": doc_id, **summary, "route_distribution": plan.distribution}
 
     except Exception as e:  # noqa: BLE001 — 失败也要落状态供前端轮询
         logger.exception("[ingest] 解析失败 doc_id=%s", doc_id)
-        update_doc_status(
+        documents_store.upsert_document(
             doc_id, status="failed", error=str(e),
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
         )

@@ -20,7 +20,7 @@ python api.py
 # Open http://127.0.0.1:7860
 ```
 
-> The repository does not include data assets. Running locally requires `data/` (core library CSV, Chroma vector index, SQLite memory store) and `SemArt/` (images); if you only have the CSV, rebuild the index with `python scripts/index_core.py --csv data/core/artworks_core.csv`.
+> The repository does not include data assets. Running locally requires `data/` (core library CSV, Chroma vector index, SQLite memory store, `data/core/images/` images); if you only have the CSV, rebuild the index with `python scripts/index_core.py --csv data/core/artworks_core.csv`.
 
 ## Use Cases
 
@@ -63,18 +63,18 @@ After merging and deduplication: **53,912 artwork records** and **10,107 artists
 | Module | Choice |
 |---|---|
 | Agent orchestration | LangGraph: load_memory → rewrite_split → classify → rag_gate → multi_retrieve → ReAct tool loop → reflection → save_memory |
-| Retrieval | Chroma + BGE-M3 local embeddings + weighted RRF fusion + Jina Reranker v3.5 (API / local) |
-| Chat model | DeepSeek / Qwen (OpenAI-compatible API with primary / backup failover) |
+| Retrieval | BGE-M3 semantic vectors + lexical channel (core FTS5 / PDF BM25, on-demand translation) → weighted RRF fusion → Jina Reranker v3.5 API |
+| Chat model | DeepSeek / Qwen (OpenAI-compatible API) |
 | Vision model | Qwen-Omni (image analysis, PDF page images) |
-| Memory & sessions | SQLite (memory_items / memory_events / memory_episodes / conversations) |
-| Web frontend | FastAPI + SSE + vanilla HTML/CSS/JS (no Gradio) |
+| Memory & sessions | SQLite (memory_items / memory_events / conversations / conversation_summary) |
+| Web frontend | FastAPI + SSE + vanilla HTML/CSS/JS |
 | Testing | pytest fast suite (54 test files, offline, CI integrated) |
 
 ## Evaluation
 
 ```bash
 python eval/agent_eval_v2.py --retrieval-n 100   # offline retrieval Recall@5
-python eval/agent_eval_v2.py                     # full run (requires API quota)
+python eval/agent_eval_v2.py                     # full run (online evaluation)
 pytest                                           # fast offline tests
 ```
 
@@ -89,13 +89,13 @@ Latest baseline (2026-08):
 | Adversarial & safety | 8/10 |
 | Intent diagnosis (soft signal) | 36/40 (90%) |
 | Routing decisions | 13/15 |
-| Retrieval Recall@5 | 88.0% (core · Jina API rerank) |
+| Retrieval Recall@5 | 90.0% (core · semantic+lexical hybrid · Jina API rerank) |
 
 ## Roadmap
 
 **Completed**
 
-- **Hybrid retrieval & reranking**: unified vector search over the core art library and user documents, with API / local reranking options;
+- **Hybrid retrieval & reranking**: dual-channel recall (BGE-M3 semantic + FTS5/BM25 lexical) over the core library and user documents, with on-demand cross-language query translation, RRF fusion, and Jina Reranker v3.5 API reranking;
 - **Mature tool belt**: intent routing + 26 tools covering lookup, comparison, timelines, recommendations, visual analysis, statistics, memory, and collections;
 - **Long-term memory**: explicit memory, auto-extraction, semantic conflict resolution, and cross-session profiles, visible and controllable;
 - **Document understanding**: dual-channel PDF parsing (text layer + page images), spreadsheet Q&A, with page-level citations;
@@ -119,7 +119,7 @@ src/
 ├─ agent/              # LangGraph graph, intent tree, rewriting, nodes, context
 ├─ memory/             # long-term memory: items / extraction / conflicts / profiles / episodes
 ├─ tools/              # tool belt (retrieval / analysis / memory / collections / skills)
-├─ retrieval/          # hybrid retrieval: Chroma + BGE + RRF + reranking
+├─ retrieval/          # hybrid retrieval: semantic + lexical channels + RRF + reranking
 ├─ ingestion/          # PDF / Excel parsing (MinerU / Qwen-VL / tables)
 ├─ tasks/              # document parsing task queue
 └─ observability/      # run traces & /api/metrics

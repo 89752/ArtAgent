@@ -1,22 +1,25 @@
-"""P1-1 color_analysis：本地计算工具（零 LLM / 零 API）。
+"""color_analysis：本地图像计算工具（零 LLM / 零 API）。
 
-对已定位的本地画作图片做确定性结构分析：
+对已定位的画作图片做确定性结构分析：
 - 主色调（K-means 量化 k=5，PIL 内置 MEDIANCUT）
 - 明度/对比度（灰度均值 / 标准差）
 - 饱和度（HSV 均值）
 - 构图网格（3×3 单元亮度标准差的不对称性）
 
 输出只提供"结构性数值/标签"，审美判断留给对话模型组织。
-核心库 URL 图片暂不支持（与 image_lookup 的视觉分析一致）。
+支持本地图片（data/core/images，回退 SemArt/Images）与网络 URL。
 """
 
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Optional
 
 import numpy as np
 from langchain_core.tools import tool
 from PIL import Image
+
+from src.utils.http import download_bytes
 
 
 def _dominant_colors(img: Image.Image, k: int = 5) -> list[dict]:
@@ -78,7 +81,7 @@ def color_analysis(
     author: Optional[str] = None,
     top_k: int = 1,
 ) -> list[dict]:
-    """对本地画作图片做颜色/明度/饱和度/构图的结构性分析（本地计算，免费快速）。
+    """对画作图片做颜色/明度/饱和度/构图的结构性分析（本地计算，免费快速）。
 
     适用场景：用户问"这幅画的主色调""色彩偏暖还是偏冷""明暗对比强不强"
     "画面构图是否平衡"等可量化的视觉属性。审美结论由对话模型结合本工具
@@ -92,7 +95,8 @@ def color_analysis(
     Returns:
         每幅画：{title, author, date, success, dominant_colors[{hex,ratio}],
         brightness_contrast, saturation, composition_grid}；
-        仅支持本地图片文件（核心库 URL 图片返回 success=False）。
+        支持本地图片（data/core/images，回退 SemArt/Images）与网络 URL；
+        下载/读取失败时 success=False。
     """
     from src.tools.image_lookup import lookup_images
 
@@ -100,17 +104,20 @@ def color_analysis(
     out: list[dict] = []
     for d in located:
         path = str(d.get("image_path") or "")
-        if not path or path.startswith(("http://", "https://")):
+        if not path:
             out.append(
                 {
                     **{k: d.get(k) for k in ("title", "author", "date")},
                     "success": False,
-                    "error": "仅支持本地图片文件（核心库 URL 图片暂不支持）",
+                    "error": "未找到可用图片",
                 }
             )
             continue
         try:
-            img = Image.open(path)
+            if path.startswith(("http://", "https://")):
+                img = Image.open(BytesIO(download_bytes(path)))
+            else:
+                img = Image.open(path)
             brightness, contrast = _brightness_contrast(img)
             out.append(
                 {

@@ -12,7 +12,6 @@ from web import service as svc
 from src.data import documents_store
 from src.memory import conversations as conv_mod
 from src.memory import summary as summary_mod
-from src.memory import store as prefs_mod
 
 # 隔离方式：直接设置路径属性（不用 env，避免 collection 阶段全局污染）
 documents_store.DB_PATH = Path(_TMP) / "documents.db"
@@ -21,8 +20,6 @@ conv_mod._DB_PATH = Path(_TMP) / "conversations.db"
 conv_mod._conn = None
 summary_mod._DB_PATH = Path(_TMP) / "conversations.db"
 summary_mod._conn = None
-prefs_mod._DB_PATH = Path(_TMP) / "preferences.db"
-prefs_mod._conn = None
 
 
 def test_thumb_url_variants():
@@ -30,6 +27,26 @@ def test_thumb_url_variants():
     assert svc._thumb_url("https://x/a.jpg") == "https://x/a.jpg"
     assert svc._thumb_url("28496-early05.jpg") == "/api/images/28496-early05.jpg"
     assert svc._thumb_url("../a.jpg") == "/api/images/a.jpg"
+
+
+def test_parse_artworks_from_knowledge_sample_images():
+    import json
+
+    msgs = [ToolMessage(content=json.dumps({
+        "painter": "Monet",
+        "matched_author": "Claude Monet",
+        "sample_work_images": [
+            {"title": "Water Lilies", "image_file": "https://x/1.jpg"},
+            {"title": "Impression, Sunrise", "image_file": "https://x/2.jpg"},
+        ],
+    }), tool_call_id="k1")]
+    out = svc._parse_artworks_from_messages(msgs)
+    assert out == [
+        {"title": "Water Lilies", "author": "Claude Monet",
+         "date": "", "image_file": "https://x/1.jpg"},
+        {"title": "Impression, Sunrise", "author": "Claude Monet",
+         "date": "", "image_file": "https://x/2.jpg"},
+    ]
 
 
 def test_answer_block_escapes_html():

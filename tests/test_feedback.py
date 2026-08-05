@@ -1,4 +1,4 @@
-"""反馈闭环存储测试（G1/1.1）。"""
+"""反馈闭环存储测试。"""
 
 import tempfile
 from pathlib import Path

@@ -1,9 +1,8 @@
-"""
-Tool 3: Painter Knowledge Query Tool
+"""画家知识查询工具（query_painter_knowledge）。
 
-返回画家在 SemArt 数据集中的结构化统计信息。
+返回画家在当前核心库中的结构化统计信息。
 
-设计原则（Stage 1 起）：工具只返回结构化数据，不在内部再调一次 LLM
+设计原则：工具只返回结构化数据，不在内部再调一次 LLM
 把结果包装成一段话——组织自然语言回答的活儿留给外层 general_agent，
 由它把统计数据与自己的艺术史知识结合后统一生成。
 """
@@ -71,5 +70,15 @@ def query_painter_knowledge(painter_name: str) -> dict:
         "sample_works": (
             works[schema.title_col].head(5).tolist()
             if schema.title_col else []
+        ),
+        "sample_work_images": (
+            [
+                {
+                    "title": str(row[schema.title_col]),
+                    "image_file": str(row.get(schema.image_col) or ""),
+                }
+                for _, row in works.head(5).iterrows()
+            ]
+            if schema.title_col and schema.image_col else []
         ),
     }

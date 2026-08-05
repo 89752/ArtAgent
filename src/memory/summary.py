@@ -1,10 +1,10 @@
-"""会话滚动摘要（Phase 4）：conversation_summary 表 + 增量摘要器。
+"""会话滚动摘要：conversation_summary 表 + 增量摘要器（唯一事实源）。
 
-设计（借鉴 ragent JdbcConversationMemorySummaryService）：
-- conversations.db 增加 conversation_summary 表；
-- 增量式：达到触发轮数后才摘要"最近窗口 + 旧摘要"的合并结果，
+- 数据落 conversations.db 的 conversation_summary 表；
+- 增量式：达到触发轮数/上下文体积后才摘要"最近窗口 + 旧摘要"的合并结果，
   并记录已摘要轮数，避免每轮全量重算；
-- 摘要由 save_memory 节点调用，注入 context.summary 块。
+- 由 save_memory 节点调用并落库，load_memory 读取后注入 context.summary 块；
+- 原 memory_episodes（src/memory/episodes.py）已并入本表，不再双写。
 """
 
 from __future__ import annotations
@@ -80,6 +80,43 @@ def load_summary(conversation_id: str) -> str:
     except sqlite3.OperationalError:
         return ""
     return (row[0] if row else "") or ""
+
+
+def load_summary_item(conversation_id: str, user_id: str) -> Optional[dict]:
+    """读取某会话的滚动摘要详情（含轮数），供"上次对话回顾"注入；无则 None。"""
+    if not conversation_id or not user_id:
+        return None
+    try:
+        row = _get_conn().execute(
+            """
+            SELECT user_id, content, summarized_turns, updated_at
+            FROM conversation_summary WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or row[0] != user_id:
+        return None
+    return {
+        "user_id": row[0],
+        "conversation_id": conversation_id,
+        "summary": row[1],
+        "turn_count": row[2],
+        "updated_at": row[3],
+    }
+
+
+def delete_user_summaries(user_id: str) -> int:
+    """删除某用户全部滚动摘要（评估/重置清场用）；返回删除条数。"""
+    if not user_id:
+        return 0
+    with _lock:
+        cur = _get_conn().execute(
+            "DELETE FROM conversation_summary WHERE user_id = ?", (user_id,)
+        )
+        _get_conn().commit()
+        return cur.rowcount
 
 
 def _save_summary(conversation_id: str, user_id: str, content: str,

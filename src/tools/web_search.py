@@ -1,7 +1,6 @@
-"""
-Tool 5: Web Search Tool（场景4：知识库缺口兜底）
+"""联网搜索工具（web_search，知识库缺口兜底）。
 
-当本地 SemArt 检索不到 / 结果不相关时，转而联网搜索。
+当核心库检索不到 / 结果不相关时，转而联网搜索。
 
 实现：
   - 优先使用 Tavily（需 TAVILY_API_KEY）

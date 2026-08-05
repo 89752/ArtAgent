@@ -1,4 +1,4 @@
-"""工具执行治理（G6 / 2.2）：统一超时、重试与失败包装。
+"""工具执行治理：统一超时、重试与失败包装。
 
 graph 内所有工具调用经 governed_invoke 执行：超时（默认 60s，env TOOL_TIMEOUT_SEC）、
 瞬时失败重试（默认 1 次，env TOOL_RETRIES）。最终失败返回结构化错误 JSON，

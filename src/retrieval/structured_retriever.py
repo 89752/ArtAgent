@@ -1,9 +1,9 @@
 """
-结构化表检索器（Stage 2）：TableSchema + StructuredTableRetriever。
+结构化表检索器：TableSchema + StructuredTableRetriever。
 
 核心思想：timeline / recommendation 依赖的不是某个具体数据集名字，
 而是"当前数据源的 schema 声明了它有实体列 / 分组轴列 / 描述列"这个抽象。
-内置核心库（dataset_id="core"）与 Stage 5 用户上传的 CSV/Excel
+内置核心库（dataset_id="core"）与用户上传的 CSV/Excel
 都以同样方式注册复用同一套能力。
 
 懒加载设计：注册时只落 schema 与若干 loader，不真正读 CSV / 开 Chroma /
@@ -73,7 +73,7 @@ CORE_SCHEMA = TableSchema(
 # 核心库归一化后的作品表（normalize_core.py 产出；不存在则不注册 core）
 CORE_DATA_PATH = Path(os.getenv("CORE_DATA_PATH", "./data/core/artworks_core.csv"))
 
-# P0-4：semantic_search filters 的字段别名（Chroma metadata 与 df 列名差异）
+# semantic_search filters 的字段别名（Chroma metadata 与 df 列名差异）
 _FILTER_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "author": ("author", "artist"),
     "school": ("school", "movement", "genre"),
@@ -94,7 +94,7 @@ def _metadata_hit_filters(meta: dict, filters: dict) -> bool:
 
 
 def _entity_tokens(names: list[str]) -> list[str]:
-    """实体排除名单的分词：长度 > 2 的词转小写（与 Stage 1 前 recommendation
+    """实体排除名单的分词：长度 > 2 的词转小写（与早期 recommendation
     节点内联的排除逻辑完全一致，"Van Gogh" → ["van", "gogh"]）。"""
     tokens: list[str] = []
     for name in names:
@@ -113,7 +113,7 @@ class StructuredTableRetriever:
     - group_by_axis / exclude_by_entity：给确定性管线（timeline/recommendation）用
     - search：BaseRetriever 协议实现，接入 HybridRetriever。
       挂了向量集合（SemArt）时走 BGE 向量检索；否则退化走 access.fuzzy_match
-      （Stage 5 无索引表格的兜底路径）。
+      （无索引表格的兜底路径）。
     """
 
     def __init__(
@@ -163,7 +163,7 @@ class StructuredTableRetriever:
         返回 {分组值: 子 DataFrame}，分组值按字符串升序（SemArt 的
         "1851-1900" 形式天然可按时间排序）。分组轴为空的记录归入 "Unknown"：
         存在真实分组时 Unknown 组被丢弃；完全没有真实分组时返回
-        {"Unknown": 全部}。行为与 Stage 1 前 timeline 节点内联逻辑一致。
+        {"Unknown": 全部}。行为与早期 timeline 节点内联逻辑一致。
         """
         if not self.schema.group_axis_col:
             return {}
@@ -234,7 +234,7 @@ class StructuredTableRetriever:
         query: str, top_k: int, filters: dict | None = None,
     ) -> list[RetrievalResult]:
         """BGE 向量空间检索（SemArt 路径，与原 semantic_search 行为一致）。"""
-        # P0-4：带结构化过滤时多取候选，后置过滤避免漏召回
+        # 带结构化过滤时多取候选，后置过滤避免漏召回
         if filters:
             fetch_k = min(max(top_k * 4, top_k + 20), max(collection.count(), 1))
         else:
@@ -271,7 +271,7 @@ class StructuredTableRetriever:
 
         1. 实体列 fuzzy_match（短查询/指名查询主路径）
         2. 描述列整串包含（短语级查询）
-        3. 词重叠打分（长查询兜底——Stage 5 实测 recommendation 的
+        3. 词重叠打分（长查询兜底——实测 recommendation 的
            extracted_features 是 30–60 词特征描述，整串包含必空：
            按内容词在"实体列+描述列"中的命中数打分排序，确定性、无模型）
 

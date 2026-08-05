@@ -1,10 +1,6 @@
-"""
-共享节点：意图路由、记忆读写、反思、web 兜底，以及工具函数。
-"""
+"""共享节点：意图路由、记忆读写、反思、web 兜底，以及工具函数。"""
 
-import json
 import re
-from typing import Any
 
 from langchain_core.messages import AIMessage
 
@@ -19,6 +15,7 @@ from src.agent.prompts import (
 )
 from src.utils.llm import get_llm, get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
+from src.utils.json_utils import parse_json
 from src.data.access import format_evidence_block
 from src.memory.store import load_preferences
 
@@ -26,25 +23,7 @@ logger = get_logger("nodes")
 
 
 # ── 工具函数 ────────────────────────────────────────────────────
-def parse_json(text: str) -> Any:
-    """从 LLM 输出中鲁棒地解析 JSON（去 markdown 代码块、截取首个 {} 或 []）。"""
-    if not text:
-        return None
-    cleaned = re.sub(r"```(?:json)?", "", text).strip("` \n")
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        pass
-    # 兜底：截取第一个完整的对象或数组
-    for open_c, close_c in (("{", "}"), ("[", "]")):
-        start = cleaned.find(open_c)
-        end = cleaned.rfind(close_c)
-        if start != -1 and end != -1 and end > start:
-            try:
-                return json.loads(cleaned[start : end + 1])
-            except Exception:
-                continue
-    return None
+# parse_json 统一在 src/utils/json_utils.py，这里保留导出供既有调用方使用。
 
 
 def collect_artworks(docs_by_group: dict[str, list[dict]], limit: int = 8) -> list[dict]:
@@ -108,7 +87,7 @@ def contextualize(state: AgentState) -> dict:
     return {"user_query": rewritten, "current_step": "contextualize"}
 
 
-# ── 查询改写 + 拆分（P0-③，替代 contextualize） ────────────────
+# ── 查询改写 + 拆分（替代 contextualize） ──────────────────────
 def rewrite_split(state: AgentState) -> dict:
     """查询改写 + 多问题拆分。
 
@@ -139,7 +118,7 @@ def rewrite_split(state: AgentState) -> dict:
 
 # ── 意图路由 ────────────────────────────────────────────────────
 
-# §6.3 确定性预筛：高置信场景规则短路（不花 LLM），未命中才走 LLM 打分。
+# 确定性预筛：高置信场景规则短路（不花 LLM），未命中才走 LLM 打分。
 # 注意：只覆盖"几乎不会误判"的模式——知识定义/寒暄/算术、时效信息、
 # 强比较动词、演变/推荐动词；"区别/不同"类留给 LLM（领域比较 vs 常识区别）。
 _KNOWLEDGE_PREFIX_RE = re.compile(
@@ -185,7 +164,7 @@ def _prefilter_route(question: str) -> tuple[str, str] | None:
 
 
 def classify_intent(state: AgentState) -> dict:
-    """意图打分 + 路由决策（§6.3）：对所有叶子打分，输出 route。
+    """意图打分 + 路由决策：对所有叶子打分，输出 route。
 
     分数写入 state.intent_scores（供 UI 展示与后续多意图并行使用）；
     LLM 失败 / 畸形输出自动回落 general，行为与旧版一致。
@@ -281,7 +260,7 @@ def direct_answer(state: AgentState) -> dict:
     }
 
 
-# ── 信息缺口澄清（P1-1.5） ─────────────────────────────────────
+# ── 信息缺口澄清 ───────────────────────────────────────────────
 _STYLE_SIGNALS = (
     "喜欢", "偏爱", "风格", "色彩", "笔触", "画家", "作品",
     "类似", "像", "主题", "氛围", "光影", "色调", "构图",
@@ -330,7 +309,7 @@ def ask_user(state: AgentState) -> dict:
     }
 
 
-# ── 多意图并行检索（P0-A / Phase 2） ───────────────────────────
+# ── 多意图并行检索 ─────────────────────────────────────────────
 def multi_retrieve(state: AgentState) -> dict:
     """复合问题并行预取证据：sub_questions > 1 时按子问题并行 semantic_search。
 
@@ -367,9 +346,9 @@ def multi_retrieve(state: AgentState) -> dict:
     return {"multi_evidence": grouped, "current_step": "multi_retrieve"}
 
 
-# ── 长期记忆读取（S5） ──────────────────────────────────────────
+# ── 长期记忆读取 ──────────────────────────────────────────────────
 def load_memory(state: AgentState) -> dict:
-    """记忆系统 Phase 1：检索注入相关记忆 + 读取会话摘要。
+    """检索注入相关记忆 + 读取会话滚动摘要与用户画像。
 
     - 记忆检索：按当前问题对 memory_items 打分（相关度+新鲜度+重要性），
       只注入相关条目（解决"读到无关旧记忆"），带来源/时间；
@@ -381,9 +360,8 @@ def load_memory(state: AgentState) -> dict:
     from src.agent.context import build_memory_block
     from src.memory.memory_items import search_memories
     from src.memory.memory_items import get_memory_user_id
-    from src.memory.episodes import load_episode
     from src.memory.profile import load_profile_item
-    from src.memory.summary import load_summary
+    from src.memory.summary import load_summary, load_summary_item
 
     uid = get_memory_user_id()
     prefs = load_preferences(uid)
@@ -402,20 +380,23 @@ def load_memory(state: AgentState) -> dict:
         )
         have = {i["id"] for i in items}
         items = items + [i for i in fallback if i["id"] not in have]
-    # 情景记忆（Phase 2/L3）：同一会话上次的滚动摘要，预算内注入
+    # 同一会话上次的滚动摘要，预算内注入
     memory_block = build_memory_block(items, budget=600)
-    # Phase 3：跨线程用户画像（"记住你"）优先注入，预算内
+    # 跨线程用户画像（"记住你"）优先注入，预算内
     profile_item = load_profile_item(uid)
     if profile_item and (profile_item.get("content") or "").strip():
         memory_block = (
             f"【用户画像】{str(profile_item['content']).strip()[:200]}"
             + ("\n\n" + memory_block if memory_block else "")
         )
-    episode = load_episode(uid, state.conversation_id) if state.conversation_id else None
-    if episode and (episode.get("summary") or "").strip():
+    summary_item = (
+        load_summary_item(state.conversation_id, uid)
+        if state.conversation_id else None
+    )
+    if summary_item and (summary_item.get("summary") or "").strip():
         ep_text = (
-            f"【上次对话回顾 · {episode.get('turn_count', 0)} 轮】"
-            f"{str(episode['summary']).strip()[:150]}"
+            f"【上次对话回顾 · {summary_item.get('turn_count', 0)} 轮】"
+            f"{str(summary_item['summary']).strip()[:150]}"
         )
         memory_block = (memory_block + "\n\n" + ep_text).strip()
     log_event(
@@ -426,7 +407,7 @@ def load_memory(state: AgentState) -> dict:
         memory_hits=len(items),
         memory_block_chars=len(memory_block),
         summary_len=len(summary),
-        episode=bool(episode),
+        episode=bool(summary_item),
         profile=bool(profile_item),
     )
     return {
@@ -458,7 +439,7 @@ def reflection(state: AgentState) -> dict:
     return {"reflection_notes": notes, "final_answer": answer, "current_step": "reflection"}
 
 
-# ── web 兜底（S4） ──────────────────────────────────────────────
+# ── web 兜底 ───────────────────────────────────────────────────
 def web_fallback(state: AgentState) -> dict:
     """本地信息不足时联网搜索并重新综合回答。"""
     from src.tools.web_search import _search_impl
@@ -482,7 +463,7 @@ def web_fallback(state: AgentState) -> dict:
     }
 
 
-# ── 工具升级兜底（§6.3：reflection RETRY 不再只走联网） ──────────
+# ── 工具升级兜底（reflection RETRY 不再只走联网） ─────────────────
 def tool_upgrade(state: AgentState) -> dict:
     """反思 RETRY 后的工具升级：按 route 意向先补本地证据，再补联网。
 
@@ -524,18 +505,16 @@ def tool_upgrade(state: AgentState) -> dict:
     }
 
 
-# ── 长期记忆写入（S5） ──────────────────────────────────────────
+# ── 长期记忆写入 ──────────────────────────────────────────────────
 def save_memory(state: AgentState) -> dict:
-    """
-    Phase 4/5：触发会话滚动摘要（达到轮数后增量压缩并落库）。
-    Phase 1.5：自动抽取稳定偏好/事实（MEMORY_AUTO_EXTRACT=1 开启，默认关）。
+    """触发会话滚动摘要 + 用户画像刷新 + 自动抽取（开关控制）。
 
     说明：旧版"推荐场景写偏好"逻辑已删除——扁平化后 state.subjects 不再由
-    管线填充，偏好记忆改由 Agent 用 remember 工具显式记录（Phase 4）。
+    管线填充，偏好记忆改由 Agent 用 remember 工具显式记录。
+    滚动摘要只落 conversation_summary 一张表（原 episodes 双写已移除）。
     """
     from src.memory.summary import maybe_summarize
     from src.memory.memory_items import get_memory_user_id
-    from src.memory.episodes import upsert_episode
     from src.memory.profile import maybe_refresh_profile
 
     uid = get_memory_user_id()
@@ -543,12 +522,6 @@ def save_memory(state: AgentState) -> dict:
         state.messages, state.conversation_id, uid,
         volume_chars=state.context_chars,
     )
-    turns = sum(1 for m in state.messages if getattr(m, "type", "") == "human")
-    try:
-        if summary and state.conversation_id:
-            upsert_episode(uid, state.conversation_id, summary, turns)
-    except Exception as e:  # noqa: BLE001 —— 情景记忆失败不阻塞主流程
-        log_event(logger, "save_memory", note="episode_failed", error=str(e))
     profile_result: dict = {}
     try:
         profile_result = maybe_refresh_profile(uid)
@@ -568,7 +541,7 @@ def save_memory(state: AgentState) -> dict:
     log_event(
         logger, "save_memory",
         user=state.user_id,
-        turns=turns,
+        turns=sum(1 for m in state.messages if getattr(m, "type", "") == "human"),
         tool_rounds=state.tool_rounds,
         context_chars=state.context_chars,
         summary_len=len(summary),

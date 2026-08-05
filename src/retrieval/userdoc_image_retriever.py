@@ -1,5 +1,5 @@
 """
-用户 PDF 多模态路线检索器（Stage 3）：DashScope 多模态向量空间。
+用户 PDF 多模态路线检索器：DashScope 多模态向量空间。
 
 整页图片用 tongyi-embedding-vision-plus 编码（1152 维），与 BGE 文本空间
 维度/语义分布不同，独立 collection（user_pdf_images）不混库。

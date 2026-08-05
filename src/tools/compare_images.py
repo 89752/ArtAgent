@@ -1,16 +1,20 @@
-"""P1-3 compare_images：两幅画同帧喂视觉模型做结构化对比。
+"""compare_images：两幅画同帧喂视觉模型做结构化对比。
 
 一次视觉调用（复用 image_lookup 的视觉模型），按 focus 分节输出对比；
-定位失败或 URL 图片返回结构化错误，不中断整轮推理。
+定位/读取失败返回结构化错误，不中断整轮推理。
 """
 
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
+
+from src.utils.http import download_bytes
 
 
 _COMPARE_FOCUS_PROMPTS = {
@@ -32,23 +36,28 @@ _COMPARE_FOCUS_PROMPTS = {
 
 
 def _locate(title: str) -> tuple[dict, str]:
-    """定位画作；返回 (画作字典, 本地图片路径)。"""
+    """定位画作；返回 (画作字典, 图片路径或错误)。"""
     from src.tools.image_lookup import lookup_images
 
     hits = lookup_images(title=title, top_k=1)
     if not hits:
         return {}, f"未定位到画作：{title}"
     path = str(hits[0].get("image_path") or "")
-    if not path or path.startswith(("http://", "https://")):
-        return hits[0], "核心库 URL 图片暂不支持对比读图（仅支持本地图片）"
+    if not path:
+        return hits[0], "未定位到可用图片"
     return hits[0], ""
 
 
 def _image_block(path: str) -> dict:
-    ext = path.rsplit(".", 1)[-1].lower()
+    if path.startswith(("http://", "https://")):
+        data = download_bytes(path)
+        ext = Path(urlparse(path).path).suffix.lstrip(".").lower()
+    else:
+        data = Path(path).read_bytes()
+        ext = Path(path).suffix.lstrip(".").lower()
     if ext == "jpg":
         ext = "jpeg"
-    b64 = base64.b64encode(__import__("pathlib").Path(path).read_bytes()).decode("utf-8")
+    b64 = base64.b64encode(data).decode("utf-8")
     return {
         "type": "image_url",
         "image_url": {"url": f"data:image/{ext};base64,{b64}"},
@@ -64,7 +73,7 @@ def compare_images(
     """把两幅画同帧交给视觉模型做结构化对比（一次视觉 API 调用，慢且有成本）。
 
     适用场景：用户明确要求"对比这两幅画的笔触/色彩/构图"等视觉层面的差异，
-    且两幅画都在本地图片库中。仅元数据/背景对比请用 compare_subjects。
+    且两幅画都能定位到图片（本地或网络 URL）。仅元数据/背景对比请用 compare_subjects。
 
     Args:
         title_a: 第一幅画标题（部分匹配）
@@ -72,7 +81,7 @@ def compare_images(
         focus:   对比侧重点："general"（默认）/ "brushwork" / "color" / "composition"
 
     Returns:
-        {success, a, b, focus, comparison}；定位失败或 URL 图片返回
+        {success, a, b, focus, comparison}；定位/读取失败返回
         {success: false, error}。
     """
     if focus not in _COMPARE_FOCUS_PROMPTS:

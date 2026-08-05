@@ -1,15 +1,14 @@
-"""
-多轮会话历史持久化。
+"""多轮会话历史持久化（conversations 表）。
 
-用标准库 sqlite3 存储 Web 界面的历史对话，支持左侧「历史对话」列表
-的真实切换（而非视觉占位）。与 store.py 的长期偏好记忆职责不同：
-  - store.py     ：结构化用户画像（喜欢的画家/风格），跨会话累积
-  - conversations：完整对话消息流（含渲染好的 HTML 气泡），供回看/续聊
+存储 Web 界面的完整历史对话（含渲染好的 HTML 气泡），支持左侧
+「历史对话」列表的真实切换与续聊。与摘要/记忆职责不同：
+- conversations：完整消息流，供回看/续聊；
+- summary（conversation_summary）：压缩后的滚动摘要，供上下文注入。
 
 设计要点：
-  - 一张表 conversations(session_id, title, messages_json, updated_at)
-  - messages_json 存 Gradio Chatbot 的 messages 列表（含内联图片/折叠思考的 HTML）
-  - list 按 updated_at 降序，供侧栏展示
+- 一张表 conversations(session_id, title, messages_json, updated_at)；
+- messages_json 存前端气泡列表（含内联图片/折叠思考的 HTML）；
+- list 按 updated_at 降序，供侧栏展示。
 """
 
 import json

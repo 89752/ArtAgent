@@ -1,4 +1,4 @@
-"""任务表与持久执行测试（G5/2.1）。"""
+"""任务表与持久执行测试。"""
 
 import tempfile
 from pathlib import Path

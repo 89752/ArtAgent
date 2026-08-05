@@ -1,7 +1,7 @@
 """
-表格 schema 推断（Stage 5）：LLM 看表头+前几行猜列角色，人工确认后生效。
+表格 schema 推断：LLM 看表头+前几行猜列角色，人工确认后生效。
 
-为什么必须有人工确认（方案 §6.2）：猜错 entity_col 会让 recommendation
+为什么必须有人工确认：猜错 entity_col 会让 recommendation
 的排除逻辑静默出错（排除了错误的行而不报错），比明显报错更危险——所以
 本模块只产出"建议值"，确认/纠正权在用户（confirm 流程见 table_pipeline）。
 

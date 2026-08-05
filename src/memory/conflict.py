@@ -1,10 +1,7 @@
-"""记忆系统 Phase 2：语义冲突解析 + 守卫内容规范化（默认关闭）。
+"""记忆冲突解析 + 守卫内容规范化（MEMORY_SMART_MERGE 默认关闭）。
 
 对标 Mem0 / ChatGPT 记忆的做法：同实体旧记忆与新信息冲突时，不再机械地
 "新盖旧"，而是让 LLM 判断 REPLACE（漂移覆盖）/ MERGE（并存）/ SKIP（不写）。
-
-开关：
-- MEMORY_SMART_MERGE=1   开启语义冲突解析与守卫规范化（默认 0）
 
 纪律：
 - 关闭 / LLM 失败 / 畸形输出 → 回落确定性行为（REPLACE 覆盖），不阻塞主流程；
@@ -13,10 +10,10 @@
 
 from __future__ import annotations
 
-import json
-import os
-import re
 from typing import Callable, Optional
+
+from src.utils.env import env_flag
+from src.utils.json_utils import parse_json
 
 
 CONFLICT_PROMPT = """你是记忆冲突判定模块。用户长期记忆里已有一条旧记录，现在来了新信息，
@@ -51,12 +48,9 @@ NORMALIZE_PROMPT = """把用户表达的记忆意图规范化为一条第三人�
 - 保持原意，不编造。"""
 
 
-_TRUTHY = {"1", "true", "yes", "on", "y"}
-
-
 def smart_merge_enabled() -> bool:
     """MEMORY_SMART_MERGE 开关（默认关，避免默认链路引入额外 LLM 成本）。"""
-    return os.getenv("MEMORY_SMART_MERGE", "0").strip().lower() in _TRUTHY
+    return env_flag("MEMORY_SMART_MERGE")
 
 
 def _default_llm() -> Callable[[str], str]:
@@ -66,23 +60,6 @@ def _default_llm() -> Callable[[str], str]:
         return get_deterministic_llm().invoke(p).content
 
     return _invoke
-
-
-def _parse_json(raw: str) -> Optional[dict]:
-    if not raw:
-        return None
-    cleaned = re.sub(r"```(?:json)?", "", raw).strip("` \n")
-    try:
-        data = json.loads(cleaned)
-    except Exception:
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        try:
-            data = json.loads(cleaned[start : end + 1])
-        except Exception:
-            return None
-    return data if isinstance(data, dict) else None
 
 
 def resolve_conflict(
@@ -102,10 +79,10 @@ def resolve_conflict(
     try:
         if llm is None:
             llm = _default_llm()
-        data = _parse_json(llm(prompt))
+        data = parse_json(llm(prompt))
     except Exception:  # noqa: BLE001 —— 失败回落确定性行为
         return {"action": "REPLACE", "content": (new_content or "").strip()}
-    if data is None:
+    if not isinstance(data, dict):
         return {"action": "REPLACE", "content": (new_content or "").strip()}
     action = str(data.get("action") or "REPLACE").strip().upper()
     if action not in {"REPLACE", "MERGE", "SKIP"}:

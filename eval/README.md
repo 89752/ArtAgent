@@ -25,7 +25,7 @@ eval/
 
 ```bash
 python eval/agent_eval_v2.py --pr                # PR 门禁档：离线检索 20 + 意图诊断
-python eval/agent_eval_v2.py                     # 全量（需 API 额度）
+python eval/agent_eval_v2.py                     # 全量（在线评估）
 python eval/agent_eval_v2.py --answers 30 --facts --behavior-runs 3 --tools --multi-turn --adversarial --retrieval-n 100 --diag
 python eval/agent_eval_v2.py --retrieval-n 100   # 只跑检索（离线）
 python eval/agent_eval_v2.py --out eval/agent_eval_report_adversarial.md --adversarial   # 单跑对抗
@@ -35,6 +35,5 @@ python eval/agent_eval_v2.py --out eval/agent_eval_report_adversarial.md --adver
 
 - 单条用例 API 失败只跳过不中断，报告标注有效样本数；
 - 状态校验：记忆写 `preferences` 表、收藏写 `collections` 表，跑完自动清理；
-- 检索指标：core · seed=42 · n=100 · Jina API 精排（88% 基线）；
-- 跳过占比高时先恢复 API 额度再重跑，勿把不完整报告当正式基线。
-
+- 检索指标：core · seed=42 · n=100 · Jina API 精排 + 词法通道（90% 基线，2026-08-05）；
+- 跳过占比高时先恢复 API 可用性再重跑，勿把不完整报告当正式基线。

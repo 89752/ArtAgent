@@ -1,5 +1,4 @@
-"""
-统一能力工具：原子子管线逻辑下沉（2026-08-02）。
+"""统一能力工具：原子子管线逻辑下沉（2026-08-02）。
 
 comparison / timeline / recommendation 三个图分支的"确定性部分"
 （分组、排除、证据收集）下沉为工具，交给 agent（ReAct）统一编排：
@@ -48,7 +47,7 @@ def compare_subjects(
 
     Returns:
         每个对象的检索证据分组：{subject, query, evidence[]}
-        并附 {llm_used, llm_calls} 成本标注（P2-1 可归因）。
+        并附 {llm_used, llm_calls} 成本标注。
     """
     from src.retrieval.relevance import llm_relevance_filter
     from src.tools.retrieval import semantic_search

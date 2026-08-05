@@ -1,4 +1,4 @@
-"""每轮 Agent 轨迹记录与指标汇总（G8 / 2.4）。
+"""每轮 Agent 轨迹记录与指标汇总。
 
 落库 data/index/observability.db（INDEX_DIR 可覆盖）。成本估算采用
 env 单价（每 1K token），默认 0 即关闭成本估算；token 数用 4 字符 ≈ 1 token 近似。

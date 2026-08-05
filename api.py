@@ -1,5 +1,5 @@
 """
-ArtAgent Web —— FastAPI 后端（替代 Gradio）。
+ArtAgent Web —— FastAPI 后端。
 
   · GET  /                       前端单页
   · GET  /static/*               静态资源（素材 + 前端 css/js）
@@ -9,11 +9,11 @@ ArtAgent Web —— FastAPI 后端（替代 Gradio）。
   · DELETE /api/sessions/{sid}   删除会话
   · GET  /api/bootstrap          启动数据（场景卡 + 偏好数）
   · DELETE /api/preferences      清空长期偏好
-  · POST /api/documents/upload   上传 PDF，后台解析入库（Stage 3）
+  · POST /api/documents/upload   上传 PDF，后台解析入库
   · GET  /api/documents          文档库列表（解析状态/路由分布/chunk 数）
   · GET  /api/documents/{doc_id} 单文档状态（前端轮询进度）
 
-样式与逻辑 100% 自控，彻底摆脱 Gradio 的 DOM/CSS 束缚。
+样式与逻辑 100% 自控。
 """
 
 import os
@@ -55,7 +55,8 @@ from src.observability import runs as runs_store
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-_SEMART_IMAGES = BASE_DIR / "SemArt" / "Images"
+_CORE_IMAGES = BASE_DIR / "data" / "core" / "images"
+_SEMART_IMAGES = BASE_DIR / "SemArt" / "Images"  # 回退源（镜像未就绪时）
 logger = logging.getLogger("api")
 
 
@@ -106,7 +107,7 @@ app = FastAPI(title="西方艺术智能助手", docs_url=None, redoc_url=None, l
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-# ── 请求治理中间件：request_id 贯穿 + 令牌桶限流（G7/2.3） ──
+# ── 请求治理中间件：request_id 贯穿 + 令牌桶限流 ──
 _rate_lock = threading.Lock()
 _rate_buckets: dict[str, list[float]] = {}
 
@@ -171,18 +172,19 @@ def index():
 
 
 @app.get("/api/images/{file_name}")
-def semart_image(file_name: str):
-    """SemArt 配图静态服务：basename 防穿越 + 长缓存（替代 base64 内联）。"""
+def artwork_image(file_name: str):
+    """本地画作配图静态服务：优先 data/core/images，回退 SemArt/Images。"""
     name = Path(file_name).name
-    base = _SEMART_IMAGES.resolve()
-    path = (base / name).resolve()
-    if path.parent != base or not path.is_file():
-        return JSONResponse({"ok": False, "error": "图片不存在"}, status_code=404)
-    return FileResponse(
-        str(path),
-        media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    for base in (_CORE_IMAGES, _SEMART_IMAGES):
+        base = base.resolve()
+        path = (base / name).resolve()
+        if path.parent == base and path.is_file():
+            return FileResponse(
+                str(path),
+                media_type="image/jpeg",
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+    return JSONResponse({"ok": False, "error": "图片不存在"}, status_code=404)
 
 
 @app.get("/api/bootstrap")
@@ -249,7 +251,7 @@ def del_preferences():
 
 @app.get("/api/preferences")
 def get_preferences():
-    """记忆面板：全部偏好分项（G2，kind/value/weight/updated_at）。"""
+    """记忆面板：全部偏好分项（kind/value/weight/updated_at）。"""
     return JSONResponse({"items": service.preferences_items()})
 
 
@@ -290,7 +292,7 @@ def del_memory_item(item_id: str):
 
 @app.get("/api/feedback")
 def get_feedback(limit: int = 100, offset: int = 0):
-    """反馈列表（导出/人工审核用，G1）。"""
+    """反馈列表（导出/人工审核用）。"""
     items, total = feedback_store.list_feedback(limit=limit, offset=offset)
     return JSONResponse({"items": items, "total": total})
 
@@ -306,7 +308,7 @@ def add_feedback(payload: FeedbackIn):
 
 @app.get("/api/metrics")
 def get_metrics(limit: int = 500):
-    """可观测汇总：延迟/成本/工具分布/反思与兜底率（G8/2.4）。"""
+    """可观测汇总：延迟/成本/工具分布/反思与兜底率。"""
     return JSONResponse(runs_store.metrics(limit=limit))
 
 
@@ -366,7 +368,7 @@ async def chat(payload: ChatIn, request: Request):
     )
 
 
-# ── 文档上传与入库（Stage 3 PDF / Stage 5 表格） ──
+# ── 文档上传与入库（PDF / 表格） ──
 _UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50MB
 
 
@@ -374,9 +376,9 @@ _UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50MB
 async def upload_document(file: UploadFile, background: BackgroundTasks):
     """上传 PDF/表格：保存 → BackgroundTasks 后台处理 → 前端轮询进度。
 
-    文件类型路由（零模型调用）：.pdf → Stage 3 解析入库；
-    .csv/.xlsx/.xls → Stage 5 表格通道（加载 + schema 推断 → 待确认）。
-    Phase 1 即采用后台任务而非同步阻塞（MinerU/大图文档解析耗时以分钟计，
+    文件类型路由（零模型调用）：.pdf → PDF 解析入库；
+    .csv/.xlsx/.xls → 表格通道（加载 + schema 推断 → 待确认）。
+    采用后台任务而非同步阻塞（MinerU/大图文档解析耗时以分钟计，
     浏览器与 uvicorn 都会超时）。
     """
     from src.ingestion.table_loader import classify_upload
@@ -397,7 +399,7 @@ async def upload_document(file: UploadFile, background: BackgroundTasks):
         )
 
     saved = service.save_upload(filename, data)
-    # G5/2.1 任务化：task_id 复用 doc_id，后台解析全程可查可重试（响应形状不变）
+    # 任务化：task_id 复用 doc_id，后台解析全程可查可重试（响应形状不变）
     task_id = tasks_store.create_task(
         type=f"ingest_{kind}",
         task_id=saved["doc_id"],
@@ -429,7 +431,7 @@ async def upload_document(file: UploadFile, background: BackgroundTasks):
 
 @app.get("/api/tasks")
 def get_tasks(status: str = ""):
-    """任务列表（G5/2.1）：可按状态过滤 pending/processing/done/failed/interrupted。"""
+    """任务列表：可按状态过滤 pending/processing/done/failed/interrupted。"""
     return JSONResponse({
         "items": tasks_store.list_tasks(status=status.strip() or None)
     })
@@ -474,7 +476,7 @@ async def retry_task(task_id: str, background: BackgroundTasks):
 
 @app.post("/api/documents/{doc_id}/schema")
 async def confirm_schema(doc_id: str, payload: SchemaIn):
-    """确认/纠正表格 schema（Stage 5）：用户确认后注册数据源生效。
+    """确认/纠正表格 schema：用户确认后注册数据源生效。
 
     请求体：{entity_col, group_axis_col?, description_col?, image_col?, display_name?}
     （空串/null 表示该角色无列；entity_col 必填）
@@ -490,13 +492,13 @@ async def confirm_schema(doc_id: str, payload: SchemaIn):
 
 @app.get("/api/datasets")
 def get_datasets():
-    """数据源清单（semart + 已确认表格）+ 当前生效项（Stage 5 切换器用）。"""
+    """数据源清单（核心库 + 已确认表格）+ 当前生效项（前端切换器用）。"""
     return JSONResponse(service.datasets())
 
 
 @app.post("/api/dataset/active")
 async def switch_dataset(payload: DatasetIn):
-    """切换当前生效数据源（Stage 5）。请求体：{dataset_id}。"""
+    """切换当前生效数据源。请求体：{dataset_id}。"""
     try:
         return JSONResponse(service.set_active_dataset(payload.dataset_id))
     except KeyError as e:
@@ -515,7 +517,7 @@ def get_document(doc_id: str):
 
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str):
-    """删除文档并级联清理向量/文件/状态（Stage 6）。"""
+    """删除文档并级联清理向量/文件/状态。"""
     try:
         result = service.delete_document(doc_id)
     except KeyError as e:

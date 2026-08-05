@@ -1,4 +1,4 @@
-"""Agent 注册表（P0-2）：扫描 agents/ 目录，一个进程注册多个 Agent。"""
+"""Agent 注册表（规划中）：扫描 agents/ 目录，一个进程注册多个 Agent。"""
 
 from __future__ import annotations
 

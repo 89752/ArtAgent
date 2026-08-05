@@ -10,7 +10,7 @@
 两条路径：
 - validate_args(schema, args)：校验模型已提出的参数（图内实时闸门）；
 - llm_extract_parameters(...)：从用户问题显式抽取参数（可独立用于非
-  LangChain 工具 / Stage 7 工具直连），内部同样走 validate_args。
+  LangChain 工具直连），内部同样走 validate_args。
 
 不引入 jsonschema 依赖，按 JSON Schema 常用子集手写校验，够用且可单测。
 """
@@ -18,9 +18,10 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+
+from src.utils.json_utils import parse_json
 
 
 @dataclass
@@ -147,7 +148,7 @@ def fill_defaults(params: dict[str, Any], properties: dict) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ #
-# LLM 显式参数抽取（独立路径，供 Stage 7 工具直连使用）                     #
+# LLM 显式参数抽取（独立路径，供工具直连使用）                             #
 # ------------------------------------------------------------------ #
 
 EXTRACT_SYSTEM_PROMPT = """你是工具参数抽取器。根据用户问题，为下面的工具抽取参数。
@@ -181,19 +182,7 @@ def build_extract_prompt(tool_name: str, schema: dict, question: str) -> str:
 
 def _parse_extraction(raw: str) -> tuple[Optional[dict], Optional[list[str]]]:
     """解析抽取响应：返回 (params, missing)；畸形返回 (None, None)。"""
-    if not raw:
-        return None, None
-    cleaned = re.sub(r"```(?:json)?", "", raw).strip("` \n")
-    try:
-        data = json.loads(cleaned)
-    except Exception:
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None, None
-        try:
-            data = json.loads(cleaned[start : end + 1])
-        except Exception:
-            return None, None
+    data = parse_json(raw)
     if not isinstance(data, dict):
         return None, None
     params = data.get("params")

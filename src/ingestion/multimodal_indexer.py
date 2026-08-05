@@ -1,5 +1,5 @@
 """
-多模态路线入库（Stage 3）：整页渲染 → DashScope 多模态向量化 → 独立 collection。
+多模态路线入库：整页渲染 → DashScope 多模态向量化 → 独立 collection。
 
 每页只产出一个向量（非 ColPali 类每页上千 patch 向量），存储/检索成本
 与 SemArt 索引同量级。整页图渲染后落盘保存——检索命中时前端可展示、

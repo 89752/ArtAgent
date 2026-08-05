@@ -1,4 +1,4 @@
-"""Agent Manifest 定义与加载（P0-2）。
+"""Agent Manifest 定义与加载（规划中）。
 
 AgentSpec = 平台的应用资产：id/name/system_prompt/tools 白名单/skills/
 knowledge_base/memory/guardrails/mcp_servers。一个进程注册多个 Agent，
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 
 class McpServerSpec(BaseModel):
-    """MCP Server 配置（消费侧，P0-4）。"""
+    """MCP Server 配置（消费侧）。"""
 
     name: str
     command: str = ""

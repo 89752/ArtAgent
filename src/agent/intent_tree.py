@@ -18,10 +18,10 @@
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+
+from src.utils.json_utils import parse_json
 
 
 @dataclass
@@ -240,20 +240,7 @@ def build_classifier_prompt() -> str:
 
 def parse_scores(raw: str) -> list[NodeScore]:
     """鲁棒解析 LLM 打分输出；任何畸形/未知 id 都安全跳过。"""
-    if not raw:
-        return []
-    cleaned = re.sub(r"```(?:json)?", "", raw).strip("` \n")
-    try:
-        data = json.loads(cleaned)
-    except Exception:
-        # 兜底：截取第一个完整数组
-        start, end = cleaned.find("["), cleaned.rfind("]")
-        if start == -1 or end == -1 or end <= start:
-            return []
-        try:
-            data = json.loads(cleaned[start : end + 1])
-        except Exception:
-            return []
+    data = parse_json(raw)
 
     # 容错：模型可能在外面又包了一层 {"results": [...]}
     if isinstance(data, dict):

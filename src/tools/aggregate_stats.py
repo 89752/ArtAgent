@@ -1,4 +1,4 @@
-"""P1-2 aggregate_stats：结构化统计工具（零 LLM，本地确定性计算）。
+"""aggregate_stats：结构化统计工具（零 LLM，本地确定性计算）。
 
 按当前数据源的 schema 角色列做分组计数，回答"哪个时期作品最多"
 "哪种技法最常见"类问题，替代 semantic_search 硬查。

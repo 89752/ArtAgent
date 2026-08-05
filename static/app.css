@@ -171,7 +171,7 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tb-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.tb-btn, .dataset-pill {
+.tb-btn {
   display: flex; align-items: center; gap: 7px;
   border: 1px solid var(--line); background: #ffffff55; cursor: pointer;
   font-family: var(--serif-cn); font-size: 0.84rem; color: var(--ink-soft);
@@ -179,12 +179,7 @@ body {
   transition: all 0.3s var(--ease);
 }
 .tb-btn svg { width: 15px; height: 15px; }
-.tb-btn:hover, .dataset-pill:hover { background: var(--paper-3); color: var(--ink); border-color: var(--gold); }
-.tb-btn.danger:hover { border-color: #b06a5e; color: var(--danger); background: #a9444214; }
-.dataset-pill .pill-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--gold);
-  box-shadow: 0 0 0 2px #b08d4e2b;
-}
+.tb-btn:hover { background: var(--paper-3); color: var(--ink); border-color: var(--gold); }
 .icon-btn {
   border: 1px solid var(--line); background: #ffffff55; cursor: pointer;
   width: 34px; height: 34px; border-radius: 10px; color: var(--ink-soft);
@@ -640,14 +635,6 @@ body {
 }
 .lib-count { font-family: var(--serif-en); font-size: 0.78rem; color: var(--ink-faint); }
 
-.dataset-select {
-  width: 100%; border: 1px solid var(--line); border-radius: 10px;
-  background: #fffaf1; color: var(--ink); font-family: var(--serif-cn);
-  font-size: 0.88rem; padding: 9px 10px; cursor: pointer; outline: none;
-}
-.dataset-select:focus { border-color: var(--gold); }
-.dataset-hint { font-size: 0.76rem; color: var(--ink-faint); padding: 6px 4px 0; line-height: 1.5; }
-
 .doc-list { display: flex; flex-direction: column; gap: 6px; }
 .doc-empty { font-size: 0.82rem; color: var(--ink-faint); padding: 8px 4px; }
 .doc-item {
@@ -817,7 +804,6 @@ body {
 }
 :root[data-theme="dark"] .composer-inner,
 :root[data-theme="dark"] .chip,
-:root[data-theme="dark"] .dataset-select,
 :root[data-theme="dark"] .doc-item,
 :root[data-theme="dark"] .schema-card { background: #26211b; }
 :root[data-theme="dark"] .scene-card {
@@ -831,7 +817,6 @@ body {
   background: linear-gradient(180deg, #3a322a, #2c2620);
 }
 :root[data-theme="dark"] .tb-btn,
-:root[data-theme="dark"] .dataset-pill,
 :root[data-theme="dark"] .icon-btn { background: #26211b; }
 :root[data-theme="dark"] .schema-grid select,
 :root[data-theme="dark"] .schema-name-label input {
@@ -866,7 +851,6 @@ body {
   #chat { padding: 20px 16px 8px; }
   .composer { padding: 8px 12px 10px; }
   #topbar { padding: 0 12px; }
-  .dataset-pill { display: none; }
   .msg-actions { opacity: 1; }
   .hist-ren, .hist-del { opacity: 1; }
   .jump-bottom { bottom: 118px; }

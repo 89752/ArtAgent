@@ -1,6 +1,6 @@
-# tests/test_stage6_lifecycle.py
+# tests/test_document_lifecycle.py
 """
-Stage 6 文档生命周期级联删除纯单测：
+文档生命周期级联删除纯单测：
 PDF 删除清向量/文件/SQLite；表格删除注销数据源并复位当前数据源。
 不加载 SemArt、不调真实 LLM、不联网。
 """
@@ -150,4 +150,4 @@ if __name__ == "__main__":
     for fn in fns:
         fn()
         print(f"  [OK] {fn.__name__}")
-    print(f"\n[PASS] Stage 6 生命周期级联删除 {len(fns)} 个单测通过！")
+    print(f"\n[PASS] 文档生命周期级联删除 {len(fns)} 个单测通过！")

@@ -1,0 +1,3 @@
+{"ts": "2026-08-05 15:50:57", "retrieval": {"total": 100, "hits": 90, "recall_at_k": 0.9}}
+{"ts": "2026-08-05 15:54:13", "retrieval": {"total": 20, "hits": 18, "recall_at_k": 0.9}}
+{"ts": "2026-08-05 16:05:01", "retrieval": {"total": 100, "hits": 90, "recall_at_k": 0.9}}

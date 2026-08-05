@@ -1,9 +1,9 @@
 """
-MinerU 精准解析 API 解析器（Stage 3 遗留项落地）。
+MinerU 精准解析 API 解析器。
 
 定位：文字路线主力解析器（版面理解、表格/公式/图注识别）。
 走官方 v4 云端 API，不引入本地重依赖（~4GB 模型 + datasets/pyarrow
-冲突前科，见实施方案 §1.5）；与 pdfplumber_fallback 同签名，pipeline
+冲突前科，见实施方案）；与 pdfplumber_fallback 同签名，pipeline
 按 MINERU_TOKEN 是否配置选择解析器，调用失败可降级 pdfplumber。
 
 流程（v4 契约，mineru.net/doc）：
@@ -12,10 +12,10 @@ MinerU 精准解析 API 解析器（Stage 3 遗留项落地）。
   GET  /api/v4/extract-results/batch/{batch_id}    轮询 state → done
   下载 full_zip_url → *_content_list.json → list[Block]
 
-决策记录（Phase 1）：
+决策记录：
 - 整份文档上传解析，不用 files[].page_ranges：选中页的 page_idx 语义
-  （原页码 vs 重排序）文档未写明，Phase 1 求正确性，解析后按 page_nos
-  过滤；多模态页被多解析的 quota 在 2000 页/日额度内可接受。Phase 2
+  （原页码 vs 重排序）文档未写明，先求正确性，解析后按 page_nos
+  过滤；多模态页被多解析的 quota 在 2000 页/日额度内可接受。后续
   可实测 page_idx 语义后改按页解析省额度。
 - model_version="vlm"：画册/复杂版面质量优先（2026-08-01 轻量 API 实测
   全扫描画册质量优秀，生产用 vlm 后端只强不弱）。
@@ -23,7 +23,7 @@ MinerU 精准解析 API 解析器（Stage 3 遗留项落地）。
   （image_caption/image_footnote），不额外调视觉模型生成；无图注的内嵌图
   不产 Block（无文字可向量化，视觉内容已被多模态整页图路线覆盖）。
 - header/footer/page_number 等页面辅助块不入库（检索噪声）。
-- 超时纪律（§1.5 事故教训）：所有 HTTP 调用显式 timeout；轮询容忍瞬时
+- 超时纪律（事故教训）：所有 HTTP 调用显式 timeout；轮询容忍瞬时
   网络异常直到总超时。
 """
 

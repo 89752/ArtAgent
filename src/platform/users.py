@@ -1,4 +1,4 @@
-"""用户、API Key 与每用户设置（P0-1）。
+"""用户、API Key 与每用户设置（规划中）。
 
 首版最小用户模型：users + api_keys + user_settings。
 - users：平台身份，delete_user 级联清空会话/偏好/摘要/文档/向量/文件。
@@ -243,7 +243,7 @@ def delete_user(user_id: str, cascade: bool = True) -> dict:
             result["sessions"] = delete_user_conversations(user_id)
         except ImportError:
             logger.warning(
-                "[users] conversations 用户隔离接口尚未集成，跳过会话级联（P0-1 待续）"
+                "[users] conversations 用户隔离接口尚未集成，跳过会话级联（平台集成待续）"
             )
         try:
             from src.memory.store import clear_preferences

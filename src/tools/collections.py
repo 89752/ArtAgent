@@ -1,4 +1,4 @@
-"""收藏与偏好工具（Phase 5 工具多元化 + P1-6 补全）：
+"""收藏与偏好工具：
 save_collection / list_collections / get_collection / delete_collection /
 rename_collection / list_preferences。
 """

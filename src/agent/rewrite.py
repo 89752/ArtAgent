@@ -1,5 +1,5 @@
 """
-查询改写与多问题拆分（P0-③，借鉴 ragent `MultiQuestionRewriteService`）。
+查询改写与多问题拆分（借鉴 ragent `MultiQuestionRewriteService`）。
 
 职责：把多轮追问（含指代）改写成可独立理解的完整问题，并把复合问题
 （如"对比莫奈和梵高，顺便推荐几幅类似的画"）拆分成多个子问题——
@@ -19,11 +19,11 @@
 
 from __future__ import annotations
 
-import json
-import os
-import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
+
+from src.utils.env import env_flag
+from src.utils.json_utils import parse_json
 
 
 REWRITE_SPLIT_PROMPT = """你是多轮对话的查询改写与拆分模块。
@@ -69,28 +69,12 @@ def normalize_query(question: str) -> str:
 
 def rewrite_enabled() -> bool:
     """LLM 改写开关（REWRITE_ENABLED，默认开；0/false/no 关闭）。"""
-    return os.getenv("REWRITE_ENABLED", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-    )
+    return env_flag("REWRITE_ENABLED", default="1")
 
 
 def _parse_json(raw: str) -> Optional[dict]:
-    """鲁棒解析改写 JSON（容错 markdown fence 与截断）。"""
-    if not raw:
-        return None
-    cleaned = re.sub(r"```(?:json)?", "", raw).strip("` \n")
-    try:
-        data = json.loads(cleaned)
-    except Exception:
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        try:
-            data = json.loads(cleaned[start : end + 1])
-        except Exception:
-            return None
+    """兼容旧调用：解析 JSON 且只接受 dict 形态。"""
+    data = parse_json(raw)
     return data if isinstance(data, dict) else None
 
 

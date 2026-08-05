@@ -67,9 +67,7 @@ const dom = {
   history:    $("#history"),
   histFilter: $("#hist-filter"),
   tbTitle:    $("#tb-title"),
-  datasetPillLabel: $("#dataset-pill-label"),
   btnLibrary: $("#btn-library"),
-  btnDataset: $("#btn-dataset"),
   welcome:    $("#welcome"),
   chat:       $("#chat"),
   cards:      $("#cards"),
@@ -79,13 +77,10 @@ const dom = {
   attach:     $("#btn-attach"),
   file:       $("#file-input"),
   jump:       $("#btn-jump"),
-  btnClear:   $("#btn-clear"),
   library:    $("#library"),
   docList:    $("#doc-list"),
   docCount:   $("#doc-count"),
   upload:     $("#btn-upload"),
-  datasetSelect: $("#dataset-select"),
-  datasetHint:   $("#dataset-hint"),
   schemaModal:   $("#schema-modal"),
   schemaMeta:    $("#schema-meta"),
   schemaReason:  $("#schema-reason"),
@@ -115,23 +110,15 @@ function showWelcome() {
   dom.welcome.classList.remove("is-hidden");
   dom.chat.classList.add("is-hidden");
   dom.chat.innerHTML = "";
+  setSendStop(sidStreaming(state.sid));
   syncTitle();
-  updateClearButton();
   updateJumpButton();
 }
 function showChat() {
   dom.welcome.classList.add("is-hidden");
   dom.chat.classList.remove("is-hidden");
-  updateClearButton();
+  setSendStop(sidStreaming(state.sid));
   updateJumpButton();
-}
-
-/* 无会话内容时隐藏"清除对话"，避免无意义操作 */
-function updateClearButton() {
-  const hasContent = sessionsMap.has(state.sid)
-    || anyStreaming()
-    || dom.chat.querySelector(".turn.user") !== null;
-  dom.btnClear.classList.toggle("is-hidden", !hasContent);
 }
 
 /* 一键回到最新消息按钮：仅当上翻离开底部且有消息时显示 */
@@ -188,7 +175,7 @@ function addUserTurn(text, files) {
   wrapAndAppend(turn);
   addUserActions(turn);
 }
-function addAssistantTurn(html) {
+function addAssistantTurn(html, opts = {}) {
   const turn = el("div", "turn assistant");
   const bubble = el("div", "bubble");
   bubble.dataset.sid = state.sid;   // 反馈归属当前会话
@@ -196,7 +183,17 @@ function addAssistantTurn(html) {
   turn.append(assistantAvatar(), bubble);
   wrapAndAppend(turn);
   addAssistantActions(turn, bubble);
+  if (opts.pending) {
+    const actions = turn.querySelector(".msg-actions");
+    if (actions) actions.hidden = true;  // 回答完成前不显示复制/重试等按钮
+  }
   return bubble;
+}
+
+function showAssistantActions(bubble) {
+  const turn = bubble.parentElement;
+  const actions = turn && turn.querySelector(".msg-actions");
+  if (actions) actions.hidden = false;
 }
 
 /* ── 消息操作：复制 / 重新生成 / 编辑（对标成熟平台） ── */
@@ -604,12 +601,27 @@ async function send(text, opts = {}) {
   if (opts.regenerate || opts.editInPlace) state.pendingRegenerate = true;
 
   const sidAtSend = state.sid;
+  const filesAtSend = [...state.chips.values()];
   setSendStop(true);
   if (!sessionsMap.has(state.sid)) {
     state.title = (text || "上传文档").slice(0, 24) || "新对话";
     syncTitle();
   }
   showChat();
+  // 新会话发送首条消息时，侧边栏立即出现该对话（先本地占位，收尾再同步服务端）
+  if (!sessionsMap.has(state.sid)) {
+    sessionsMap = new Map([
+      [state.sid, {
+        session_id: state.sid,
+        title: state.title,
+        updated_at: new Date().toISOString(),
+        relative: "刚刚",
+      }],
+      ...sessionsMap.entries(),
+    ]);
+    renderHistory([...sessionsMap.values()], sessionsMap.size >= SESSIONS_PAGE);
+    markActive(state.sid);
+  }
   if (opts.editInPlace && opts.editWrap) {
     // 原地编辑：编辑框替换为普通用户消息（新文本）
     const t = opts.editWrap.querySelector(".turn.user");
@@ -626,9 +638,14 @@ async function send(text, opts = {}) {
   dom.msg.value = ""; autoResize();
 
   const bubble = addAssistantTurn(
-    '<div class="think-box" open><summary>正在思考…</summary></div>');
+    '<div class="think-box" open><summary>正在思考…</summary></div>',
+    { pending: true });
   const abortCtrl = new AbortController();
-  const entry = { sid: sidAtSend, bubble, abortCtrl };
+  const entry = {
+    sid: sidAtSend, bubble, wrap: bubble.closest(".chat-wrap"), abortCtrl,
+    userText: text || "请查阅我上传的文档并回答。",
+    files: filesAtSend,
+  };
   state.streams.set(sidAtSend, entry);
 
   try {
@@ -674,6 +691,7 @@ async function send(text, opts = {}) {
           gotDone = true;
           setBubbleHTML(bubble, evt.html);
           renderSources(bubble, evt.sources || []);
+          showAssistantActions(bubble);
           const ans = bubble.querySelector(".md-answer");
           if (ans) ans.setAttribute("aria-live", "polite");
           if (evt.error) addRetryButton(bubble);
@@ -692,25 +710,27 @@ async function send(text, opts = {}) {
       const note = el("div", "stop-note");
       note.textContent = "⏹ 已停止生成";
       bubble.appendChild(note);
+      showAssistantActions(bubble);
       scrollChat();
     } else {
       bubble.innerHTML = "😔 " + (err.message || "网络中断或服务未响应，请稍后重试。");
       addRetryButton(bubble);
+      showAssistantActions(bubble);
     }
     console.error(err);
   } finally {
     if (state.streams.get(sidAtSend) === entry) state.streams.delete(sidAtSend);
+    // 发送/停止按钮跟随“当前会话”的流状态：后台流继续跑，不阻塞新会话
+    setSendStop(sidStreaming(state.sid));
     if (state.sid === sidAtSend) {
       state.pendingRegenerate = false;
-      setSendStop(false);
-      updateClearButton();
       updateJumpButton();
     }
     // 后台流完成后，若用户正停留在该会话（气泡已被重新渲染/分离）→ 重载展示最终答案
     if (gotDone && state.sid === sidAtSend && !bubble.isConnected) {
       openSession(sidAtSend);
     }
-    loadSessions();
+    await loadSessions();
   }
 }
 
@@ -842,12 +862,42 @@ function syncTitle() {
   const s = sessionsMap.get(state.sid);
   dom.tbTitle.textContent = (s && s.title) ? s.title : state.title;
   dom.tbTitle.setAttribute("data-tip", dom.tbTitle.textContent);
-  updateClearButton();
 }
 
 async function openSession(sid) {
   stashChips();
   editing = null;
+  // 后台/正在流式生成的会话还没落库：直接挂回实时气泡，不读空历史
+  const live = state.streams.get(sid);
+  if (live && live.bubble) {
+    state.sid = sid;
+    state.title = (sessionsMap.get(sid) || {}).title || state.title;
+    showChat();
+    dom.chat.innerHTML = "";
+    // 已落库的历史（本轮之前的轮次）
+    try {
+      const data = await (await fetch(`/api/sessions/${sid}`)).json();
+      for (const m of (data.messages || [])) {
+        if (m.role === "user") addUserTurn(m.content, []);
+        else if (m.role === "attachment") addAttachmentTurn(m);
+        else {
+          const b = addAssistantTurn(m.content);
+          if (m.sources) renderSources(b, m.sources);
+        }
+      }
+    } catch (_) { /* 历史读取失败不影响实时气泡 */ }
+    // 本轮尚未落库的用户消息 + 实时生成气泡
+    if (live.userText) addUserTurn(live.userText, live.files || []);
+    dom.chat.appendChild(live.wrap || live.bubble);
+    markActive(sid);
+    syncTitle();
+    updateUrl(sid);
+    loadChipsFor(sid);
+    stickBottom = true;
+    scrollChat();
+    updateJumpButton();
+    return;
+  }
   try {
     const data = await (await fetch(`/api/sessions/${sid}`)).json();
     if (!(data.messages || []).length) { newSession(); return; }
@@ -914,22 +964,6 @@ async function deleteSession(sid, title) {
   try { await fetch(`/api/sessions/${sid}`, { method: "DELETE" }); } catch (_) { /* ignore */ }
   if (sid === state.sid) newSession();
   loadSessions();
-}
-
-async function clearSession() {
-  const ok = await confirmAsk({
-    title: "清除对话",
-    text: "确定清除当前会话的全部消息？删除后不可恢复。",
-    okText: "清除", danger: true,
-  });
-  if (!ok) return;
-  const oldSid = state.sid;
-  try { await fetch(`/api/sessions/${oldSid}`, { method: "DELETE" }); } catch (_) { /* ignore */ }
-  clearPending(oldSid);
-  state.chips = new Map();
-  renderChips();
-  await loadSessions();
-  newSession();
 }
 
 /* ══════════════ 首屏：场景卡 + 记忆入口提示 ══════════════ */
@@ -1075,7 +1109,6 @@ dom.send.addEventListener("click", () => {
   send(dom.msg.value);
 });
 $("#btn-new").addEventListener("click", newSession);
-$("#btn-clear").addEventListener("click", clearSession);
 
 /* ══════════════ 附件：chip 上传（输入区 paperclip） ══════════════ */
 let uploadBusy = 0;
@@ -1274,7 +1307,7 @@ async function removeChip(id) {
       const j = await res.json().catch(() => ({}));
       if (!j.ok) { toast(j.error || "删除失败", "err"); return; }
       removeAttachmentTurns(c.doc_id);
-      loadDocuments(); loadDatasets();
+      loadDocuments();
     } catch (e) { toast("删除失败：" + e.message, "err"); return; }
   } else if (c.status === "processing") {
     toast("文档仍在后台解析，可在资料库中管理");
@@ -1308,12 +1341,10 @@ composerBox.addEventListener("drop", (e) => {
 function openLibrary(focusDataset) {
   rememberFocus();
   dom.library.hidden = false;
-  if (focusDataset) setTimeout(() => dom.datasetSelect.focus(), 60);
 }
 function closeLibrary() { dom.library.hidden = true; restoreFocus(); }
 
-dom.btnLibrary.addEventListener("click", () => openLibrary(false));
-dom.btnDataset.addEventListener("click", () => openLibrary(true));
+dom.btnLibrary.addEventListener("click", () => openLibrary());
 dom.upload.addEventListener("click", () => dom.file.click());
 
 /* 移动端侧栏抽屉 */
@@ -1461,7 +1492,6 @@ async function deleteDocument(d) {
     for (const [id, c] of state.chips) if (c.doc_id === d.doc_id) state.chips.delete(id);
     renderChips();
     loadDocuments();
-    loadDatasets();
   } catch (e) { toast("删除失败：" + e.message, "err"); }
 }
 
@@ -1541,54 +1571,12 @@ dom.schemaOk.addEventListener("click", async () => {
     closeSchemaModal();
     toast("数据源已启用");
     loadDocuments();
-    loadDatasets();
   } catch (e) {
     dom.schemaError.textContent = "确认失败：" + e.message;
     dom.schemaError.hidden = false;
   } finally {
     dom.schemaOk.disabled = false;
   }
-});
-
-/* ══════════════ 数据源切换 ══════════════ */
-async function loadDatasets() {
-  try {
-    const data = await (await fetch("/api/datasets")).json();
-    dom.datasetSelect.innerHTML = "";
-    for (const item of (data.items || [])) {
-      const opt = el("option");
-      opt.value = item.dataset_id;
-      opt.textContent = item.kind === "table" ? `📊 ${item.name}` : item.name;
-      dom.datasetSelect.appendChild(opt);
-    }
-    dom.datasetSelect.value = data.active;
-    updateDatasetHint(data);
-    const cur = (data.items || []).find((i) => i.dataset_id === data.active);
-    dom.datasetPillLabel.textContent = cur ? cur.name : "核心库";
-  } catch (e) { console.error(e); }
-}
-
-function updateDatasetHint(data) {
-  const cur = (data.items || []).find((i) => i.dataset_id === data.active);
-  if (!cur) { dom.datasetHint.textContent = ""; return; }
-  dom.datasetHint.textContent = cur.kind === "table"
-    ? `${cur.rows || 0} 行 · 支持：${[cur.supports_timeline && "时间线", cur.supports_recommendation && "推荐"]
-        .filter(Boolean).join("/") || "仅检索"}`
-    : "内置西方艺术核心库 · 覆盖 8–19 世纪画作";
-}
-
-dom.datasetSelect.addEventListener("change", async () => {
-  try {
-    const res = await fetch("/api/dataset/active", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataset_id: dom.datasetSelect.value }),
-    });
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok || !j.ok) toast(j.error || "切换失败", "err");
-    else toast("已切换数据源");
-  } catch (e) { toast("切换失败：" + e.message, "err"); }
-  loadDatasets();
 });
 
 /* ══════════════ 通用确认弹窗 ══════════════ */
@@ -1835,7 +1823,6 @@ async function init() {
   bootstrap();
   loadSessions();
   loadDocuments();
-  loadDatasets();
   const urlSid = currentSidFromUrl();
   if (urlSid) {
     await openSession(urlSid);   // 刷新后停留在原对话

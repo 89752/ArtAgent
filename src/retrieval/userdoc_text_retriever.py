@@ -1,5 +1,5 @@
 """
-用户 PDF 文字路线检索器（Stage 3）：BGE 向量空间。
+用户 PDF 文字路线检索器：BGE 向量空间。
 
 与 SemArt 同一 BGE embedding 模型、同一向量语义空间，天然可联合检索；
 独立 collection（user_pdf_text），collection 级隔离不做物理合并。

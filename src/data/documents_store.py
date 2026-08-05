@@ -1,7 +1,7 @@
 """
-文档/数据源生命周期持久化（Stage 6）。
+文档/数据源生命周期持久化。
 
-把 Stage 3/5 的 JSON 状态文件（data/index/doc_status.json）整体替换为 SQLite
+把早期的 JSON 状态文件（data/index/doc_status.json）整体替换为 SQLite
 `documents` 表，支撑文件库列表、删除按钮与级联清理。
 
 设计原则：
@@ -245,6 +245,19 @@ def update_document(doc_id: str, **fields) -> None:
         updates["doc_id"] = doc_id
         conn.execute(f"UPDATE documents SET {sets} WHERE doc_id = :doc_id", updates)
         conn.commit()
+
+
+def upsert_document(
+    doc_id: str,
+    kind: str = "pdf",
+    status: str = "processing",
+    **fields,
+) -> None:
+    """更新文档记录；不存在时自动创建（原 pipeline.update_doc_status 语义）。"""
+    if get_document(doc_id) is None:
+        add_document(doc_id=doc_id, kind=kind, status=status, **fields)
+    else:
+        update_document(doc_id, **fields)
 
 
 def get_document(doc_id: str) -> Optional[dict]:

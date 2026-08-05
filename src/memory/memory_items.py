@@ -1,12 +1,12 @@
-"""记忆系统 Phase 1：memory_items / memory_events 存储层。
+"""记忆条目主存储层：memory_items / memory_events（长期记忆唯一事实源）。
 
-对标 Mem0 / LangMem 的"事实条目"模式：
 - memory_items：单条陈述式记忆（用户偏好/事实/画像），带 entity/embedding/
   importance/source/version/superseded_by/软删除；
 - memory_events：审计（create/update/supersede/recall/delete）。
 
 隔离：namespace = (user_id, thread_id, scope)，所有读写强制带 user_id；
-工具层默认用户可用 MEMORY_USER_ID 覆盖（评估用 eval-test，生产用 web_user）。
+工具层默认用户可用 MEMORY_USER_ID 覆盖（评估用 eval-test，生产用 web_user）；
+store.py（偏好兼容层）与 tools/memory.py（remember/recall/forget）都读写本表。
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ def _vector_backend() -> str:
 
 
 def _chroma_upsert(item: dict) -> None:
-    """Phase 3 可选：把条目向量同步进 Chroma collection memory_items。"""
+    """可选：把条目向量同步进 Chroma collection memory_items。"""
     if _vector_backend() != "chroma":
         return
     try:
@@ -142,7 +142,7 @@ def _chroma_upsert(item: dict) -> None:
 
 
 def _chroma_delete(item_id: str) -> None:
-    """Phase 3 可选：从 Chroma 移除条目（软删除/淘汰时同步）。"""
+    """可选：从 Chroma 移除条目（软删除/淘汰时同步）。"""
     if _vector_backend() != "chroma":
         return
     try:
@@ -162,7 +162,7 @@ def _days_since(iso: str) -> float:
 
 
 def _capacity_limits() -> tuple[int, int]:
-    """Phase 3：单用户容量上限（条目数 / 总字符），env 可覆盖。"""
+    """单用户容量上限（条目数 / 总字符），env 可覆盖。"""
     try:
         max_items = max(1, int(os.getenv("MEMORY_MAX_ITEMS_PER_USER", "200")))
     except (TypeError, ValueError):
@@ -175,7 +175,7 @@ def _capacity_limits() -> tuple[int, int]:
 
 
 def _evict_over_capacity(user_id: str) -> int:
-    """Phase 3：按 重要性×新鲜度衰减 淘汰超限条目（软删除 + 审计）。
+    """按 重要性×新鲜度衰减 淘汰超限条目（软删除 + 审计）。
 
     score = importance · 0.9^days；低分先淘汰；kind='profile'（用户画像
     聚合）受保护，不参与淘汰；max_chars=0 表示只按条目数限制。
@@ -281,7 +281,7 @@ def add_memory(
 ) -> dict:
     """写入一条记忆；处理同义合并与漂移覆盖（supersede），并写审计。
 
-    smart_conflict=True 时（Phase 2，MEMORY_SMART_MERGE）：新旧内容不同且同
+    smart_conflict=True 时（MEMORY_SMART_MERGE）：新旧内容不同且同
     entity+kind 时，先用 LLM 判定 REPLACE（覆盖）/ MERGE（并存）/ SKIP（不写），
     失败回落确定性 REPLACE。默认 False 保持纯确定性行为。
 
@@ -401,7 +401,7 @@ def search_memories(
     q_vec = _embed(query) if query else None
     q_vec_list = json.loads(q_vec) if q_vec else None
 
-    # Phase 3 可选：Chroma 候选加速（失败/不可用自动回落全量扫描）
+    # 可选：Chroma 候选加速（失败/不可用自动回落全量扫描）
     if q_vec_list and _vector_backend() == "chroma":
         try:
             from src.retrieval.hybrid import get_or_create_chroma_collection

@@ -18,7 +18,7 @@ from src.agent.context import (
     dedup_artworks,
     estimate_context_chars,
     extract_evidence_from_messages,
-    format_evidence_block,
+    format_numbered_evidence_block,
     format_multi_evidence,
     trim_history,
 )
@@ -60,14 +60,14 @@ def test_dedup_ignores_garbage_and_empty():
 
 def test_evidence_block_numbered_and_truncated_snippet():
     items = [_item("A", aid="Q1"), _item("B", aid="Q2")]
-    block = format_evidence_block(items)
+    block = format_numbered_evidence_block(items)
     assert "[1]" in block and "[2]" in block
     assert "...]" in block or "..." in block  # 长 snippet 被截断
 
 
 def test_evidence_block_respects_budget():
     items = [_item("A", aid="Q1"), _item("B", aid="Q2")]
-    block = format_evidence_block(items, budget=20)
+    block = format_numbered_evidence_block(items, budget=20)
     assert len(block) <= 20
     assert "[2]" not in block
 

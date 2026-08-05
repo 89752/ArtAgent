@@ -1,13 +1,12 @@
-"""
-Tool 1: Artwork Retrieval Tools
+"""作品检索工具（semantic_search / exact_lookup）。
 
 提供两种检索方式：
   - semantic_search: 语义向量检索（用于模糊查询、主题检索）
   - exact_lookup:    精确字段查询（用于按画家/标题/年代精确查找）
 
-Stage 2 起 semantic_search 改走检索抽象层（HybridRetriever）；Stage 3 起
-融合用户上传 PDF 的文字/整页图两路结果，按 source 分形状返回：
-  - semart → 画作字典（title/author/date/...，形状与 Stage 1 一致）
+semantic_search 改走检索抽象层（HybridRetriever）；融合用户上传 PDF 的
+文字/整页图两路结果，按 source 分形状返回：
+  - semart → 画作字典（title/author/date/...，画作形状保持一致）
   - user_pdf_text / user_pdf_image → 文档片段字典（带 doc_name/page/内容）
 web/service.py 的 ToolMessage 解析与各合成节点不受影响（画作形状未变）。
 数据过滤/格式化统一走 src/data/access.py 数据访问层。
@@ -52,7 +51,7 @@ def _format_result(result: RetrievalResult) -> dict:
         }
     meta = result.metadata
     if result.source == "user_table":
-        # 用户表格（Stage 5）：原始列全带上（小写键，recommendation 的
+        # 用户表格：原始列全带上（小写键，recommendation 的
         # exclude_from_results 按 schema.entity_col.lower() 定位要靠它）；
         # 通用 title/description_snippet 供证据模板与相关性过滤拼候选；
         # 带 source 键 → 不进 UI 配图卡片（陷阱 #13）
@@ -88,7 +87,7 @@ def _format_result(result: RetrievalResult) -> dict:
     # 用户文档（PDF）：title 形如"《画册》第3页"，供证据模板与溯源引用
     title = f"《{meta.get('doc_name') or '用户文档'}》第{meta.get('page', '?')}页"
     section = str(meta.get("section") or "").strip()
-    if section:  # Stage 4 上下文头展示侧：章节进标题（旧文档无此字段自动跳过）
+    if section:  # 上下文头展示侧：章节进标题（旧文档无此字段自动跳过）
         title += f" · {section[:40]}"
     snippet = result.content
     if len(snippet) > EVIDENCE_SNIPPET_LEN:
@@ -149,6 +148,9 @@ def semantic_search(
     """
     通过自然语言语义检索相关画作与用户上传文档片段。
 
+    默认检索全部已注册数据源：内置核心库、用户上传 PDF、已确认的
+    用户表格都会自动参与（表格无需切换，确认 schema 即生效）。
+
     注意：用户上传文档（手稿/画册/回忆录等）的内容**只存在于本工具的结果中**，
     query_painter_knowledge / exact_lookup 等工具看不到文档内容；涉及文档细节
     的问题（如"莫奈在葛列尔画室的同学""布丹怎么发现莫奈"）必须调用本工具。
@@ -179,12 +181,11 @@ def semantic_search(
     f = dict(filters or {})
     src_val = f.pop("source", None)
     sources = [str(src_val)] if src_val else None
-    # P0-4：带结构化过滤时多取候选，后置过滤避免漏召回
+    # 带结构化过滤时多取候选，后置过滤避免漏召回
     fetch_k = max(top_k * 3, 20) if f else top_k
     results = hybrid.search(
         query,
         top_k=fetch_k,
-        dataset_id=hybrid.active_dataset,
         sources=sources,
     )
     out = [_format_result(r) for r in results]

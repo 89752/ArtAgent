@@ -1,6 +1,7 @@
-"""收藏清单存储（Phase 5）：collections(user_id, name, items_json, updated_at)。
+"""收藏清单存储：collections(user_id, name, items_json, updated_at)。
 
-与 agent_memory 同库文件（data/memory/agent_memory.db），独立表。
+与记忆条目共用 data/memory/agent_memory.db，独立表；
+工具层封装（@tool 版本）见 src/tools/collections.py。
 """
 
 from __future__ import annotations

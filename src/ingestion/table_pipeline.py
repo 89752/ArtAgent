@@ -1,9 +1,9 @@
 """
-表格入库编排（Stage 5）：加载 → schema 推断 → 待确认 → 确认后注册生效。
+表格入库编排：加载 → schema 推断 → 待确认 → 确认后注册生效。
 
-与 PDF 通道（pipeline.py）的关系：共用 doc_status.json 状态存储（kind 字段
-区分 "pdf"/"table"，Stage 6 换 SQLite 时一起迁移）；但表格**不入向量库**——
-注册为 StructuredTableRetriever 后走 Stage 2 预留的 fuzzy_match 兜底路径
+与 PDF 通道（pipeline.py）的关系：文档状态统一走 src/data/documents_store
+（SQLite，kind 字段区分 "pdf"/"table"）；但表格**不入向量库**——
+注册为 StructuredTableRetriever 后走 fuzzy_match 兜底路径
 （无索引表），不需要 BGE/Chroma。
 
 状态机：processing → pending_confirm（推断完成，等用户确认/纠正）
@@ -18,12 +18,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from src.ingestion.pipeline import (
-    UPLOADS_DIR,
-    get_doc_status,
-    list_doc_status,
-    update_doc_status,
-)
+from src.data import documents_store
+from src.ingestion.pipeline import UPLOADS_DIR
 from src.ingestion.schema_inference import InferredSchema, infer_table_schema
 from src.ingestion.table_loader import load_table
 from src.retrieval.structured_retriever import (
@@ -72,9 +68,10 @@ def ingest_table(
     doc_name = doc_name or Path(table_path).name
     path_obj = Path(table_path)
     file_size = path_obj.stat().st_size if path_obj.exists() else None
-    update_doc_status(
+    documents_store.upsert_document(
         doc_id,
-        doc_name=doc_name, kb_id=kb_id, kind="table",
+        kind="table",
+        doc_name=doc_name, kb_id=kb_id,
         status="processing", started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
         file_path=str(table_path), file_size=file_size,
     )
@@ -93,8 +90,8 @@ def ingest_table(
             "columns": [str(c) for c in loaded.df.columns],
             "proposed_schema": inferred.to_dict(),
         }
-        # Stage 6：kind-specific 字段存 metadata；返回仍保持旧扁平形状兼容
-        update_doc_status(doc_id, metadata={k: summary[k] for k in (
+        # kind-specific 字段存 metadata；返回仍保持旧扁平形状兼容
+        documents_store.upsert_document(doc_id, metadata={k: summary[k] for k in (
             "table_path", "dataset_id", "rows", "cols", "sheet_name",
             "columns", "proposed_schema",
         )}, **{k: v for k, v in summary.items() if k not in (
@@ -106,7 +103,7 @@ def ingest_table(
         return {"doc_id": doc_id, **summary}
     except Exception as e:  # noqa: BLE001 — 失败落状态供前端展示
         logger.exception("[table] 入库失败 doc_id=%s", doc_id)
-        update_doc_status(doc_id, status="failed", error=str(e))
+        documents_store.upsert_document(doc_id, status="failed", error=str(e))
         raise
 
 
@@ -132,7 +129,7 @@ def confirm_table_schema(doc_id: str, roles: dict) -> dict:
     空串/None 表示该角色无列。entity_col 为必填——它是模糊匹配与排除逻辑的
     锚点，连实体列都没有的表无法接入任何管线（报错让用户重选）。
     """
-    st = get_doc_status(doc_id)
+    st = documents_store.get_document(doc_id)
     if not st or st.get("kind") != "table":
         raise KeyError(f"非表格文档：{doc_id}")
     if st.get("status") not in CONFIRMABLE_STATUS:
@@ -178,15 +175,15 @@ def confirm_table_schema(doc_id: str, roles: dict) -> dict:
             "supports_recommendation": schema.supports_recommendation,
         },
     }
-    update_doc_status(doc_id, **confirmed)
+    documents_store.upsert_document(doc_id, **confirmed)
     log_event(logger, "table_confirm", doc_id=doc_id, dataset_id=dataset_id,
               timeline=schema.supports_timeline,
               recommendation=schema.supports_recommendation)
-    return {"doc_id": doc_id, **get_doc_status(doc_id)}
+    return documents_store.get_document(doc_id)
 
 
 def unregister_table(dataset_id: str) -> None:
-    """注销表格数据源（Stage 6 删除级联用）：从注册表与 Hybrid 移除。"""
+    """注销表格数据源（删除级联用）：从注册表与 Hybrid 移除。"""
     _REGISTRY.pop(dataset_id, None)
     from src.retrieval.hybrid import get_hybrid_retriever
 
@@ -197,7 +194,7 @@ def unregister_table(dataset_id: str) -> None:
 def restore_active_tables() -> int:
     """服务重启后从状态存储重建注册（幂等）；返回恢复的数据源个数。"""
     restored = 0
-    for st in list_doc_status():
+    for st in documents_store.list_documents():
         if st.get("kind") != "table" or st.get("status") != "active":
             continue
         cs = st.get("confirmed_schema") or {}

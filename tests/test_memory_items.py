@@ -1,4 +1,4 @@
-"""记忆系统 Phase 1 单测：memory_items 写入/检索/覆盖/软删除/隔离 + 工具 + 守卫。
+"""memory_items 存储单测：写入/检索/覆盖/软删除/隔离 + 工具 + 守卫。
 
 全程 patch 掉 bge-m3 embedding（避免加载模型），用关键词回退路径验证逻辑。
 """
@@ -20,8 +20,6 @@ import src.memory.store as store
 def _isolate_db(monkeypatch):
     tmp = Path(tempfile.mkdtemp(prefix="mem_items_")) / "agent_memory.db"
     mi._reset_for_tests(tmp)
-    store._DB_PATH = Path(tempfile.mkdtemp(prefix="mem_store_")) / "preferences.db"
-    store._conn = None
     monkeypatch.setenv("MEMORY_USER_ID", "test-user")
     with patch("src.memory.memory_items._embed", return_value=None):
         yield

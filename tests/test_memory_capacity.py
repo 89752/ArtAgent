@@ -1,4 +1,4 @@
-"""记忆系统 Phase 3 单测：容量/淘汰、向量后端回落、跨线程画像聚合。
+"""记忆容量/淘汰与画像聚合单测：容量/淘汰、向量后端回落、跨线程画像聚合。
 
 全程 patch embedding 与 Chroma/LLM，不耗额度、不碰真实索引。
 """
@@ -17,7 +17,7 @@ import src.memory.memory_items as mi
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
-    tmp = Path(tempfile.mkdtemp(prefix="mem_phase3_")) / "agent_memory.db"
+    tmp = Path(tempfile.mkdtemp(prefix="mem_capacity_")) / "agent_memory.db"
     mi._reset_for_tests(tmp)
     monkeypatch.setenv("MEMORY_USER_ID", "test-user")
     monkeypatch.setenv("MEMORY_MAX_ITEMS_PER_USER", "200")
@@ -168,4 +168,4 @@ if __name__ == "__main__":
     for fn in fns:
         fn()
         print(f"  [OK] {fn.__name__}")
-    print(f"\n[PASS] memory_phase3 全部 {len(fns)} 个单测通过")
+    print(f"\n[PASS] memory_capacity 全部 {len(fns)} 个单测通过")

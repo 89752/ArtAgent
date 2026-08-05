@@ -80,6 +80,10 @@ def test_knowledge_uses_active_dataset():
     assert out["main_schools"] == ["Impressionism"]
     assert out["active_timeframes"] == ["1901-1950", "1851-1900"]
     assert out["sample_works"] == ["Water Lilies", "Impression, Sunrise"]
+    assert out["sample_work_images"] == [
+        {"title": "Water Lilies", "image_file": "https://x/1.jpg"},
+        {"title": "Impression, Sunrise", "image_file": "https://x/2.jpg"},
+    ]
 
 
 def test_image_lookup_uses_active_dataset_with_url():

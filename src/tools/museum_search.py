@@ -1,4 +1,4 @@
-"""P1-4 museum_search：Metropolitan Museum 开放馆藏检索（免费、无需 key）。
+"""museum_search：Metropolitan Museum 开放馆藏检索（免费、无需 key）。
 
 Met API（CC0 公共领域）：
   - search: GET /public/collection/v1/search?q=...&hasImages=true
@@ -8,25 +8,15 @@ Met API（CC0 公共领域）：
 
 from __future__ import annotations
 
-import json
 import urllib.parse
-import urllib.request
 from typing import Optional
 
 from langchain_core.tools import tool
 
+from src.utils.http import get_json
+
 _MET_SEARCH = "https://collectionapi.metmuseum.org/public/collection/v1/search"
 _MET_OBJECT = "https://collectionapi.metmuseum.org/public/collection/v1/objects/{oid}"
-_TIMEOUT = 10.0
-_UA = "ArtAgent/1.0 (local art assistant; contact: local)"
-
-
-def _get_json(url: str) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310 — 固定 HTTPS 域名
-        return json.loads(resp.read().decode("utf-8"))
-
-
 @tool
 def museum_search(
     query: Optional[str] = None,
@@ -58,7 +48,7 @@ def museum_search(
     params = {"q": search_q, "hasImages": "true" if has_image else "false"}
     url = _MET_SEARCH + "?" + urllib.parse.urlencode(params)
     try:
-        data = _get_json(url)
+        data = get_json(url)
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"Met API 检索失败：{e}"}
 
@@ -66,7 +56,7 @@ def museum_search(
     results: list[dict] = []
     for oid in ids:
         try:
-            obj = _get_json(_MET_OBJECT.format(oid=oid))
+            obj = get_json(_MET_OBJECT.format(oid=oid))
         except Exception:  # noqa: BLE001 — 单条失败跳过
             continue
         results.append(

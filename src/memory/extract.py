@@ -1,12 +1,8 @@
-"""记忆系统 Phase 1.5：自动抽取层（默认关闭）。
+"""自动抽取层：对话自然推进后抽取稳定事实/偏好（MEMORY_AUTO_EXTRACT 默认关闭）。
 
 对标 ChatGPT Dreaming / Claude memory tool / Mem0 extract 的模式：
 用户没有说"记住"时，系统在对话自然推进后主动抽取稳定事实与偏好，
 落库 source='extracted'，冲突沿用 add_memory 的同义合并/漂移覆盖。
-
-开关（默认关，验证后再开）：
-- MEMORY_AUTO_EXTRACT=1         开启
-- MEMORY_EXTRACT_INTERVAL=N     每 N 轮对话抽取一次（默认 2）
 
 纪律：
 - 只抽稳定事实/偏好，不抽一次性任务与寒暄；
@@ -16,8 +12,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
 from typing import Callable, Optional
 
@@ -28,6 +22,8 @@ from src.memory.memory_items import (
     get_memory_user_id,
     list_memories,
 )
+from src.utils.env import env_flag, env_int
+from src.utils.json_utils import parse_json
 
 
 EXTRACT_PROMPT = """你是记忆管理模块。从【对话】中抽取值得长期记住的用户信息。
@@ -62,9 +58,6 @@ _SENSITIVE_RE = re.compile(
     r"\d{15,19}|密码|身份证|银行卡|信用卡|验证码|账号|口令|社保|护照号",
     re.IGNORECASE,
 )
-_TRUTHY = {"1", "true", "yes", "on", "y"}
-
-
 def _dedup_key(text: str) -> str:
     """抽取/显式记忆共用的去重键：去标点空白 + 去指令词/主语前缀。"""
     t = re.sub(r"[，。！？、,.!?；;：:\s\"'“”]", "", str(text or ""))
@@ -81,15 +74,12 @@ def _dedup_key(text: str) -> str:
 
 def extract_enabled() -> bool:
     """MEMORY_AUTO_EXTRACT 开关（默认关）。"""
-    return os.getenv("MEMORY_AUTO_EXTRACT", "0").strip().lower() in _TRUTHY
+    return env_flag("MEMORY_AUTO_EXTRACT")
 
 
 def extract_interval() -> int:
     """每 N 轮抽取一次（默认 2，最小 1）。"""
-    try:
-        return max(1, int(os.getenv("MEMORY_EXTRACT_INTERVAL", "2")))
-    except (TypeError, ValueError):
-        return 2
+    return max(1, env_int("MEMORY_EXTRACT_INTERVAL", 2))
 
 
 def recent_conversation_text(messages, max_entries: int = 6) -> str:
@@ -109,19 +99,7 @@ def recent_conversation_text(messages, max_entries: int = 6) -> str:
 
 def _parse_items(raw: str) -> list[dict]:
     """鲁棒解析抽取 JSON（容错 markdown fence / 截断）。"""
-    if not raw:
-        return []
-    cleaned = re.sub(r"```(?:json)?", "", raw).strip("` \n")
-    try:
-        data = json.loads(cleaned)
-    except Exception:
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return []
-        try:
-            data = json.loads(cleaned[start : end + 1])
-        except Exception:
-            return []
+    data = parse_json(raw)
     items = data.get("items") if isinstance(data, dict) else data
     return items if isinstance(items, list) else []
 

@@ -1,4 +1,4 @@
-"""用户反馈闭环（成熟应用 G1）：feedback 表 + 读写 + 导出。
+"""用户反馈闭环：feedback 表 + 读写 + 导出。
 
 落库 data/memory/feedback.db（ARTAGENT_MEMORY_DIR 可覆盖，测试隔离用）。
 rating: 1 = 👍 / -1 = 👎；reason 来自前端原因标签，comment 为补充文字。

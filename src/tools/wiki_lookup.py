@@ -1,4 +1,4 @@
-"""P1-5 wiki_lookup：Wikipedia REST 摘要查询（免费、无需 key）。
+"""wiki_lookup：Wikipedia REST 摘要查询（免费、无需 key）。
 
 与 web_search 分工：
 - wiki_lookup：定义/生平/流派/术语的百科摘要（结构化、带来源 URL）；
@@ -7,26 +7,18 @@
 
 from __future__ import annotations
 
-import json
 import re
 import urllib.parse
-import urllib.request
 
 from langchain_core.tools import tool
 
-_TIMEOUT = 10.0
-_UA = "ArtAgent/1.0 (local art assistant; contact: local)"
+from src.utils.http import get_json
+
 _SUMMARY_MAX_CHARS = 1600
 
 
 def _lang_for(entity: str) -> str:
     return "zh" if re.search(r"[\u4e00-\u9fff]", entity) else "en"
-
-
-def _get_json(url: str) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310 — 固定 HTTPS
-        return json.loads(resp.read().decode("utf-8"))
 
 
 @tool
@@ -47,7 +39,7 @@ def wiki_lookup(entity: str) -> dict:
     title = urllib.parse.quote(entity.replace(" ", "_"))
     url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}"
     try:
-        data = _get_json(url)
+        data = get_json(url)
     except Exception as e:  # noqa: BLE001
         return {"success": False, "entity": entity, "error": f"Wikipedia 查询失败：{e}"}
     if data.get("type") == "disambiguation":

@@ -1,5 +1,5 @@
 """
-检索层基础抽象（Stage 2）。
+检索层基础抽象。
 
 RetrievalResult：跨数据源统一的检索结果载体，source 标签保证可追溯性
 （回答里能区分"来自 SemArt 结构化库 / 用户 PDF 第 N 页 / 博物馆实时 API"）。
@@ -15,7 +15,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-# 数据源标签：met_museum / rijksmuseum 为 Stage 7 预留（接口先定、暂不实现）；
+# 数据源标签：met_museum / rijksmuseum 预留（接口先定、暂不实现）；
 # core 为从零构建的核心库（Wikidata 骨干 + 博物馆源，见 docs/核心库-从零构建-设计.md）
 RetrievalSource = Literal[
     "semart",
@@ -60,6 +60,6 @@ class BaseRetriever(Protocol):
     ) -> list[RetrievalResult]:
         """按 query 检索，返回源内按相关性降序的结果列表。
 
-        filters 为数据源相关的结构化过滤条件（保留参数，Stage 2 各实现可忽略）。
+        filters 为数据源相关的结构化过滤条件（保留参数，各实现可忽略）。
         """
         ...

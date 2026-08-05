@@ -1,12 +1,8 @@
-"""记忆系统 Phase 3：跨线程用户画像聚合（ChatGPT 式"记住你"）。
+"""跨线程用户画像聚合（ChatGPT 式"记住你"）。
 
 把 user scope 的有效记忆按 重要性×新鲜度 取 top，LLM 压缩成 3-6 条画像
 陈述，存为 kind='profile'、entity='user_profile'（add_memory 自动 supersede
 旧画像，保留版本历史）。
-
-开关：
-- MEMORY_PROFILE_REFRESH=1        开启（默认 0）
-- MEMORY_PROFILE_MAX_AGE_DAYS=7   画像刷新间隔（天）
 
 纪律：关闭 / LLM 失败 / 畸形输出 → 确定性兜底（top 内容拼接），不阻塞主流程；
 画像条目在容量淘汰中受保护。
@@ -14,7 +10,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Callable, Optional
 
 from src.memory.memory_items import (
@@ -22,6 +17,7 @@ from src.memory.memory_items import (
     add_memory,
     list_memories,
 )
+from src.utils.env import env_flag, env_int
 
 
 PROFILE_ENTITY = "user_profile"
@@ -40,18 +36,12 @@ PROFILE_PROMPT = """你是用户画像聚合模块。根据用户的长期记忆
 - 直接输出画像内容（可用 "；" 分隔多条），不要解释、不要 markdown。"""
 
 
-_TRUTHY = {"1", "true", "yes", "on", "y"}
-
-
 def profile_enabled() -> bool:
-    return os.getenv("MEMORY_PROFILE_REFRESH", "0").strip().lower() in _TRUTHY
+    return env_flag("MEMORY_PROFILE_REFRESH")
 
 
 def profile_max_age_days() -> int:
-    try:
-        return max(1, int(os.getenv("MEMORY_PROFILE_MAX_AGE_DAYS", "7")))
-    except (TypeError, ValueError):
-        return 7
+    return max(1, env_int("MEMORY_PROFILE_MAX_AGE_DAYS", 7))
 
 
 def _score(item: dict) -> float:

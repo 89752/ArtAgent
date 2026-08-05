@@ -18,7 +18,6 @@ import api
 from src.data import documents_store
 from src.memory import conversations as conv_mod
 from src.memory import summary as summary_mod
-from src.memory import store as prefs_mod
 from src.memory import feedback as fb_mod
 from src.observability import runs as runs_mod
 from src.tasks import store as tasks_mod
@@ -31,8 +30,6 @@ conv_mod._DB_PATH = Path(_TMP) / "conversations.db"
 conv_mod._conn = None
 summary_mod._DB_PATH = Path(_TMP) / "conversations.db"
 summary_mod._conn = None
-prefs_mod._DB_PATH = Path(_TMP) / "preferences.db"
-prefs_mod._conn = None
 fb_mod._DB_PATH = Path(_TMP) / "feedback.db"
 fb_mod._conn = None
 runs_mod._DB_PATH = Path(_TMP) / "observability.db"
@@ -138,9 +135,12 @@ def test_image_route_serves_and_blocks_traversal(client):
     # 路径穿越 → 404
     r = client.get("/api/images/..%2F..%2Fapi.py")
     assert r.status_code == 404
-    # 真实 SemArt 图片 → 200；CI 等无数据环境 → 404（SemArt/ 被 gitignore）
+    # 真实图片 → 200（core 镜像优先，SemArt 回退）；CI 等无数据环境 → 404
     r = client.get("/api/images/28496-early05.jpg")
-    if Path("SemArt/Images/28496-early05.jpg").exists():
+    img_path = Path("data/core/images/28496-early05.jpg")
+    if not img_path.exists():
+        img_path = Path("SemArt/Images/28496-early05.jpg")
+    if img_path.exists():
         assert r.status_code == 200
         assert r.headers.get("cache-control", "").startswith("public")
     else:

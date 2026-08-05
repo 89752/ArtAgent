@@ -1,4 +1,4 @@
-"""结构化事件流（P0-3 业务/渲染解耦）。
+"""结构化事件流（业务/渲染解耦）。
 
 Agent 内核只产出结构化事件；Web 渲染器（web/service.py）与 OpenAI 兼容
 API（platform/openai_api.py）各自消费，互不耦合。

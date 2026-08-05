@@ -1,8 +1,8 @@
-"""
-Tool: Image Lookup（含视觉分析能力）
+"""图像查找与视觉分析工具（image_lookup）。
 
-从 SemArt 本地图片资源中查找画作配图；analyze=True 时对定位到的
-单幅画作调用视觉模型分析（构图/色彩/笔触）。
+从核心库图片资源中查找画作配图：本地文件优先 data/core/images、
+回退 SemArt/Images，网络 URL 直接直通；analyze=True 时对定位到的
+单幅画作调用视觉模型分析（构图/色彩/笔触，本地与网络图均支持）。
 
 设计原则：默认只查找返回路径（快、免费），LLM 判断确实需要"看图
 分析"时才传 analyze=True 触发视觉模型调用（慢、消耗 API 额度）。
@@ -22,10 +22,13 @@ from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 
 from src.data.access import fuzzy_match, row_to_artwork_dict
+from src.utils.http import download_bytes
 
 load_dotenv()
 
 _DATA_DIR = Path(os.getenv("SEMART_DATA_DIR", "./SemArt"))
+CORE_CSV_PATH = Path(os.getenv("CORE_DATA_PATH", "./data/core/artworks_core.csv"))
+CORE_IMAGES_DIR = CORE_CSV_PATH.parent / "images"
 
 
 # ------------------------------------------------------------------ #
@@ -34,9 +37,12 @@ _DATA_DIR = Path(os.getenv("SEMART_DATA_DIR", "./SemArt"))
 
 
 def _resolve_path(image_file: str) -> str:
-    """把 IMAGE_FILE 字段解析成完整本地路径字符串。"""
-    p = _DATA_DIR / "Images" / image_file
-    return str(p) if p.exists() else ""
+    """把图片文件名解析成完整本地路径：优先 data/core/images，回退 SemArt/Images。"""
+    for base in (CORE_IMAGES_DIR, _DATA_DIR / "Images"):
+        p = base / image_file
+        if p.exists():
+            return str(p)
+    return ""
 
 
 def lookup_images(
@@ -159,27 +165,58 @@ def _find_image_file(artwork_query: str) -> Optional[str]:
 
 
 def _analyze_image_file(image_file: str, analysis_focus: str) -> dict:
-    """对已定位的 IMAGE_FILE 调用视觉模型分析，返回结构化结果。"""
-    if image_file.startswith(("http://", "https://")):
-        # core 图是 URL：视觉模型暂不支持直接读 URL，返回提示（本地 SemArt 图不受影响）
+    """对已定位的图片调用视觉模型分析，返回结构化结果。
+
+    支持本地图片（data/core/images，回退 SemArt/Images）与网络 URL；
+    元数据统一从当前生效数据源（core）取，不再依赖旧 SemArt CSV。
+    """
+    # 1. 元数据：从当前数据源按图片列精确匹配
+    from src.retrieval.hybrid import get_hybrid_retriever
+    from src.retrieval.structured_retriever import get_structured_retriever
+
+    dataset_id = get_hybrid_retriever().active_dataset
+    retriever = get_structured_retriever(dataset_id)
+    schema = retriever.schema
+    df = retriever.df
+    img_col = schema.image_col
+    metadata = None
+    if img_col and img_col in df.columns:
+        matched = df[df[img_col].astype(str).str.lower() == str(image_file).lower()]
+        if not matched.empty:
+            # 分析场景保留完整数据集描述（LLM 需要全文，不要 200 字截断）
+            metadata = row_to_artwork_dict(matched.iloc[0], snippet_len=None)
+    if metadata is None:
         return {
             "success": False,
-            "error": "URL 图片暂不支持视觉分析（核心库图片）",
+            "error": f"在核心库中找不到图片记录：{image_file}",
             "image_file": image_file,
         }
-    from src.data.loader import get_dataset
 
-    df = get_dataset().all
-    row = df[df["IMAGE_FILE"] == image_file].iloc[0]
-    # 分析场景保留完整数据集描述（LLM 需要全文，不要 200 字截断）
-    metadata = row_to_artwork_dict(row, snippet_len=None)
-
-    image_path = _DATA_DIR / "Images" / image_file
-    if not image_path.exists():
+    # 2. 取图片字节：URL 下载；本地优先 data/core/images，回退 SemArt/Images
+    try:
+        if image_file.startswith(("http://", "https://")):
+            data = download_bytes(image_file)
+            image_ext = image_file.rsplit(".", 1)[-1].lower().split("?")[0]
+            if image_ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
+                image_ext = "jpeg"
+        else:
+            image_path = _resolve_path(image_file)
+            if not image_path:
+                return {
+                    "success": False,
+                    "error": f"图片文件不存在：{image_file}",
+                    "metadata": metadata,
+                }
+            data = Path(image_path).read_bytes()
+            image_ext = Path(image_path).suffix.lstrip(".").lower()
+        if image_ext == "jpg":
+            image_ext = "jpeg"
+    except Exception as e:  # noqa: BLE001 —— 读取/下载失败返回结构化错误
         return {
             "success": False,
-            "error": f"图片文件不存在：{image_path}",
+            "error": f"图片读取失败：{e}",
             "metadata": metadata,
+            "image_file": image_file,
         }
 
     prompt = _ANALYSIS_FOCUS_PROMPTS.get(
@@ -195,10 +232,7 @@ def _analyze_image_file(image_file: str, analysis_focus: str) -> dict:
         f"{prompt}\n请用中文回答。"
     )
 
-    image_ext = image_path.suffix.lstrip(".").lower()
-    if image_ext == "jpg":
-        image_ext = "jpeg"
-    image_b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    image_b64 = base64.b64encode(data).decode("utf-8")
 
     try:
         llm = _get_vision_llm()
@@ -245,7 +279,7 @@ def image_lookup(
     analysis_focus: str = "general",
 ):
     """
-    从 SemArt 本地图片库查找画作配图；analyze=True 时对定位到的画作做视觉分析。
+    从核心库图片资源查找画作配图；analyze=True 时对定位到的画作做视觉分析。
 
     ⚠️ 成本规则：analyze=True 调用付费视觉模型且很慢（单幅 20-30 秒）。
     只有用户明确要求"看图分析"某幅具体画作（构图/色彩/笔触）时才传 True；

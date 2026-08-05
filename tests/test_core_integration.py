@@ -1,6 +1,6 @@
 # tests/test_core_integration.py
 """
-M3 运行时改造纯单测：core 数据源接入（RetrievalSource / _format_result /
+core 数据源接入运行时改造纯单测：RetrievalSource / _format_result /
 _thumb_data_uri / 懒注册门控）。不联网、不加载模型、不依赖真实 core 数据。
 """
 

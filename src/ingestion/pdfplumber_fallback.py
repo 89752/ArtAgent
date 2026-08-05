@@ -1,5 +1,5 @@
 """
-文字路线兜底解析器：pdfplumber（Stage 3）。
+文字路线兜底解析器：pdfplumber。
 
 定位：MinerU 为主力（版面理解、表格/公式识别），pdfplumber 仅在
 MinerU 环境不可用时兜底——它没有版面理解能力，产出全部为 text 块，
