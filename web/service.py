@@ -823,6 +823,7 @@ def ingest_document(
     pdf_path: str,
     kb_id: str,
     task_id: str | None = None,
+    force_pdfplumber: bool = False,
 ) -> None:
     """后台任务入口（BackgroundTasks）：跑入库流水线，异常已落 failed 状态。
 
@@ -834,11 +835,19 @@ def ingest_document(
         if task_id:
             tasks_store.update_task(task_id, status="processing")
         try:
-            ingest_pdf(pdf_path, doc_id, doc_name=doc_name, kb_id=kb_id)
+            ingest_pdf(
+                pdf_path, doc_id, doc_name=doc_name, kb_id=kb_id,
+                force_pdfplumber=force_pdfplumber,
+            )
             if task_id:
                 tasks_store.update_task(task_id, status="done", progress=100)
-        except Exception:
+        except Exception as e:
             logger.exception("ingest_document failed: %s", doc_id)
+            from src.data import documents_store
+
+            documents_store.update_document(
+                doc_id, status="failed", error=str(e)[:300]
+            )
             if task_id:
                 tasks_store.update_task(task_id, status="failed", error="文档解析失败")
 

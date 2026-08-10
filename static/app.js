@@ -30,6 +30,7 @@ const genId = () => (crypto.randomUUID
   : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10));
 
 const LOGO = "/static/emblem.svg";
+const UPLOAD_MAX_BYTES = 50 * 1024 * 1024;  // 与后端默认 UPLOAD_MAX_MB=50 对齐
 
 const state = {
   sid: genId(),
@@ -97,6 +98,11 @@ const dom = {
   confirmText:   $("#confirm-text"),
   confirmOk:     $("#confirm-ok"),
   confirmCancel: $("#confirm-cancel"),
+  oversizeModal: $("#oversize-modal"),
+  oversizeTitle: $("#oversize-title"),
+  oversizeText:  $("#oversize-text"),
+  oversizeSplit: $("#oversize-split"),
+  oversizePdfplumber: $("#oversize-pdfplumber"),
   toast:         $("#toast"),
   memoryPanel:   $("#memory-panel"),
   memList:       $("#mem-list"),
@@ -1128,6 +1134,9 @@ function loadChipsFor(sid) {
   const saved = pendingChips.get(sid);
   state.chips = saved ? saved : restoreChipsFromStorage(sid);
   renderChips();
+  // 用服务端最新文档状态校准 chip，避免 localStorage 残留的“解析中”误导
+  if (docsById.size) syncChips([...docsById.values()]);
+  persistChips(sid);
 }
 
 function persistChips(sid) {
@@ -1191,6 +1200,13 @@ function renderChips() {
     } else st.classList.add("warn");
     if (c.error) chip.setAttribute("data-tip", c.error);
 
+    if (c.status === "failed" && c.doc_id) {
+      const rt = el("button", "chip-retry"); rt.type = "button"; rt.textContent = "↻";
+      rt.setAttribute("data-tip", "重新解析");
+      rt.setAttribute("aria-label", `重新解析 ${c.name}`);
+      rt.addEventListener("click", () => retryDocument(c.doc_id));
+      chip.appendChild(rt);
+    }
     const x = el("button", "chip-x"); x.type = "button"; x.textContent = "×";
     x.setAttribute("data-tip", "移除附件");
     x.setAttribute("aria-label", `移除附件 ${c.name}`);
@@ -1200,7 +1216,31 @@ function renderChips() {
   }
 }
 
-function uploadFiles(files) {
+let oversizeResolve = null;
+
+function askOversize(name) {
+  return new Promise((resolve) => {
+    oversizeResolve = resolve;
+    dom.oversizeTitle.textContent = `《${name}》超过 50MB`;
+    dom.oversizeText.textContent =
+      "拆分上传会保留高质量解析（MinerU），并按页拆成多份文档入库；" +
+      "直接上传则改用 pdfplumber 本地解析（不调 MinerU，版面/表格质量较低）。";
+    dom.oversizeModal.hidden = false;
+    dom.oversizeSplit.focus();
+  });
+}
+
+function resolveOversize(mode) {
+  dom.oversizeModal.hidden = true;
+  if (oversizeResolve) { oversizeResolve(mode); oversizeResolve = null; }
+}
+
+dom.oversizeSplit.addEventListener("click", () => resolveOversize("split"));
+dom.oversizePdfplumber.addEventListener("click", () => resolveOversize("pdfplumber"));
+dom.oversizeModal.querySelector(".modal-backdrop")
+  .addEventListener("click", () => resolveOversize(""));
+
+async function uploadFiles(files) {
   const sidAtUpload = state.sid;
   for (const f of files) {
     const ext = (f.name.split(".").pop() || "").toLowerCase();
@@ -1214,12 +1254,21 @@ function uploadFiles(files) {
       error: "",
     };
     state.chips.set(entry.id, entry);
-    uploadDoc(f, entry, sidAtUpload);
+    if (entry.kind === "pdf" && f.size > UPLOAD_MAX_BYTES) {
+      const mode = await askOversize(f.name);
+      if (!mode) {
+        state.chips.delete(entry.id);
+        continue;
+      }
+      uploadDoc(f, entry, sidAtUpload, mode);
+    } else {
+      uploadDoc(f, entry, sidAtUpload);
+    }
   }
   renderChips();
 }
 
-function uploadDoc(file, entry, sidAtUpload) {
+function uploadDoc(file, entry, sidAtUpload, oversize = "") {
   uploadBusy += 1;
   dom.upload.disabled = true;
   const xhr = new XMLHttpRequest();
@@ -1238,12 +1287,45 @@ function uploadDoc(file, entry, sidAtUpload) {
     let j = {};
     try { j = JSON.parse(xhr.responseText || "{}"); } catch (_) { /* ignore */ }
     if (xhr.status >= 400 || !j.ok) {
+      if (j.code === "oversized") {
+        state.chips.delete(entry.id);
+        renderChips();
+        toast(j.error || "文件超过大小限制", "err");
+        finishUpload();
+        return;
+      }
       entry.status = "failed";
       entry.error = j.error || `上传失败（HTTP ${xhr.status}）`;
       entry.progress = null;
       renderChips();
       toast(entry.error, "err");
     } else {
+      if (j.split) {
+        // 拆分后的各部分像普通附件一样显示在输入区，随轮询实时更新解析状态
+        state.chips.delete(entry.id);
+        for (const d of (j.documents || [])) {
+          const partEntry = {
+            id: "part-" + genId(),
+            doc_id: d.doc_id,
+            name: d.doc_name,
+            size: null,
+            kind: "pdf",
+            status: "processing",
+            error: "",
+          };
+          state.chips.set(partEntry.id, partEntry);
+          if (chipStillPending(partEntry, sidAtUpload)) {
+            recordAttachment(partEntry, sidAtUpload);
+          }
+        }
+        renderChips();
+        persistChips(sidAtUpload);
+        docPollDelay = 3000;   // 新拆分：重置轮询退避
+        toast(`已拆分为 ${j.count || 0} 份，正在后台解析…`);
+        loadDocuments();
+        finishUpload();
+        return;
+      }
       entry.doc_id = j.doc_id;
       entry.kind = j.kind || entry.kind;
       entry.status = "processing";
@@ -1274,6 +1356,7 @@ function uploadDoc(file, entry, sidAtUpload) {
 
   const fd = new FormData();
   fd.append("file", file);
+  fd.append("oversize", oversize);
   xhr.send(fd);
 }
 
@@ -1464,6 +1547,13 @@ function renderDocuments(list) {
       okBtn.addEventListener("click", () => openSchemaModal(d));
       actions.appendChild(okBtn);
     }
+    if (d.status === "failed") {
+      const retryBtn = el("button", "doc-retry"); retryBtn.type = "button";
+      retryBtn.textContent = "重试";
+      retryBtn.setAttribute("data-tip", d.error || "重新解析");
+      retryBtn.addEventListener("click", () => retryDocument(d.doc_id));
+      actions.appendChild(retryBtn);
+    }
     if (d.status !== "processing" && d.status !== "pending") {
       const delBtn = el("button", "doc-delete"); delBtn.type = "button";
       delBtn.textContent = "×"; delBtn.setAttribute("data-tip", "删除文档及关联向量");
@@ -1473,6 +1563,22 @@ function renderDocuments(list) {
     }
     item.append(ico, name, badge, actions);
     dom.docList.appendChild(item);
+  }
+}
+
+async function retryDocument(docId) {
+  try {
+    const res = await fetch(`/api/tasks/${docId}/retry`, { method: "POST" });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !j.ok) { toast(j.error || "重试失败", "err"); return; }
+    toast("已重新加入解析队列");
+    for (const c of state.chips.values()) {
+      if (c.doc_id === docId) { c.status = "processing"; c.error = ""; }
+    }
+    renderChips();
+    loadDocuments();
+  } catch (e) {
+    toast("重试失败：" + e.message, "err");
   }
 }
 
@@ -1689,6 +1795,7 @@ function restoreFocus() {
 function activeModalContainer() {
   if (!dom.confirmModal.hidden) return dom.confirmModal;
   if (!dom.schemaModal.hidden) return dom.schemaModal;
+  if (!dom.oversizeModal.hidden) return dom.oversizeModal;
   if (!dom.memoryPanel.hidden) return dom.memoryPanel;
   if (!dom.library.hidden) return dom.library;
   return null;
@@ -1710,6 +1817,7 @@ document.addEventListener("keydown", (e) => {
     if (fbPanel) { fbPanel.remove(); return; }
     if (!dom.confirmModal.hidden) closeConfirm();
     else if (!dom.schemaModal.hidden) closeSchemaModal();
+    else if (!dom.oversizeModal.hidden) resolveOversize("");
     else if (!dom.library.hidden) closeLibrary();
     else if (!dom.memoryPanel.hidden) closeMemoryPanel();
     else if (dom.app.classList.contains("side-open")) closeSidebar();

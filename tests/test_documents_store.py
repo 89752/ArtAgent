@@ -48,6 +48,15 @@ def test_add_and_get_document():
     assert doc["status"] == "processing"
 
 
+def test_upsert_document_updates_status_on_existing():
+    _reset()
+    documents_store.add_document(doc_id="pdf-1", kind="pdf", status="processing")
+    documents_store.upsert_document("pdf-1", status="done", text_chunks=3)
+    doc = documents_store.get_document("pdf-1")
+    assert doc["status"] == "done"
+    assert doc["text_chunks"] == 3
+
+
 def test_update_document():
     _reset()
     documents_store.add_document(doc_id="pdf-2", kind="pdf")

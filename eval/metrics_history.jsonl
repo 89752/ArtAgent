@@ -1,3 +1,6 @@
 {"ts": "2026-08-05 15:50:57", "retrieval": {"total": 100, "hits": 90, "recall_at_k": 0.9}}
 {"ts": "2026-08-05 15:54:13", "retrieval": {"total": 20, "hits": 18, "recall_at_k": 0.9}}
 {"ts": "2026-08-05 16:05:01", "retrieval": {"total": 100, "hits": 90, "recall_at_k": 0.9}}
+{"ts": "2026-08-07 09:02:10", "adversarial": {"total": 10, "ok": 9, "skipped": 0}}
+{"ts": "2026-08-07 10:06:02", "adversarial": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-07 10:17:08", "adversarial": {"total": 10, "ok": 10, "skipped": 0}}

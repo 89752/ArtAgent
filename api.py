@@ -41,7 +41,7 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, Form, Request, UploadFile
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
@@ -369,11 +369,15 @@ async def chat(payload: ChatIn, request: Request):
 
 
 # ── 文档上传与入库（PDF / 表格） ──
-_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50MB
+_UPLOAD_MAX_BYTES = int(os.getenv("UPLOAD_MAX_MB", "50")) * 1024 * 1024
 
 
 @app.post("/api/documents/upload")
-async def upload_document(file: UploadFile, background: BackgroundTasks):
+async def upload_document(
+    file: UploadFile,
+    background: BackgroundTasks,
+    oversize: str = Form(""),
+):
     """上传 PDF/表格：保存 → BackgroundTasks 后台处理 → 前端轮询进度。
 
     文件类型路由（零模型调用）：.pdf → PDF 解析入库；
@@ -394,10 +398,47 @@ async def upload_document(file: UploadFile, background: BackgroundTasks):
     if not data:
         return JSONResponse({"ok": False, "error": "空文件"}, status_code=400)
     if len(data) > _UPLOAD_MAX_BYTES:
-        return JSONResponse(
-            {"ok": False, "error": "文件超过 50MB 限制"}, status_code=400
-        )
+        if kind == "pdf" and oversize == "split":
+            from src.ingestion.pdf_splitter import split_pdf
 
+            parts = split_pdf(data, _UPLOAD_MAX_BYTES, filename)
+            docs = []
+            for part_name, part_bytes in parts:
+                saved = service.save_upload(part_name, part_bytes)
+                tid = tasks_store.create_task(
+                    type="ingest_pdf",
+                    task_id=saved["doc_id"],
+                    payload={
+                        "doc_id": saved["doc_id"],
+                        "doc_name": saved["doc_name"],
+                        "file_path": saved["file_path"],
+                        "kb_id": saved["kb_id"],
+                        "kind": "pdf",
+                    },
+                )
+                background.add_task(
+                    service.ingest_document,
+                    saved["doc_id"], saved["doc_name"], saved["file_path"],
+                    saved["kb_id"], task_id=tid,
+                )
+                docs.append({"doc_id": saved["doc_id"], "doc_name": saved["doc_name"]})
+            return JSONResponse({
+                "ok": True, "split": True,
+                "count": len(docs), "documents": docs,
+            })
+        if kind != "pdf" or oversize != "pdfplumber":
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "文件超过 50MB 限制",
+                    "code": "oversized",
+                    "choices": ["split", "pdfplumber"],
+                    "max_bytes": _UPLOAD_MAX_BYTES,
+                },
+                status_code=400,
+            )
+
+    force_pdfplumber = oversize == "pdfplumber"
     saved = service.save_upload(filename, data)
     # 任务化：task_id 复用 doc_id，后台解析全程可查可重试（响应形状不变）
     task_id = tasks_store.create_task(
@@ -409,6 +450,7 @@ async def upload_document(file: UploadFile, background: BackgroundTasks):
             "file_path": saved["file_path"],
             "kb_id": saved["kb_id"],
             "kind": kind,
+            "force_pdfplumber": force_pdfplumber,
         },
     )
     if kind == "table":
@@ -422,6 +464,7 @@ async def upload_document(file: UploadFile, background: BackgroundTasks):
             service.ingest_document,
             saved["doc_id"], saved["doc_name"], saved["file_path"], saved["kb_id"],
             task_id=task_id,
+            force_pdfplumber=force_pdfplumber,
         )
     return JSONResponse(
         {"ok": True, "doc_id": saved["doc_id"], "doc_name": saved["doc_name"],
@@ -461,6 +504,10 @@ async def retry_task(task_id: str, background: BackgroundTasks):
     doc_name = payload.get("doc_name") or "文档"
     file_path = payload.get("file_path") or ""
     kb_id = payload.get("kb_id") or "default"
+    force_pdfplumber = bool(payload.get("force_pdfplumber"))
+    # 同步把文档状态重置为解析中，避免界面一直停留在失败
+    if documents_store.get_document(doc_id):
+        documents_store.update_document(doc_id, status="processing", error="")
     if payload.get("kind") == "table":
         background.add_task(
             service.ingest_table_doc,
@@ -470,6 +517,7 @@ async def retry_task(task_id: str, background: BackgroundTasks):
         background.add_task(
             service.ingest_document,
             doc_id, doc_name, file_path, kb_id, task_id=task_id,
+            force_pdfplumber=force_pdfplumber,
         )
     return JSONResponse({"ok": True, "task": tasks_store.get_task(task_id)})
 

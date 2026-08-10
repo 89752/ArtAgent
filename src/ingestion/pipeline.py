@@ -74,7 +74,8 @@ def _mineru_available() -> bool:
 
 
 def _parse_text_route(
-    pdf_path: str, text_pages: list[int], plan: DocRoutePlan, work_dir: Path
+    pdf_path: str, text_pages: list[int], plan: DocRoutePlan, work_dir: Path,
+    force_pdfplumber: bool = False,
 ) -> tuple[list, set[int]]:
     """
     文字路线解析，返回 (blocks, 需转多模态整页图的页码集合)。
@@ -85,7 +86,7 @@ def _parse_text_route(
     if not text_pages:
         return [], set()
     forced = {p.page_no for p in plan.pages if p.force_mineru} & set(text_pages)
-    if _mineru_available():
+    if not force_pdfplumber and _mineru_available():
         try:
             return mineru_parse_pages(pdf_path, text_pages, work_dir=work_dir), set()
         except Exception as e:  # noqa: BLE001 — 云解析失败不拖垮整个入库
@@ -100,7 +101,9 @@ def _parse_text_route(
 # ------------------------------------------------------------------ #
 
 
-def _parse_ocr_route(pdf_path: str, mm_pages: list[int], work_dir) -> list:
+def _parse_ocr_route(
+    pdf_path: str, mm_pages: list[int], work_dir, force_pdfplumber: bool = False
+) -> list:
     """多模态/扫描页尝试 MinerU OCR：把扫描文字抽成可检索的 text blocks。
 
     这是"扫描件里的大段文字"进入文字层的正解（可语义检索，避免全靠视觉读图）。
@@ -108,6 +111,8 @@ def _parse_ocr_route(pdf_path: str, mm_pages: list[int], work_dir) -> list:
     """
     if not mm_pages:
         return []
+    if force_pdfplumber:
+        return []  # 超大文件选择 pdfplumber 时，扫描页保持纯图像路线（不调 MinerU OCR）
     if os.getenv("MINERU_OCR", "1").strip().lower() in ("0", "false", "no"):
         return []
     if not mineru_available():
@@ -180,6 +185,7 @@ def ingest_pdf(
     doc_name: str = "",
     kb_id: str = "default",
     work_dir: Optional[Path] = None,
+    force_pdfplumber: bool = False,
 ) -> dict:
     """
     PDF 入库主流程（同步执行；Web 层用 BackgroundTasks 包成后台任务）。
@@ -213,7 +219,9 @@ def ingest_pdf(
         mm_pages = [p.page_no for p in plan.pages if p.route in ("multimodal", "dual")]
 
         # 2. 文字路线：MinerU 优先、pdfplumber 兜底（公式密集页退多模态）
-        blocks, extra_mm = _parse_text_route(pdf_path, text_pages, plan, work_dir)
+        blocks, extra_mm = _parse_text_route(
+            pdf_path, text_pages, plan, work_dir, force_pdfplumber=force_pdfplumber
+        )
         if extra_mm:
             mm_pages = sorted(set(mm_pages) | extra_mm)
             logger.info("[ingest] 公式密集页退多模态：%s", sorted(extra_mm))
@@ -224,7 +232,9 @@ def ingest_pdf(
         #    仅处理纯 multimodal 页；dual 页文字已被文字路线（MinerU 自带 OCR）抽取，
         #    再 OCR 会重复解析与重复 chunk。
         ocr_pages = [p.page_no for p in plan.pages if p.route == "multimodal"]
-        ocr_blocks = _parse_ocr_route(pdf_path, ocr_pages, work_dir)
+        ocr_blocks = _parse_ocr_route(
+            pdf_path, ocr_pages, work_dir, force_pdfplumber=force_pdfplumber
+        )
         if ocr_blocks:
             ocr_chunks = chunk_blocks(ocr_blocks, doc_id, kb_id=kb_id)
             n_chunks += index_text_chunks(ocr_chunks, doc_name=doc_name)

@@ -257,6 +257,7 @@ def upsert_document(
     if get_document(doc_id) is None:
         add_document(doc_id=doc_id, kind=kind, status=status, **fields)
     else:
+        fields["status"] = status  # status 是命名参数，不会进 fields，必须显式补回
         update_document(doc_id, **fields)
 
 

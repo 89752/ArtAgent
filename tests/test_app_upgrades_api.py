@@ -134,7 +134,7 @@ def test_tasks_api_and_retry(client, monkeypatch):
 
     calls = []
 
-    def fake_ingest(doc_id, doc_name, pdf_path, kb_id, task_id=None):
+    def fake_ingest(doc_id, doc_name, pdf_path, kb_id, task_id=None, force_pdfplumber=False):
         calls.append((doc_id, task_id))
 
     monkeypatch.setattr(service, "ingest_document", fake_ingest)
