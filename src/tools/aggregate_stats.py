@@ -11,6 +11,8 @@ from typing import Optional
 import pandas as pd
 from langchain_core.tools import tool
 
+from src.data.access import filter_dataframe_by_fields
+
 
 def _column_for(schema, group_by: str) -> Optional[str]:
     """把语义分组名映射到当前 schema 的列名。"""
@@ -28,22 +30,12 @@ def _column_for(schema, group_by: str) -> Optional[str]:
 
 def _apply_filters(df: pd.DataFrame, schema, filters: Optional[dict]) -> pd.DataFrame:
     """按 author/school/timeframe 做大小写不敏感包含过滤。"""
-    if not filters:
-        return df
     alias = {
         "author": schema.entity_col,
         "school": schema.school_col,
         "timeframe": schema.group_axis_col,
     }
-    for key, value in filters.items():
-        if not value:
-            continue
-        col = alias.get(key)
-        if col and col in df.columns:
-            df = df[df[col].astype(str).str.lower().str.contains(
-                str(value).lower(), na=False, regex=False
-            )]
-    return df
+    return filter_dataframe_by_fields(df, alias, filters)
 
 
 @tool

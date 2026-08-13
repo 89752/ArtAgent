@@ -101,10 +101,10 @@ def read_page_image_impl(
         "用中文回答，分小节输出。"
     )
 
-    suffix = path.suffix.lstrip(".").lower()
-    if suffix == "jpg":
-        suffix = "jpeg"
-    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    from src.utils.http import load_image_bytes
+
+    data, suffix = load_image_bytes(str(path))
+    b64 = base64.b64encode(data).decode("ascii")
 
     try:
         msg = HumanMessage(

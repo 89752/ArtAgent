@@ -1,6 +1,7 @@
 """P1 新工具纯单测（mock 数据源/网络/视觉，秒级）。"""
 
 import json
+import os
 import sys
 import tempfile
 from io import BytesIO
@@ -9,6 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# 本地图片读取白名单扩展点：测试用临时目录生成的图片放行
+os.environ.setdefault("ARTAGENT_IMAGE_ROOTS", tempfile.gettempdir())
 
 from PIL import Image
 
@@ -51,7 +55,7 @@ def test_color_analysis_url_image():
             "src.tools.image_lookup.lookup_images",
             return_value=[{"title": "T", "author": "A", "date": "1900", "image_path": "https://x/1.jpg"}],
         ),
-        patch("src.tools.color_analysis.download_bytes", return_value=_png_bytes()),
+        patch("src.utils.http.download_bytes", return_value=_png_bytes()),
     ):
         out = color_analysis.invoke({"title": "T"})
     assert out[0]["success"] is True
@@ -150,7 +154,7 @@ def test_compare_images_url_images():
                 [{"title": "B", "author": "Y", "date": "1910", "image_path": "https://x/b.jpg"}],
             ],
         ),
-        patch("src.tools.compare_images.download_bytes", return_value=_png_bytes()),
+        patch("src.utils.http.download_bytes", return_value=_png_bytes()),
         patch("src.utils.llm.get_vision_llm", return_value=_FakeVision()),
     ):
         out = compare_images.invoke({"title_a": "A", "title_b": "B"})
@@ -185,8 +189,8 @@ def test_analyze_image_file_url():
             "src.retrieval.structured_retriever.get_structured_retriever",
             return_value=retriever,
         ),
-        patch("src.tools.image_lookup.download_bytes", return_value=_png_bytes()),
-        patch("src.tools.image_lookup._get_vision_llm", return_value=_FakeVision()),
+        patch("src.utils.http.download_bytes", return_value=_png_bytes()),
+        patch("src.utils.llm.get_vision_llm", return_value=_FakeVision()),
     ):
         out = _analyze_image_file("https://x/1.jpg", "general")
     assert out["success"] is True

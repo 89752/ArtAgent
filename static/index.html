@@ -6,7 +6,7 @@
   <meta name="description" content="西方艺术智能助手：围绕艺术作品、艺术家、风格流派与历史背景的 AI 问答与资料管理"/>
   <title>西方艺术智能助手</title>
   <link rel="icon" href="/static/emblem.svg"/>
-  <link rel="stylesheet" href="/static/app.css?v=28"/>
+  <link rel="stylesheet" href="/static/app.css?v=31"/>
   <script>
     /* marked 本地优先，CDN 兜底（离线/内网仍可用） */
     (function () {
@@ -194,7 +194,7 @@
 
         <section class="lib-block">
           <h3>内置核心库</h3>
-          <p class="lib-hint">53,912 条作品 · 8–19 世纪西方艺术（Wikidata + SemArt + AIC），默认参与检索；已确认的表格和上传的 PDF 会自动参与，无需切换。</p>
+          <p class="lib-hint">5.5 万+ 条作品 · 8–19 世纪西方艺术（Wikidata + SemArt + AIC），默认参与检索；已确认的表格和上传的 PDF 会自动参与，无需切换。</p>
         </section>
 
         <section class="lib-block">
@@ -228,32 +228,32 @@
   </div>
 
   <!-- ══════════ 通用确认弹窗 ══════════ -->
-    <div id="confirm-modal" class="modal" hidden role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
-      <div class="modal-backdrop" data-close="confirm"></div>
-      <div class="schema-card confirm-card">
+  <div id="confirm-modal" class="modal" hidden role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="modal-backdrop" data-close="confirm"></div>
+    <div class="schema-card confirm-card">
       <div class="schema-title" id="confirm-title">确认操作</div>
       <div id="confirm-text" class="confirm-text"></div>
       <div class="schema-actions">
         <button id="confirm-cancel" class="btn-schema-cancel" type="button">取消</button>
         <button id="confirm-ok" class="btn-schema-ok danger" type="button">确认</button>
       </div>
+    </div>
+  </div>
+
+  <div id="oversize-modal" class="modal" hidden role="alertdialog" aria-modal="true" aria-labelledby="oversize-title">
+    <div class="modal-backdrop" data-close="oversize"></div>
+    <div class="schema-card confirm-card">
+      <div class="schema-title" id="oversize-title">文件超过 50MB</div>
+      <div id="oversize-text" class="confirm-text"></div>
+      <div class="schema-actions">
+        <button id="oversize-split" class="btn-schema-ok" type="button">拆分上传（推荐，保质量）</button>
+        <button id="oversize-pdfplumber" class="btn-schema-cancel" type="button">用 pdfplumber 直接传</button>
       </div>
     </div>
+  </div>
 
-    <div id="oversize-modal" class="modal" hidden role="alertdialog" aria-modal="true" aria-labelledby="oversize-title">
-      <div class="modal-backdrop" data-close="oversize"></div>
-      <div class="schema-card confirm-card">
-        <div class="schema-title" id="oversize-title">文件超过 50MB</div>
-        <div id="oversize-text" class="confirm-text"></div>
-        <div class="schema-actions">
-          <button id="oversize-split" class="btn-schema-ok" type="button">拆分上传（推荐，保质量）</button>
-          <button id="oversize-pdfplumber" class="btn-schema-cancel" type="button">用 pdfplumber 直接传</button>
-        </div>
-      </div>
-    </div>
-  
-    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="/static/app.js?v=27"></script>
+  <script src="/static/app.js?v=31"></script>
 </body>
 </html>

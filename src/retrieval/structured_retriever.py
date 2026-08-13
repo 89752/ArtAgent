@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 import pandas as pd
 from pydantic import BaseModel
 
-from src.data.access import fuzzy_match
+from src.data.access import fuzzy_match, hit_filters_match
 from src.retrieval.base import RetrievalResult, RetrievalSource
 from src.utils.logging_config import get_logger
 
@@ -83,14 +83,7 @@ _FILTER_KEY_ALIASES: dict[str, tuple[str, ...]] = {
 
 def _metadata_hit_filters(meta: dict, filters: dict) -> bool:
     """向量检索结果的后置过滤：按别名列做大小写不敏感包含匹配。"""
-    for key, value in filters.items():
-        if not value:
-            continue
-        aliases = _FILTER_KEY_ALIASES.get(key, (key,))
-        haystacks = [str(meta.get(a) or "") for a in aliases]
-        if not any(str(value).lower() in h.lower() for h in haystacks):
-            return False
-    return True
+    return hit_filters_match(meta, filters, _FILTER_KEY_ALIASES)
 
 
 def _entity_tokens(names: list[str]) -> list[str]:

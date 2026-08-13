@@ -15,7 +15,7 @@ _BRANCH_NODES = {
 _CORE_NODES = {
     "load_memory", "rewrite_split", "classify", "rag_gate", "direct_answer",
     "ask_user", "multi_retrieve", "general_agent", "general_tools",
-    "reflection", "web_fallback", "save_memory",
+    "reflection", "save_memory",
 }
 
 

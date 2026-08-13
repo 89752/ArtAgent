@@ -59,9 +59,15 @@ def get_vision_llm() -> ChatOpenAI:
     的场景（image_lookup analyze、read_page_image）都走这个视觉实例。
     """
     model = os.getenv("VISION_MODEL", "qwen3.5-omni-plus-2026-03-15")
+    api_key = os.getenv("LLM_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "LLM_API_KEY not found. "
+            "Please set it in your .env file."
+        )
     return ChatOpenAI(
         model=model,
-        api_key=os.getenv("LLM_API_KEY"),
+        api_key=api_key,
         base_url=os.getenv(
             "LLM_BASE_URL",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",

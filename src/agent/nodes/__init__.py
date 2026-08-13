@@ -1,7 +1,6 @@
 """ArtAgent 节点集合（混合架构）。"""
 
 from src.agent.nodes.common import (
-    contextualize,
     rewrite_split,
     classify_intent,
     rag_gate,
@@ -24,7 +23,6 @@ from src.agent.nodes.general import (
 )
 
 __all__ = [
-    "contextualize",
     "rewrite_split",
     "rag_gate",
     "direct_answer",

@@ -272,13 +272,6 @@ class HybridRetriever:
         # 无 dataset_id 属性的检索器（用户 PDF 两路）不受切换影响，始终参与。
         self.active_dataset: str = "core"
 
-    def set_active_dataset(self, dataset_id: str) -> None:
-        """切换当前生效数据源；只允许 core 或已注册的用户表格。"""
-        if dataset_id not in ("core",) and dataset_id not in self._retrievers:
-            raise KeyError(f"未注册的数据源：{dataset_id}")
-        self.active_dataset = dataset_id
-        logger.info("[hybrid] 切换生效数据源 → %s", dataset_id)
-
     def register(self, source: str, retriever: BaseRetriever) -> None:
         """按 source 标签注册一个数据源检索器。"""
         self._retrievers[source] = retriever

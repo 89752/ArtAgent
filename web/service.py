@@ -26,12 +26,6 @@ from urllib.parse import quote
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from src.agent.graph import get_graph
-from src.memory.store import (
-    load_preferences,
-    clear_preferences,
-    list_preferences,
-    delete_preference,
-)
 from src.memory.memory_items import (
     clear_user_memories,
     delete_memory,
@@ -90,6 +84,8 @@ _INTENT_LABELS = {
     "general": "💬 综合问答",
 }
 _NODE_LABELS = {
+    # 注：comp_*/tl_*/rec_* 等旧分支节点已删除（子管线下沉为工具），
+    # 不再保留标签；历史消息里的思考链为已渲染文本，无需回查本表。
     "load_memory": "读取长期记忆",
     "rewrite_split": "改写与拆分",
     "classify": "识别意图",
@@ -97,16 +93,6 @@ _NODE_LABELS = {
     "direct_answer": "直接回答",
     "ask_user": "澄清信息不足",
     "multi_retrieve": "并行检索子任务",
-    "comp_decompose": "拆解对比对象与维度",
-    "comp_retrieve": "分组语义检索",
-    "comp_synthesize": "逐维度综合对比",
-    "tl_subject": "锁定梳理对象",
-    "tl_periods": "按时期收集证据+配图",
-    "tl_synthesize": "编织时间线叙事",
-    "rec_extract": "推理风格特征",
-    "rec_search": "特征向量检索",
-    "rec_filter": "相关性筛选",
-    "rec_synthesize": "组织推荐理由",
     "general_agent": "ReAct 推理",
     "general_tools": "执行工具",
     "reflection": "反思答案质量",
@@ -136,9 +122,10 @@ def _chain_detail(node: str, out: dict) -> str:
     if not isinstance(out, dict):
         return ""
     if node == "load_memory":
-        arts = (out.get("user_preferences") or {}).get("artists") or []
+        prefs = out.get("user_preferences") or {}
+        arts = prefs.get("preferences") or prefs.get("artists") or []
         return (
-            f"已知偏好画家 <span class='hl'>{len(arts)}</span> 位"
+            f"已知偏好 <span class='hl'>{len(arts)}</span> 条"
             if arts
             else "暂无历史偏好"
         )
@@ -435,12 +422,8 @@ def _clear_thread_checkpoint(thread_id: str) -> None:
 
 
 def memory_count() -> int:
-    """已记住的记忆条目数（memory_items 全 kind；空则回退旧偏好表）。"""
-    items = list_memories(WEB_USER_ID)
-    if items:
-        return len(items)
-    prefs = load_preferences(WEB_USER_ID)
-    return len(prefs.get("artists") or []) + len(prefs.get("styles") or [])
+    """已记住的记忆条目数（memory_items 全 kind）。"""
+    return len(list_memories(WEB_USER_ID))
 
 
 def memory_items_list() -> list[dict]:
@@ -471,7 +454,6 @@ def clear_all_memories() -> int:
 
     n = clear_user_memories(WEB_USER_ID)
     delete_user_summaries(WEB_USER_ID)
-    clear_preferences(WEB_USER_ID)
     return n
 
 
@@ -747,24 +729,6 @@ def record_attachment(sid: str, doc_id: str, doc_name: str, kind: str) -> dict:
     return {"ok": True, "duplicated": False}
 
 
-def preferences() -> dict:
-    return load_preferences(WEB_USER_ID)
-
-
-def reset_preferences() -> None:
-    clear_preferences(WEB_USER_ID)
-
-
-def preferences_items() -> list[dict]:
-    """记忆面板：该用户全部偏好分项（kind/value/weight/updated_at）。"""
-    return list_preferences(WEB_USER_ID)
-
-
-def delete_preference_item(kind: str, value: str) -> bool:
-    """记忆面板：单项删除偏好。"""
-    return delete_preference(WEB_USER_ID, kind, value)
-
-
 # ── 文档上传与入库（PDF / 表格） ──
 
 # 并发治理：解析任务信号量（env TASK_PARSE_CONCURRENCY，默认 2），
@@ -880,38 +844,6 @@ def confirm_table(doc_id: str, roles: dict) -> dict:
     from src.ingestion.table_pipeline import confirm_table_schema
 
     return confirm_table_schema(doc_id, roles)
-
-
-def datasets() -> dict:
-    """数据源清单（前端切换器）：核心库 + 所有 active 表格。"""
-    from src.retrieval.hybrid import get_hybrid_retriever
-
-    hybrid = get_hybrid_retriever()
-    items = [{"dataset_id": "core", "name": "核心库（默认）", "kind": "builtin"}]
-    for st in documents():
-        if st.get("kind") == "table" and st.get("status") == "active":
-            items.append(
-                {
-                    "dataset_id": st["dataset_id"],
-                    "name": st.get("display_name")
-                    or st.get("doc_name")
-                    or st["dataset_id"],
-                    "kind": "table",
-                    "doc_id": st["doc_id"],
-                    "rows": st.get("rows", 0),
-                    "supports_timeline": st.get("supports_timeline", False),
-                    "supports_recommendation": st.get("supports_recommendation", False),
-                }
-            )
-    return {"active": hybrid.active_dataset, "items": items}
-
-
-def set_active_dataset(dataset_id: str) -> dict:
-    """切换当前生效数据源。"""
-    from src.retrieval.hybrid import get_hybrid_retriever
-
-    get_hybrid_retriever().set_active_dataset(dataset_id)
-    return {"ok": True, "active": dataset_id}
 
 
 def restore_tables() -> int:

@@ -39,7 +39,7 @@ from unittest.mock import patch
 
 import api
 from web import service
-from src.memory import feedback, store as prefs
+from src.memory import feedback
 from src.tasks import store as tasks
 from src.observability import runs
 
@@ -75,25 +75,6 @@ def test_feedback_api(client):
     assert r.status_code == 422  # rating 仅允许 1/-1
     data = client.get("/api/feedback").json()
     assert data["total"] == 2
-
-
-# ── 记忆面板 ──
-def test_preferences_api(client):
-    prefs.upsert_preference("web_user", "artist", "Monet")
-    prefs.upsert_preference("web_user", "style", "巴洛克")
-    data = client.get("/api/preferences").json()
-    items = {i["value"]: i for i in data["items"]}
-    assert items["Monet"]["kind"] == "preference"
-    assert items["巴洛克"]["kind"] == "preference"
-
-    r = client.delete("/api/preferences/artist/Monet")
-    assert r.status_code == 200
-    assert r.json()["memory"] == 1
-    r = client.delete("/api/preferences/artist/Monet")
-    assert r.status_code == 404
-    r = client.delete("/api/preferences/movement/foo")
-    assert r.status_code == 400
-    prefs.clear_preferences("web_user")
 
 
 def test_memory_api_v2(client):

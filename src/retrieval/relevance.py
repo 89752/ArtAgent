@@ -92,7 +92,7 @@ def llm_relevance_filter(
     prompt = RELEVANCE_FILTER_PROMPT.format(query=query, candidates=numbered)
 
     try:
-        from src.agent.nodes.common import parse_json  # 延迟导入，避免模块级重依赖
+        from src.utils.json_utils import parse_json  # 延迟导入，避免模块级重依赖
 
         model = llm
         if model is None:

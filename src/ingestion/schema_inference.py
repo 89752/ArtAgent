@@ -73,7 +73,7 @@ def infer_table_schema(df: pd.DataFrame, table_name: str = "", llm=None) -> Infe
         sample_rows=sample_for_prompt(df),
     )
     try:
-        from src.agent.nodes.common import parse_json  # 延迟导入，避免模块级重依赖
+        from src.utils.json_utils import parse_json  # 延迟导入，避免模块级重依赖
 
         model = llm
         if model is None:

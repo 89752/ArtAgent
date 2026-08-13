@@ -236,40 +236,25 @@ def delete_user(user_id: str, cascade: bool = True) -> dict:
     result: dict = {"user_id": user_id, "sessions": 0, "preferences": 0,
                     "summaries": 0, "documents": 0, "api_keys": 0}
     if cascade:
-        # 会话/偏好/摘要（级联接口依赖平台集成进度；缺失时跳过并告警）
+        # 会话/偏好/摘要（级联接口依赖平台集成进度；缺失或签名不符时跳过并告警）
         try:
             from src.memory.conversations import delete_user_conversations
 
             result["sessions"] = delete_user_conversations(user_id)
-        except ImportError:
-            logger.warning(
-                "[users] conversations 用户隔离接口尚未集成，跳过会话级联（平台集成待续）"
-            )
+        except (ImportError, TypeError) as e:
+            logger.warning("[users] 会话级联接口缺失或签名不符，跳过：%s", e)
         try:
-            from src.memory.store import clear_preferences
+            from src.memory.memory_items import clear_user_memories
             from src.memory.summary import delete_user_summaries
 
-            clear_preferences(user_id)
+            result["preferences"] = clear_user_memories(user_id)
             result["summaries"] = delete_user_summaries(user_id)
-        except ImportError:
-            logger.warning("[users] 偏好/摘要级联接口缺失，跳过")
+        except (ImportError, TypeError) as e:
+            logger.warning("[users] 偏好/摘要级联接口缺失，跳过：%s", e)
 
-        # 文档：逐个走 service.delete_document（连带 Chroma 向量与上传文件）
-        try:
-            from src.data import documents_store
-            from web.service import delete_document as service_delete_document
-
-            docs = documents_store.list_documents(user_id=user_id)
-            for doc in docs:
-                try:
-                    service_delete_document(doc["doc_id"], user_id=user_id)
-                    result["documents"] += 1
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        "[users] 删除用户文档失败 %s: %s", doc.get("doc_id"), e
-                    )
-        except ImportError:
-            logger.warning("[users] service 文档删除接口尚未就绪，跳过文档级联")
+        # 文档尚未按用户隔离（documents_store 无 user_id 维度）：不级联删除，
+        # 避免误删共享文档；待平台集成用户隔离后再接回。
+        logger.warning("[users] 文档未按用户隔离，跳过文档级联（平台集成待续）")
 
     with _lock:
         conn = _get_conn()

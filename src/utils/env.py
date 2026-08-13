@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import os
 
-_FALSEY = {"0", "false", "no", "off", "n", ""}
+_TRUEY = {"1", "true", "yes", "on", "y"}
 
 
 def env_flag(name: str, default: str = "0") -> bool:
-    """把 1/true/yes/on/y 解析为 True，其余为 False；default 用字符串形式。"""
+    """把 1/true/yes/on/y 解析为 True，其余一律 False（拼写错误不会误开功能）。"""
     raw = os.getenv(name, default).strip().lower()
-    return raw not in _FALSEY
+    return raw in _TRUEY
 
 
 def env_int(name: str, default: int) -> int:

@@ -159,3 +159,36 @@ def format_evidence_block(
         line = line.rstrip(" :|—-")
         lines.append(line)
     return "\n".join(lines)
+
+
+def hit_filters_match(
+    item: dict,
+    filters: dict,
+    aliases: dict | None = None,
+) -> bool:
+    """通用后置过滤：{字段: 值} 大小写不敏感包含匹配；aliases 提供字段别名。"""
+    for key, value in (filters or {}).items():
+        if not value:
+            continue
+        keys = aliases.get(key, (key,)) if aliases else (key,)
+        haystacks = [str(item.get(k) or "") for k in keys]
+        if not any(str(value).lower() in h.lower() for h in haystacks):
+            return False
+    return True
+
+
+def filter_dataframe_by_fields(
+    df: pd.DataFrame,
+    field_map: dict,
+    filters: dict | None = None,
+) -> pd.DataFrame:
+    """按字段映射对 DataFrame 做大小写不敏感包含过滤。"""
+    if not filters:
+        return df
+    for key, value in filters.items():
+        if not value:
+            continue
+        col = field_map.get(key)
+        if col and col in df.columns:
+            df = df[_contains_mask(df, col, value)]
+    return df

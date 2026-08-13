@@ -17,7 +17,12 @@ from typing import Optional
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 
-from src.data.access import EVIDENCE_SNIPPET_LEN, fuzzy_match, row_to_artwork_dict
+from src.data.access import (
+    EVIDENCE_SNIPPET_LEN,
+    fuzzy_match,
+    hit_filters_match,
+    row_to_artwork_dict,
+)
 from src.retrieval.base import RetrievalResult
 
 load_dotenv()
@@ -114,15 +119,13 @@ def _format_result(result: RetrievalResult) -> dict:
 def _artwork_from_schema_row(schema, row: dict) -> dict:
     """按 TableSchema 角色把 df 行/元数据 dict 转成工具契约（title/author/date/...）。
 
-    供 exact_lookup / image_lookup 等结构化检索工具使用，semart 与 core 统一走角色列。
+    字段规整与描述截断统一走 src/data/access.row_to_artwork_dict，
+    避免两套"行 → 工具字典"实现漂移。
     """
     def g(col: Optional[str]) -> str:
         return str(row.get(col) or "") if col else ""
 
-    snippet = g(schema.description_col)
-    if len(snippet) > EVIDENCE_SNIPPET_LEN:
-        snippet = snippet[:EVIDENCE_SNIPPET_LEN] + "..."
-    return {
+    mapped = {
         "title": g(schema.title_col) or g("title"),
         "author": g(schema.entity_col),
         "date": g(schema.date_col),
@@ -130,8 +133,9 @@ def _artwork_from_schema_row(schema, row: dict) -> dict:
         "school": g(schema.school_col),
         "timeframe": g(schema.group_axis_col),
         "image_file": g(schema.image_col),
-        "description_snippet": snippet,
+        "description": g(schema.description_col),
     }
+    return row_to_artwork_dict(mapped, snippet_len=EVIDENCE_SNIPPET_LEN)
 
 
 # ------------------------------------------------------------------ #
@@ -198,13 +202,7 @@ def semantic_search(
 
 def _result_hit_filters(d: dict, filters: dict) -> bool:
     """对格式化结果做结构化过滤（author/school/timeframe 包含匹配）。"""
-    for key, value in filters.items():
-        if not value:
-            continue
-        field = d.get(key) or ""
-        if str(value).lower() not in str(field or "").lower():
-            return False
-    return True
+    return hit_filters_match(d, filters)
 
 
 @tool

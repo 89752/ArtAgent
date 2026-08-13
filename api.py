@@ -8,7 +8,7 @@ ArtAgent Web —— FastAPI 后端。
   · GET  /api/sessions/{sid}     单会话完整消息
   · DELETE /api/sessions/{sid}   删除会话
   · GET  /api/bootstrap          启动数据（场景卡 + 偏好数）
-  · DELETE /api/preferences      清空长期偏好
+  · GET/DELETE /api/memory        记忆面板（列表/清空，含旧偏好统一存储）
   · POST /api/documents/upload   上传 PDF，后台解析入库
   · GET  /api/documents          文档库列表（解析状态/路由分布/chunk 数）
   · GET  /api/documents/{doc_id} 单文档状态（前端轮询进度）
@@ -55,8 +55,6 @@ from src.observability import runs as runs_store
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-_CORE_IMAGES = BASE_DIR / "data" / "core" / "images"
-_SEMART_IMAGES = BASE_DIR / "SemArt" / "Images"  # 回退源（镜像未就绪时）
 logger = logging.getLogger("api")
 
 
@@ -77,10 +75,6 @@ class SchemaIn(BaseModel):
     description_col: str | None = None
     image_col: str | None = None
     display_name: str | None = Field(default=None, max_length=60)
-
-
-class DatasetIn(BaseModel):
-    dataset_id: str = Field(min_length=1, max_length=128)
 
 
 class RenameIn(BaseModel):
@@ -110,6 +104,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # ── 请求治理中间件：request_id 贯穿 + 令牌桶限流 ──
 _rate_lock = threading.Lock()
 _rate_buckets: dict[str, list[float]] = {}
+_rate_last_cleanup = time.time()
 
 
 def _rate_limited(client_ip: str) -> bool:
@@ -124,6 +119,12 @@ def _rate_limited(client_ip: str) -> bool:
     now = time.time()
     window = max(1.0, 60.0 * burst / rpm)  # 桶容量折算窗口
     with _rate_lock:
+        # 定期清理过期 IP 桶，避免长期运行内存微增
+        global _rate_last_cleanup
+        if now - _rate_last_cleanup > 300:
+            for ip in [ip for ip, stamps in _rate_buckets.items() if not stamps]:
+                del _rate_buckets[ip]
+            _rate_last_cleanup = now
         stamps = [t for t in _rate_buckets.get(client_ip, []) if now - t < window]
         if len(stamps) >= burst:
             _rate_buckets[client_ip] = stamps
@@ -174,8 +175,10 @@ def index():
 @app.get("/api/images/{file_name}")
 def artwork_image(file_name: str):
     """本地画作配图静态服务：优先 data/core/images，回退 SemArt/Images。"""
+    from src.utils.images import artwork_image_bases
+
     name = Path(file_name).name
-    for base in (_CORE_IMAGES, _SEMART_IMAGES):
+    for base in artwork_image_bases():
         base = base.resolve()
         path = (base / name).resolve()
         if path.parent == base and path.is_file():
@@ -189,13 +192,17 @@ def artwork_image(file_name: str):
 
 @app.get("/api/bootstrap")
 def bootstrap():
-    """首屏数据：场景卡（含缩略图 data URI）+ 已记忆偏好数。"""
+    """首屏数据：场景卡 + 记忆条数 + 上传大小上限（前端预检用，唯一权威值）。"""
     cards = [
         {"query": c["query"], "text": c["text"],
          "thumb": service._thumb_url(c["image"])}
         for c in service.SCENE_CARDS
     ]
-    return JSONResponse({"cards": cards, "memory": service.memory_count()})
+    return JSONResponse({
+        "cards": cards,
+        "memory": service.memory_count(),
+        "upload_max_bytes": _UPLOAD_MAX_BYTES,
+    })
 
 
 @app.get("/api/sessions")
@@ -241,31 +248,6 @@ async def attach_session_document(sid: str, payload: AttachmentIn):
     return JSONResponse(service.record_attachment(
         sid, payload.doc_id, doc.get("doc_name") or "", doc.get("kind") or ""
     ))
-
-
-@app.delete("/api/preferences")
-def del_preferences():
-    service.reset_preferences()
-    return JSONResponse({"ok": True, "memory": service.memory_count()})
-
-
-@app.get("/api/preferences")
-def get_preferences():
-    """记忆面板：全部偏好分项（kind/value/weight/updated_at）。"""
-    return JSONResponse({"items": service.preferences_items()})
-
-
-@app.delete("/api/preferences/{kind}/{value}")
-def del_preference_item(kind: str, value: str):
-    """记忆面板：单项删除偏好（kind ∈ artist/style，value 需 URL 编码）。"""
-    if kind not in ("artist", "style"):
-        return JSONResponse(
-            {"ok": False, "error": "kind 只支持 artist/style"}, status_code=400
-        )
-    ok = service.delete_preference_item(kind, value)
-    if not ok:
-        return JSONResponse({"ok": False, "error": "偏好项不存在"}, status_code=404)
-    return JSONResponse({"ok": True, "memory": service.memory_count()})
 
 
 @app.get("/api/memory")
@@ -394,7 +376,29 @@ async def upload_document(
             {"ok": False, "error": "仅支持 PDF / CSV / XLSX / XLS 文件"},
             status_code=400,
         )
-    data = await file.read()
+    # 分块读取：未选择拆分/直传模式时，超限立即中止，避免超大文件整份读入内存（OOM）
+    allow_full_read = kind == "pdf" and oversize in ("split", "pdfplumber")
+    max_mb = max(1, _UPLOAD_MAX_BYTES // (1024 * 1024))
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _UPLOAD_MAX_BYTES and not allow_full_read:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"文件超过 {max_mb}MB 限制",
+                    "code": "oversized",
+                    "choices": ["split", "pdfplumber"],
+                    "max_bytes": _UPLOAD_MAX_BYTES,
+                },
+                status_code=400,
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data:
         return JSONResponse({"ok": False, "error": "空文件"}, status_code=400)
     if len(data) > _UPLOAD_MAX_BYTES:
@@ -430,7 +434,7 @@ async def upload_document(
             return JSONResponse(
                 {
                     "ok": False,
-                    "error": "文件超过 50MB 限制",
+                    "error": f"文件超过 {max_mb}MB 限制",
                     "code": "oversized",
                     "choices": ["split", "pdfplumber"],
                     "max_bytes": _UPLOAD_MAX_BYTES,
@@ -538,21 +542,6 @@ async def confirm_schema(doc_id: str, payload: SchemaIn):
     return JSONResponse({"ok": True, "doc": result})
 
 
-@app.get("/api/datasets")
-def get_datasets():
-    """数据源清单（核心库 + 已确认表格）+ 当前生效项（前端切换器用）。"""
-    return JSONResponse(service.datasets())
-
-
-@app.post("/api/dataset/active")
-async def switch_dataset(payload: DatasetIn):
-    """切换当前生效数据源。请求体：{dataset_id}。"""
-    try:
-        return JSONResponse(service.set_active_dataset(payload.dataset_id))
-    except KeyError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
-
-
 @app.get("/api/documents")
 def get_documents():
     return JSONResponse(service.documents())
@@ -571,7 +560,8 @@ def delete_document(doc_id: str):
     except KeyError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
     except Exception as e:  # noqa: BLE001
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        logger.exception("delete_document failed: %s", e)
+        return JSONResponse({"ok": False, "error": "服务器内部错误"}, status_code=500)
     return JSONResponse({"ok": True, "result": result})
 
 

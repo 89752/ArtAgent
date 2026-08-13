@@ -217,6 +217,12 @@ def build_profile_block(
 ) -> str:
     """用户画像块：喜欢的画家 / 风格（带权重）。"""
     parts: list[str] = []
+    # 新语义优先：preferences 为完整陈述（v1 移除后 memory_items 存句子）
+    prefs = preferences.get("preferences") or []
+    if prefs:
+        parts.append("偏好：" + "；".join(str(p) for p in prefs[:8]))
+        block = "；".join(parts)
+        return block[:budget]
     artists = preferences.get("artists") or []
     styles = preferences.get("styles") or []
     if artists:

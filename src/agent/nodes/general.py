@@ -16,32 +16,10 @@ from langgraph.prebuilt import ToolNode
 
 from src.agent.state import AgentState
 from src.agent.prompts import SYSTEM_PROMPT
-from src.tools.retrieval import semantic_search, exact_lookup
-from src.tools.knowledge import query_painter_knowledge
-from src.tools.image_lookup import image_lookup
-from src.tools.page_reader import read_page_image
-from src.tools.web_search import web_search
 from src.tools.guard import ToolDecision, guard_tool_message, validate_args
 from src.skills.loader import register_skills
-from src.tools.memory import remember, recall, forget
-from src.tools.collections import (
-    save_collection,
-    list_collections,
-    get_collection,
-    delete_collection,
-    rename_collection,
-    list_preferences,
-)
-from src.tools.capabilities import (
-    compare_subjects,
-    timeline_by_periods,
-    recommend_with_exclusions,
-)
-from src.tools.color_analysis import color_analysis
-from src.tools.aggregate_stats import aggregate_stats
-from src.tools.compare_images import compare_images
-from src.tools.museum_search import museum_search
-from src.tools.wiki_lookup import wiki_lookup
+from src.tools.registry import GENERAL_TOOLS as CORE_TOOLS
+from src.tools.registry import TOOL_BY_NAME as CORE_TOOL_BY_NAME
 from src.retrieval.relevance import llm_relevance_filter
 from src.utils.llm import get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
@@ -60,37 +38,12 @@ MAX_TOOL_ROUNDS = 5
 # compare_artwork_styles 已删除——外层 Agent 拿到两幅画的元数据后可自行组织对比；
 # analyze_image 并入 image_lookup 的 analyze 参数；
 # read_page_image——Qwen-VL 读取用户上传 PDF 整页图。
-GENERAL_TOOLS = [
-    semantic_search,
-    exact_lookup,
-    query_painter_knowledge,
-    image_lookup,
-    read_page_image,
-    web_search,
-    # 能力工具化：原子子管线逻辑下沉，agent 统一编排
-    compare_subjects,
-    timeline_by_periods,
-    recommend_with_exclusions,
-    # agent 主动记忆
-    remember,
-    recall,
-    forget,
-    # 收藏与偏好
-    save_collection,
-    list_collections,
-    get_collection,
-    delete_collection,
-    rename_collection,
-    list_preferences,
-    # 能力器扩展
-    color_analysis,
-    aggregate_stats,
-    compare_images,
-    museum_search,
-    wiki_lookup,
-] + register_skills()
-
-TOOL_BY_NAME: dict[str, object] = {t.name: t for t in GENERAL_TOOLS}
+_skills = register_skills()
+GENERAL_TOOLS = list(CORE_TOOLS) + _skills
+TOOL_BY_NAME: dict[str, object] = {
+    **CORE_TOOL_BY_NAME,
+    **{t.name: t for t in _skills},
+}
 
 
 # 路由决策注入：路由层判定后，向 general 分支下发"必须调用工具"的

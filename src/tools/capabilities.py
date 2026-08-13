@@ -146,12 +146,12 @@ def recommend_with_exclusions(preference: str, exclude_artists: list[str]) -> di
         {features, liked_artists, candidates: [{author, title, description_snippet}],
          by_artist: {author: [top titles]}, llm_used, llm_calls}
     """
-    from src.agent.nodes.common import parse_json
     from src.agent.prompts import RECOMMENDATION_FEATURE_PROMPT
     from src.retrieval.hybrid import get_hybrid_retriever
     from src.retrieval.structured_retriever import get_structured_retriever
     from src.tools.retrieval import semantic_search
     from src.utils.llm import get_llm
+    from src.utils.json_utils import parse_json
 
     # 1) 主观偏好 → 结构化风格特征（项目核心亮点：检索 query 是 Agent 推理产物）
     prompt = RECOMMENDATION_FEATURE_PROMPT.format(

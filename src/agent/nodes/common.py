@@ -8,8 +8,6 @@ from langchain_core.messages import HumanMessage
 
 from src.agent.state import AgentState
 from src.agent.prompts import (
-    CONTEXTUALIZE_PROMPT,
-    INTENT_CLASSIFIER_PROMPT,
     REFLECTION_PROMPT,
     WEB_FALLBACK_SYNTHESIZE_PROMPT,
 )
@@ -17,7 +15,6 @@ from src.utils.llm import get_llm, get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
 from src.utils.json_utils import parse_json
 from src.data.access import format_evidence_block
-from src.memory.store import load_preferences
 
 logger = get_logger("nodes")
 
@@ -54,37 +51,6 @@ def collect_artworks(docs_by_group: dict[str, list[dict]], limit: int = 8) -> li
             if len(flat) >= limit:
                 return flat
     return flat
-
-
-# ── 多轮指代消解 ────────────────────────────────────────────────
-def contextualize(state: AgentState) -> dict:
-    """
-    用对话历史把带指代的追问改写成独立问题，写回 user_query。
-    下游所有节点都读 user_query，所以在此一处消解即可全局生效。
-    首轮（无历史）直接跳过，不额外调用 LLM。
-    """
-    # 收集本轮之前的人类/助手消息（当前 HumanMessage 是最后一条）
-    prior = [
-        m for m in state.messages[:-1]
-        if isinstance(m, (HumanMessage, AIMessage)) and getattr(m, "content", "")
-    ]
-    if not prior:
-        return {"current_step": "contextualize"}
-
-    def _role(m) -> str:
-        return "用户" if isinstance(m, HumanMessage) else "助手"
-
-    history = "\n".join(
-        f"{_role(m)}：{str(m.content)[:280]}" for m in prior[-6:]
-    )
-    prompt = CONTEXTUALIZE_PROMPT.format(history=history, query=state.user_query)
-    rewritten = get_deterministic_llm().invoke(prompt).content.strip().strip('"').strip()
-
-    if not rewritten or rewritten == state.user_query:
-        return {"current_step": "contextualize"}
-
-    log_event(logger, "contextualize", original=state.user_query, rewritten=rewritten)
-    return {"user_query": rewritten, "current_step": "contextualize"}
 
 
 # ── 查询改写 + 拆分（替代 contextualize） ──────────────────────
@@ -358,13 +324,24 @@ def load_memory(state: AgentState) -> dict:
       由 memory_block 承载更完整的记忆语义。
     """
     from src.agent.context import build_memory_block
-    from src.memory.memory_items import search_memories
+    from src.memory.memory_items import list_memories, search_memories
     from src.memory.memory_items import get_memory_user_id
     from src.memory.profile import load_profile_item
     from src.memory.summary import load_summary, load_summary_item
 
     uid = get_memory_user_id()
-    prefs = load_preferences(uid)
+    pref_items = [
+        i for i in list_memories(uid, scope="user")
+        if i.get("kind") == "preference"
+    ]
+    pref_contents = [str(i.get("content") or "") for i in pref_items]
+    prefs = {
+        # 新语义：preferences 是完整陈述（"用户喜欢莫奈睡莲系列"）；
+        # artists/styles 保留旧键兼容旧消费方（思考链计数/旧 API）。
+        "preferences": pref_contents,
+        "artists": pref_contents,
+        "styles": [],
+    }
     summary = load_summary(state.conversation_id)
     items = search_memories(
         uid,

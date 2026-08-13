@@ -12,24 +12,17 @@
 """
 
 import base64
-import os
-from pathlib import Path
 from typing import Optional
 
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 
 from src.data.access import fuzzy_match, row_to_artwork_dict
-from src.utils.http import download_bytes
+from src.utils.http import load_image_bytes
+from src.utils.images import resolve_artwork_image
 
 load_dotenv()
-
-_DATA_DIR = Path(os.getenv("SEMART_DATA_DIR", "./SemArt"))
-CORE_CSV_PATH = Path(os.getenv("CORE_DATA_PATH", "./data/core/artworks_core.csv"))
-CORE_IMAGES_DIR = CORE_CSV_PATH.parent / "images"
-
 
 # ------------------------------------------------------------------ #
 # 查找定位（不走视觉模型）                                              #
@@ -38,11 +31,7 @@ CORE_IMAGES_DIR = CORE_CSV_PATH.parent / "images"
 
 def _resolve_path(image_file: str) -> str:
     """把图片文件名解析成完整本地路径：优先 data/core/images，回退 SemArt/Images。"""
-    for base in (CORE_IMAGES_DIR, _DATA_DIR / "Images"):
-        p = base / image_file
-        if p.exists():
-            return str(p)
-    return ""
+    return resolve_artwork_image(image_file)
 
 
 def lookup_images(
@@ -127,13 +116,6 @@ _ANALYSIS_FOCUS_PROMPTS = {
 }
 
 
-def _get_vision_llm() -> ChatOpenAI:
-    """返回支持视觉的模型实例（统一走 utils.llm 的共享实例）。"""
-    from src.utils.llm import get_vision_llm
-
-    return get_vision_llm()
-
-
 def _find_image_file(artwork_query: str) -> Optional[str]:
     """
     按标题或文件名查找 IMAGE_FILE。
@@ -195,10 +177,7 @@ def _analyze_image_file(image_file: str, analysis_focus: str) -> dict:
     # 2. 取图片字节：URL 下载；本地优先 data/core/images，回退 SemArt/Images
     try:
         if image_file.startswith(("http://", "https://")):
-            data = download_bytes(image_file)
-            image_ext = image_file.rsplit(".", 1)[-1].lower().split("?")[0]
-            if image_ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
-                image_ext = "jpeg"
+            data, image_ext = load_image_bytes(image_file)
         else:
             image_path = _resolve_path(image_file)
             if not image_path:
@@ -207,10 +186,7 @@ def _analyze_image_file(image_file: str, analysis_focus: str) -> dict:
                     "error": f"图片文件不存在：{image_file}",
                     "metadata": metadata,
                 }
-            data = Path(image_path).read_bytes()
-            image_ext = Path(image_path).suffix.lstrip(".").lower()
-        if image_ext == "jpg":
-            image_ext = "jpeg"
+            data, image_ext = load_image_bytes(image_path)
     except Exception as e:  # noqa: BLE001 —— 读取/下载失败返回结构化错误
         return {
             "success": False,
@@ -235,7 +211,9 @@ def _analyze_image_file(image_file: str, analysis_focus: str) -> dict:
     image_b64 = base64.b64encode(data).decode("utf-8")
 
     try:
-        llm = _get_vision_llm()
+        from src.utils.llm import get_vision_llm
+
+        llm = get_vision_llm()
         msg = HumanMessage(
             content=[
                 {

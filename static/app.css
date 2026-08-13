@@ -594,6 +594,10 @@ body {
   transition: all 0.25s;
 }
 .hist-more:hover { border-color: var(--gold); color: #d9b874; }
+.hist-hint {
+  width: 100%; font-size: 0.72rem; color: #6b7893;
+  text-align: center; padding: 6px 0; font-style: italic;
+}
 
 /* ══════════════ 资料库抽屉 ══════════════ */
 .drawer, .modal { position: fixed; inset: 0; z-index: 50; }

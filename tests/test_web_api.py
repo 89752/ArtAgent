@@ -125,12 +125,6 @@ def test_schema_validation(client):
     assert r.json()["ok"] is False
 
 
-def test_dataset_unknown_rejected(client):
-    r = client.post("/api/dataset/active", json={"dataset_id": "does-not-exist"})
-    assert r.status_code == 404
-    assert r.json()["ok"] is False
-
-
 def test_image_route_serves_and_blocks_traversal(client):
     # 路径穿越 → 404
     r = client.get("/api/images/..%2F..%2Fapi.py")

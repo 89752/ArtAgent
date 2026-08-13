@@ -13,6 +13,10 @@ import threading
 import time
 from typing import Any, Callable
 
+from src.utils.logging_config import get_logger
+
+logger = get_logger("utils.governance")
+
 
 class ToolTimeout(RuntimeError):
     pass
@@ -118,6 +122,14 @@ def governed_invoke(tool: Any, args: dict) -> str:
             if len(payload) > _output_limit():
                 out = _truncate_payload(out, _output_limit())
             return json.dumps(out, ensure_ascii=False, default=str)
+        except ToolTimeout as e:
+            logger.warning(
+                "[govern] 工具 %s 超时（后台线程可能仍在执行，副作用可能已生效）",
+                getattr(tool, "name", "?"),
+            )
+            last_error = e
+            if attempt < retries:
+                time.sleep(0.5 * (attempt + 1))
         except Exception as e:  # noqa: BLE001
             last_error = e
             if attempt < retries:

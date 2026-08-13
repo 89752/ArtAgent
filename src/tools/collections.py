@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from src.memory.memory_items import get_memory_user_id
+from src.memory.memory_items import get_memory_user_id, list_memories
 from src.memory.collections import (
     delete_collection as _delete_collection,
     get_collection as _get_collection,
@@ -15,7 +15,6 @@ from src.memory.collections import (
     rename_collection as _rename_collection,
     save_collection as _save_collection,
 )
-from src.memory.store import load_preferences
 
 
 @tool
@@ -76,5 +75,20 @@ def rename_collection(old_name: str, new_name: str) -> str:
 
 @tool
 def list_preferences() -> dict:
-    """读取用户长期偏好（喜欢的画家/风格，带权重），用于个性化推荐。"""
-    return load_preferences(get_memory_user_id())
+    """读取用户长期偏好条目（内容、实体、重要度、更新时间），用于个性化推荐。"""
+    items = [
+        i for i in list_memories(get_memory_user_id(), scope="user")
+        if i.get("kind") == "preference"
+    ]
+    return {
+        "preferences": [
+            {
+                "content": i.get("content") or "",
+                "entity": i.get("entity") or "",
+                "importance": float(i.get("importance") or 0.5),
+                "updated_at": i.get("updated_at") or "",
+            }
+            for i in items
+        ],
+        "count": len(items),
+    }

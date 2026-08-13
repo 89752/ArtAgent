@@ -30,7 +30,9 @@ const genId = () => (crypto.randomUUID
   : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10));
 
 const LOGO = "/static/emblem.svg";
-const UPLOAD_MAX_BYTES = 50 * 1024 * 1024;  // 与后端默认 UPLOAD_MAX_MB=50 对齐
+// 上传大小上限：以后端 /api/bootstrap 下发的 upload_max_bytes 为准（唯一权威值），
+// 启动未取到时回退 50MB，避免与后端 UPLOAD_MAX_MB 配置不一致。
+let uploadMaxBytes = 50 * 1024 * 1024;
 
 const state = {
   sid: genId(),
@@ -705,7 +707,6 @@ async function send(text, opts = {}) {
             state.sid = evt.session_id;
             updateUrl(state.sid);
           }
-          if (typeof evt.memory === "number") setLevel(evt.memory);
           scrollChat();
         }
       }
@@ -757,6 +758,7 @@ let sessionsMap = new Map();   // sid -> session
 let sessionsTotal = 0;
 let sessionsOffset = 0;
 const SESSIONS_PAGE = 50;
+const SESSIONS_SEARCH_CAP = 500;   // 搜索全量拉取上限（超出部分不覆盖）
 
 async function loadSessions() {
   try {
@@ -780,7 +782,7 @@ async function loadMoreSessions() {
   } catch (e) { console.error(e); }
 }
 
-function renderHistory(list, hasMore) {
+function renderHistory(list, hasMore, searchLimited = false) {
   const prevScroll = dom.history.scrollTop;
   dom.history.innerHTML = "";
   if (!list.length) {
@@ -790,7 +792,10 @@ function renderHistory(list, hasMore) {
   const q = (dom.histFilter.value || "").trim().toLowerCase();
   const filtered = q ? list.filter((s) => (s.title || "").toLowerCase().includes(q)) : list;
   if (!filtered.length) {
-    const e = el("div", "hist-empty"); e.textContent = "无匹配的对话";
+    const e = el("div", "hist-empty");
+    e.textContent = searchLimited
+      ? `无匹配的对话（已搜索最近 ${SESSIONS_SEARCH_CAP} 条，更早的会话可能未覆盖）`
+      : "无匹配的对话";
     dom.history.appendChild(e); dom.history.scrollTop = prevScroll; syncTitle(); return;
   }
   for (const s of filtered) {
@@ -815,6 +820,11 @@ function renderHistory(list, hasMore) {
     more.textContent = "加载更多";
     more.addEventListener("click", loadMoreSessions);
     dom.history.appendChild(more);
+  }
+  if (searchLimited && filtered.length) {
+    const hint = el("div", "hist-hint");
+    hint.textContent = `已搜索最近 ${SESSIONS_SEARCH_CAP} 条；更早的会话不在搜索范围内。`;
+    dom.history.appendChild(hint);
   }
   dom.history.scrollTop = prevScroll;
   syncTitle();
@@ -878,6 +888,7 @@ async function openSession(sid) {
   if (live && live.bubble) {
     state.sid = sid;
     state.title = (sessionsMap.get(sid) || {}).title || state.title;
+    state.pendingRegenerate = false;
     showChat();
     dom.chat.innerHTML = "";
     // 已落库的历史（本轮之前的轮次）
@@ -972,15 +983,11 @@ async function deleteSession(sid, title) {
   loadSessions();
 }
 
-/* ══════════════ 首屏：场景卡 + 记忆入口提示 ══════════════ */
-function setLevel(memory) {
-  // 记忆入口保留在头像按钮，不显示等级/条数/文案
-}
-
+/* ══════════════ 首屏：场景卡 ══════════════ */
 async function bootstrap() {
   try {
     const data = await (await fetch("/api/bootstrap")).json();
-    setLevel(data.memory);
+    if (data.upload_max_bytes > 0) uploadMaxBytes = data.upload_max_bytes;
     dom.cards.innerHTML = "";
     for (const c of (data.cards || [])) {
       const card = el("button", "scene-card"); card.type = "button";
@@ -1062,7 +1069,6 @@ async function loadMemoryPanel() {
           const j = await res.json().catch(() => ({}));
           if (!res.ok || !j.ok) { toast(j.error || "删除失败", "err"); return; }
           toast("已删除这条记忆");
-          if (typeof j.memory === "number") setLevel(j.memory);
           loadMemoryPanel();
         } catch (e) { toast("删除失败：" + e.message, "err"); }
       });
@@ -1092,7 +1098,6 @@ dom.memClear.addEventListener("click", async () => {
     const j = await res.json().catch(() => ({}));
     if (!res.ok || !j.ok) { toast(j.error || "清空失败", "err"); return; }
     toast("记忆已清空");
-    if (typeof j.memory === "number") setLevel(j.memory);
     loadMemoryPanel();
   } catch (e) { toast("清空失败：" + e.message, "err"); }
 });
@@ -1218,10 +1223,12 @@ function renderChips() {
 
 let oversizeResolve = null;
 
-function askOversize(name) {
+function askOversize(name, count = 1, maxMb = 50) {
   return new Promise((resolve) => {
     oversizeResolve = resolve;
-    dom.oversizeTitle.textContent = `《${name}》超过 50MB`;
+    dom.oversizeTitle.textContent = count > 1
+      ? `${count} 个文件超过 ${maxMb}MB`
+      : `《${name}》超过 ${maxMb}MB`;
     dom.oversizeText.textContent =
       "拆分上传会保留高质量解析（MinerU），并按页拆成多份文档入库；" +
       "直接上传则改用 pdfplumber 本地解析（不调 MinerU，版面/表格质量较低）。";
@@ -1242,7 +1249,10 @@ dom.oversizeModal.querySelector(".modal-backdrop")
 
 async function uploadFiles(files) {
   const sidAtUpload = state.sid;
-  for (const f of files) {
+  const list = [...files];
+  const all = [];
+  const oversized = [];
+  for (const f of list) {
     const ext = (f.name.split(".").pop() || "").toLowerCase();
     const entry = {
       id: "tmp-" + genId(),
@@ -1254,12 +1264,22 @@ async function uploadFiles(files) {
       error: "",
     };
     state.chips.set(entry.id, entry);
-    if (entry.kind === "pdf" && f.size > UPLOAD_MAX_BYTES) {
-      const mode = await askOversize(f.name);
-      if (!mode) {
-        state.chips.delete(entry.id);
-        continue;
-      }
+    all.push({ f, entry });
+      if (entry.kind === "pdf" && f.size > uploadMaxBytes) oversized.push({ f, entry });
+  }
+  renderChips();
+  // 超大 PDF 批量询问一次，避免逐份弹窗
+  let mode = "";
+  if (oversized.length) {
+    mode = await askOversize(
+      oversized[0].f.name,
+      oversized.length,
+      Math.round(uploadMaxBytes / (1024 * 1024)),
+    );
+  }
+  for (const { f, entry } of all) {
+    if (entry.kind === "pdf" && f.size > uploadMaxBytes) {
+      if (!mode) { state.chips.delete(entry.id); continue; }
       uploadDoc(f, entry, sidAtUpload, mode);
     } else {
       uploadDoc(f, entry, sidAtUpload);
@@ -1283,15 +1303,26 @@ function uploadDoc(file, entry, sidAtUpload, oversize = "") {
       renderChips();
     }
   };
-  xhr.onload = () => {
+  xhr.onload = async () => {
     let j = {};
     try { j = JSON.parse(xhr.responseText || "{}"); } catch (_) { /* ignore */ }
     if (xhr.status >= 400 || !j.ok) {
       if (j.code === "oversized") {
-        state.chips.delete(entry.id);
-        renderChips();
-        toast(j.error || "文件超过大小限制", "err");
         finishUpload();
+        // 前端预检与后端配置不一致时（如后端 UPLOAD_MAX_MB 调小），
+        // 用服务端返回的真实上限重新询问拆分/直传，而不是直接丢弃。
+        const maxMb = Math.max(
+          1,
+          Math.round((j.max_bytes || uploadMaxBytes) / (1024 * 1024)),
+        );
+        const mode = await askOversize(entry.name, 1, maxMb);
+        if (mode) {
+          uploadDoc(file, entry, sidAtUpload, mode);
+        } else {
+          state.chips.delete(entry.id);
+          renderChips();
+          toast("已取消上传", "err");
+        }
         return;
       }
       entry.status = "failed";
@@ -1421,7 +1452,7 @@ composerBox.addEventListener("drop", (e) => {
 });
 
 /* ══════════════ 资料库抽屉 ══════════════ */
-function openLibrary(focusDataset) {
+function openLibrary() {
   rememberFocus();
   dom.library.hidden = false;
 }
@@ -1832,8 +1863,7 @@ document.addEventListener("keydown", (e) => {
 /* 搜索时拉取全部分页（最多 500 条），避免只搜到已加载的 50 条 */
 async function loadAllSessions() {
   let offset = sessionsOffset;
-  const cap = 500;
-  while (offset < sessionsTotal && offset < cap) {
+  while (offset < sessionsTotal && offset < SESSIONS_SEARCH_CAP) {
     const data = await (await fetch(
       `/api/sessions?offset=${offset}&limit=100`)).json();
     for (const s of (data.items || [])) sessionsMap.set(s.session_id, s);
@@ -1843,14 +1873,20 @@ async function loadAllSessions() {
   }
 }
 
-dom.histFilter.addEventListener("input", async () => {
-  const q = (dom.histFilter.value || "").trim().toLowerCase();
-  if (!q) { loadSessions(); return; }
-  await loadAllSessions();
-  const list = [...sessionsMap.values()].filter(
-    (s) => (s.title || "").toLowerCase().includes(q));
-  renderHistory(list, false);
-  markActive(state.sid);
+/* 搜索防抖：避免每敲一个字符就全量拉取分页 */
+let histFilterTimer = null;
+dom.histFilter.addEventListener("input", () => {
+  clearTimeout(histFilterTimer);
+  histFilterTimer = setTimeout(async () => {
+    const q = (dom.histFilter.value || "").trim().toLowerCase();
+    if (!q) { loadSessions(); return; }
+    await loadAllSessions();
+    const limited = sessionsTotal > SESSIONS_SEARCH_CAP;
+    const list = [...sessionsMap.values()].filter(
+      (s) => (s.title || "").toLowerCase().includes(q));
+    renderHistory(list, false, limited);
+    markActive(state.sid);
+  }, 300);
 });
 
 /* ══════════════ 深色模式 ══════════════ */

@@ -2,7 +2,7 @@
 
 <p align="right"><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
 
-ArtAgent is a conversational agent for Western art history, orchestrated with LangGraph. It comes with a local art library of **53,912 artwork records and 10,107 artists**, supporting factual queries, style comparisons, timelines, preference-based recommendations, image analysis, document understanding, and long-term memory across sessions.
+ArtAgent is a conversational agent for Western art history, orchestrated with LangGraph. It comes with a local art library of **55,000+ artwork records**, supporting factual queries, style comparisons, timelines, preference-based recommendations, image analysis, document understanding, and long-term memory across sessions.
 
 ## Quick Start
 
@@ -56,7 +56,7 @@ The core library (`dataset_id=core`, the default runtime dataset) is a merged, n
 
 > Some records come from multiple sources (e.g., the same work matches both Wikidata and SemArt).
 
-After merging and deduplication: **53,912 artwork records** and **10,107 artists**, of which **39,314 have descriptions and are indexed in Chroma** (BGE-M3 multilingual vectors). The collection is primarily 8th–19th century European painting (~83%), with a small number of early-20th-century works and about 7,000 records without a year; every record carries an image reference (local image or collection URL).
+After merging and deduplication: **55,000+ artwork records**, of which the records with descriptions are indexed in Chroma (BGE-M3 multilingual vectors; the exact count updates with core-library rebuilds). The collection is primarily 8th–19th century European painting (~83%), with a small number of early-20th-century works and about 7,000 records without a year; every record carries an image reference (local image or collection URL).
 
 ## Tech Stack
 

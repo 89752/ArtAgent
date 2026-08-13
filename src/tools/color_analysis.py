@@ -19,7 +19,7 @@ import numpy as np
 from langchain_core.tools import tool
 from PIL import Image
 
-from src.utils.http import download_bytes
+from src.utils.http import load_image_bytes
 
 
 def _dominant_colors(img: Image.Image, k: int = 5) -> list[dict]:
@@ -115,7 +115,7 @@ def color_analysis(
             continue
         try:
             if path.startswith(("http://", "https://")):
-                img = Image.open(BytesIO(download_bytes(path)))
+                img = Image.open(BytesIO(load_image_bytes(path)[0]))
             else:
                 img = Image.open(path)
             brightness, contrast = _brightness_contrast(img)

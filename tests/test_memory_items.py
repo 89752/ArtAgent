@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 import src.memory.memory_items as mi
-import src.memory.store as store
 
 
 @pytest.fixture(autouse=True)
@@ -85,13 +84,15 @@ def test_delete_by_entity_and_clear():
     assert mi.list_memories("test-user") == []
 
 
-def test_store_load_preferences_prefers_memory_items():
-    mi.add_memory("test-user", "用户偏好莫奈睡莲系列", entity="莫奈")
-    prefs = store.load_preferences("test-user")
-    assert prefs["artists"] == ["用户偏好莫奈睡莲系列"]
-    items = store.list_preferences("test-user")
+def test_preference_items_stored_in_memory_items():
+    mi.add_memory("test-user", "用户偏好莫奈睡莲系列", entity="莫奈",
+                  kind="preference")
+    items = [
+        i for i in mi.list_memories("test-user", scope="user")
+        if i.get("kind") == "preference"
+    ]
+    assert items and items[0]["content"] == "用户偏好莫奈睡莲系列"
     assert items[0]["kind"] == "preference"
-    assert items[0]["value"] == "用户偏好莫奈睡莲系列"
 
 
 def test_remember_tool_and_guard():

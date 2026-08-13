@@ -81,7 +81,8 @@ def build_graph():
     add("ask_user", N.ask_user)
     add("multi_retrieve", N.multi_retrieve)
     add("reflection", N.reflection)
-    add("web_fallback", N.web_fallback)
+    # 注：web_fallback 不作为图节点挂边——反思 RETRY 由 tool_upgrade 节点
+    # 内部以函数形式调用 N.web_fallback（本地证据不足时联网兜底）。
     add("tool_upgrade", N.tool_upgrade)
     add("save_memory", N.save_memory)
 
@@ -132,7 +133,6 @@ def build_graph():
         {"tool_upgrade": "tool_upgrade", "save_memory": "save_memory"},
     )
     builder.add_edge("tool_upgrade", "save_memory")
-    builder.add_edge("web_fallback", "save_memory")
     builder.add_edge("save_memory", END)
 
     checkpointer = MemorySaver()

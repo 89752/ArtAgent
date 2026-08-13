@@ -7,14 +7,12 @@
 from __future__ import annotations
 
 import base64
-from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
-from src.utils.http import download_bytes
+from src.utils.http import load_image_bytes
 
 
 _COMPARE_FOCUS_PROMPTS = {
@@ -49,14 +47,7 @@ def _locate(title: str) -> tuple[dict, str]:
 
 
 def _image_block(path: str) -> dict:
-    if path.startswith(("http://", "https://")):
-        data = download_bytes(path)
-        ext = Path(urlparse(path).path).suffix.lstrip(".").lower()
-    else:
-        data = Path(path).read_bytes()
-        ext = Path(path).suffix.lstrip(".").lower()
-    if ext == "jpg":
-        ext = "jpeg"
+    data, ext = load_image_bytes(path)
     b64 = base64.b64encode(data).decode("utf-8")
     return {
         "type": "image_url",
