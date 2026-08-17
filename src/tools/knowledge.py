@@ -47,14 +47,22 @@ def query_painter_knowledge(painter_name: str) -> dict:
             "painter": painter_name,
             "found": False,
             "works_count": 0,
-            "note": f"{dataset_id} 中未收录该画家的作品，请基于自身知识回答或考虑 web_search。",
+            "note": "该画家在本地样本中暂无作品，请调用 web_search / wiki_lookup 补充后再回答。",
         }
+
+    coverage_hint = ""
+    if len(works) < 20:
+        coverage_hint = (
+            f"本地样本仅 {len(works)} 件，可能不足以覆盖该画家完整生涯/代表作；"
+            "建议调用 web_search / wiki_lookup 补充后再回答。"
+        )
 
     return {
         "painter": painter_name,
         "found": True,
         "matched_author": works[schema.entity_col].value_counts().index[0],
         "works_count": len(works),
+        "coverage_hint": coverage_hint,
         "main_schools": (
             works[schema.school_col].value_counts().head(3).index.tolist()
             if schema.school_col else []

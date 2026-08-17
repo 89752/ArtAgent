@@ -4,11 +4,6 @@ general 节点与技能系统都从这里取工具，新增工具只需在此登
 """
 
 from src.tools.aggregate_stats import aggregate_stats
-from src.tools.capabilities import (
-    compare_subjects,
-    recommend_with_exclusions,
-    timeline_by_periods,
-)
 from src.tools.collections import (
     delete_collection,
     get_collection,
@@ -19,6 +14,7 @@ from src.tools.collections import (
 )
 from src.tools.color_analysis import color_analysis
 from src.tools.compare_images import compare_images
+from src.tools.delegate import delegate_task
 from src.tools.image_lookup import image_lookup
 from src.tools.knowledge import query_painter_knowledge
 from src.tools.memory import forget, recall, remember
@@ -27,6 +23,7 @@ from src.tools.page_reader import read_page_image
 from src.tools.retrieval import exact_lookup, semantic_search
 from src.tools.web_search import web_search
 from src.tools.wiki_lookup import wiki_lookup
+from src.tools.user_image import analyze_user_artwork, read_user_image
 
 GENERAL_TOOLS = [
     semantic_search,
@@ -35,9 +32,6 @@ GENERAL_TOOLS = [
     image_lookup,
     read_page_image,
     web_search,
-    compare_subjects,
-    timeline_by_periods,
-    recommend_with_exclusions,
     remember,
     recall,
     forget,
@@ -52,6 +46,9 @@ GENERAL_TOOLS = [
     compare_images,
     museum_search,
     wiki_lookup,
+    read_user_image,
+    analyze_user_artwork,
+    delegate_task,
 ]
 
 TOOL_BY_NAME: dict[str, object] = {t.name: t for t in GENERAL_TOOLS}

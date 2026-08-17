@@ -294,6 +294,25 @@ def build_session_block(
             hint = "（无文字索引，需 read_page_image 逐页读图）" if img > 0 and txt == 0 else ""
             doc_parts.append(f"{name}{f'({pages}页)' if pages else ''}{hint}")
         parts.append("已上传文档：" + "；".join(doc_parts))
+    images = ledger.get("uploaded_images") or []
+    if images:
+        img_parts: list[str] = []
+        for im in images[:3]:
+            name = str(im.get("original_name") or im.get("image_id") or "图片")
+            iid = str(im.get("image_id") or "")
+            img_parts.append(f"{name}(id={iid})")
+        parts.append("用户图片：" + "；".join(img_parts))
+    reports = ledger.get("analysis_reports") or []
+    if reports:
+        rep_parts: list[str] = []
+        for r in reports[:3]:
+            iid = str(r.get("image_id") or "")
+            fw = str(r.get("framework") or "")
+            rep_parts.append(f"{iid}(framework={fw})")
+        parts.append("已有分析报告：" + "；".join(rep_parts))
+    sid = str(ledger.get("session_id") or "")
+    if sid:
+        parts.append(f"会话ID：{sid}")
     if not parts:
         return ""
     return "；".join(parts)[:budget]
@@ -313,7 +332,10 @@ def format_skills_index(skills) -> str:
     """技能索引块：让 agent 知道系统具备哪些可点名的技能。"""
     if not skills:
         return ""
-    lines = ["可用技能（按需调用 skill_<id> 执行完整流程）："]
+    lines = [
+        "可用技能（按需调用 skill_<id> 执行完整流程；"
+        "在消息开头输入 /<技能id> 可强制激活）："
+    ]
     for skill in skills:
         desc = skill.description or skill.name
         lines.append(f"- skill_{skill.id}：{desc}")

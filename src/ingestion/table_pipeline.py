@@ -35,7 +35,13 @@ logger = get_logger("ingestion.table_pipeline")
 CONFIRMABLE_STATUS = ("pending_confirm", "active")  # active 允许改 schema 重确认
 
 
-def table_dataset_id(doc_id: str) -> str:
+def table_dataset_id(doc_id: str, user_id: str | None = None) -> str:
+    """表格数据源 ID：按用户命名空间化（table_{user_id}_{doc_id}）。
+
+    user_id 为空保留旧格式（迁移/测试兼容）。
+    """
+    if user_id:
+        return f"table_{user_id}_{doc_id}"
     return f"table_{doc_id}"
 
 
@@ -59,6 +65,7 @@ def ingest_table(
     doc_name: str = "",
     kb_id: str = "default",
     llm=None,
+    user_id: str | None = None,
 ) -> dict:
     """表格入库：加载 + schema 推断，落 pending_confirm 状态（此时不注册）。
 
@@ -83,7 +90,7 @@ def ingest_table(
             "status": "pending_confirm",
             "elapsed_sec": round(time.time() - t0, 1),
             "table_path": str(table_path),
-            "dataset_id": table_dataset_id(doc_id),
+            "dataset_id": table_dataset_id(doc_id, user_id),
             "rows": len(loaded.df),
             "cols": len(loaded.df.columns),
             "sheet_name": loaded.sheet_name,
@@ -122,7 +129,11 @@ def _validate_role(col: str | None, columns: list[str], role: str) -> str | None
     return col
 
 
-def confirm_table_schema(doc_id: str, roles: dict) -> dict:
+def confirm_table_schema(
+    doc_id: str,
+    roles: dict,
+    user_id: str | None = None,
+) -> dict:
     """用户确认/纠正 schema：构建 TableSchema → 注册结构化检索器 + Hybrid → active。
 
     roles: {entity_col, group_axis_col, description_col, image_col, display_name}，
@@ -147,7 +158,7 @@ def confirm_table_schema(doc_id: str, roles: dict) -> dict:
     )
     display_name = str(roles.get("display_name") or "").strip()[:20]
 
-    dataset_id = st["dataset_id"]
+    dataset_id = table_dataset_id(doc_id, user_id)
     table_path = st["table_path"]
     retriever = register_structured_dataset(
         dataset_id,
@@ -159,6 +170,10 @@ def confirm_table_schema(doc_id: str, roles: dict) -> dict:
     from src.retrieval.hybrid import get_hybrid_retriever
 
     get_hybrid_retriever().register(dataset_id, retriever)
+    if user_id:
+        from src.platform.users import set_user_dataset
+
+        set_user_dataset(user_id, dataset_id)
 
     confirmed = {
         "status": "active",
@@ -173,6 +188,7 @@ def confirm_table_schema(doc_id: str, roles: dict) -> dict:
             "display_name": display_name or st.get("doc_name") or dataset_id,
             "supports_timeline": schema.supports_timeline,
             "supports_recommendation": schema.supports_recommendation,
+            "dataset_id": dataset_id,
         },
     }
     documents_store.upsert_document(doc_id, **confirmed)

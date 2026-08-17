@@ -226,6 +226,14 @@ def _chain_detail(node: str, out: dict) -> str:
             f"联网补充 <span class='hl'>{len(out.get('web_results') or [])}</span> 条"
         )
     if node == "save_memory":
+        extract_result = out.get("memory_extract_result") or {}
+        profile_result = out.get("memory_profile_result") or {}
+        if extract_result.get("scheduled"):
+            return "已安排后台记忆抽取"
+        if profile_result.get("error"):
+            return "画像刷新失败（已降级）"
+        if profile_result.get("action"):
+            return "用户画像已更新"
         return "偏好已持久化"
     return ""
 
@@ -421,12 +429,12 @@ def _clear_thread_checkpoint(thread_id: str) -> None:
             continue
 
 
-def memory_count() -> int:
+def memory_count(user_id: str = WEB_USER_ID) -> int:
     """已记住的记忆条目数（memory_items 全 kind）。"""
-    return len(list_memories(WEB_USER_ID))
+    return len(list_memories(user_id))
 
 
-def memory_items_list() -> list[dict]:
+def memory_items_list(user_id: str = WEB_USER_ID) -> list[dict]:
     """记忆面板 v2：全部有效记忆条目（含来源/重要性/时间，供 UI 展示与删除）。"""
     return [
         {
@@ -439,21 +447,21 @@ def memory_items_list() -> list[dict]:
             "scope": i.get("scope") or "user",
             "updated_at": i.get("updated_at") or "",
         }
-        for i in list_memories(WEB_USER_ID)
+        for i in list_memories(user_id)
     ]
 
 
-def delete_memory_item(item_id: str) -> bool:
+def delete_memory_item(item_id: str, user_id: str = WEB_USER_ID) -> bool:
     """记忆面板：按条目 id 软删除（保留审计可追溯）。"""
-    return delete_memory(WEB_USER_ID, item_id)
+    return delete_memory(user_id, item_id)
 
 
-def clear_all_memories() -> int:
+def clear_all_memories(user_id: str = WEB_USER_ID) -> int:
     """记忆面板：清空该用户全部记忆（memory_items + 会话滚动摘要）。"""
     from src.memory.summary import delete_user_summaries
 
-    n = clear_user_memories(WEB_USER_ID)
-    delete_user_summaries(WEB_USER_ID)
+    n = clear_user_memories(user_id)
+    delete_user_summaries(user_id)
     return n
 
 
@@ -466,6 +474,7 @@ def stream_answer(
     regenerate: bool = False,
     stop_event: threading.Event | None = None,
     request_id: str | None = None,
+    user_id: str = WEB_USER_ID,
 ) -> Iterator[dict]:
     """
     生成器：逐节点产出事件字典，API 层转 SSE。
@@ -479,13 +488,16 @@ def stream_answer(
     节点边界提前收尾并持久化部分内容。
     """
     request_id = request_id or uuid.uuid4().hex[:12]
+    from src.memory.memory_items import set_active_user_id
+
+    set_active_user_id(user_id)
     message = (message or "").strip()
     if not message:
         yield {
             "type": "done",
             "html": "",
             "session_id": sid,
-            "memory": memory_count(),
+            "memory": memory_count(user_id),
             "sources": [],
             "cancelled": False,
             "request_id": request_id,
@@ -496,7 +508,7 @@ def stream_answer(
     start_ts = time.time()
 
     # 历史消息在库中（前端无状态）：读出→追加本轮→回写
-    history = load_conversation(sid)
+    history = load_conversation(sid, user_id)
     if regenerate:
         last_user = -1
         for i, m in enumerate(history):
@@ -513,9 +525,9 @@ def stream_answer(
 
     # 当前生效数据源由服务端单例持有（前端已合并为统一知识库，不再切换；
     # 该值仅供 exact_lookup 等结构化工具默认使用 core）；每轮读进 state
-    from src.retrieval.hybrid import get_hybrid_retriever
+    from src.platform import users as users_store
 
-    active_dataset = get_hybrid_retriever().active_dataset
+    active_dataset = users_store.get_user_dataset(user_id)
     from src.data import documents_store
 
     uploaded_docs = [
@@ -526,8 +538,15 @@ def stream_answer(
             "text_chunks": d.get("text_chunks") or 0,
             "image_pages": d.get("image_pages") or 0,
         }
-        for d in documents_store.list_documents()
+        for d in documents_store.list_documents(user_id)
     ]
+    from src.analysis.store import (
+        list_analysis_by_session,
+        list_images_by_session,
+    )
+
+    uploaded_images = list_images_by_session(sid, user_id)
+    analysis_reports = list_analysis_by_session(sid, user_id)
 
     intent, final_answer = "", ""
     struct_artworks: list[dict] = []
@@ -549,9 +568,11 @@ def stream_answer(
                 # 避免上一轮的 intent/subjects/检索结果/retry_count 串味。
                 "messages": [HumanMessage(content=message)],
                 "user_query": message,
-                "user_id": WEB_USER_ID,
+                "user_id": user_id,
                 "conversation_id": sid,
                 "uploaded_docs": uploaded_docs,
+                "uploaded_images": uploaded_images,
+                "analysis_reports": analysis_reports,
                 "intent": "",
                 "rag_needed": True,
                 "tool_rounds": 0,
@@ -657,7 +678,7 @@ def stream_answer(
         history[-1]["sources"] = []
 
     title = next((m["content"] for m in history if m["role"] == "user"), message)
-    save_conversation(sid, title, history)
+    save_conversation(sid, title, history, user_id)
     runs_store.record_run(
         request_id=request_id,
         session_id=sid,
@@ -677,7 +698,7 @@ def stream_answer(
         "type": "done",
         "html": history[-1]["content"],
         "session_id": sid,
-        "memory": memory_count(),
+        "memory": memory_count(user_id),
         "sources": history[-1].get("sources", []),
         "cancelled": cancelled,
         "request_id": request_id,
@@ -686,30 +707,40 @@ def stream_answer(
 
 
 # ── 会话 / 偏好：透传给 REST 端点 ──
-def sessions(offset: int = 0, limit: int = 50) -> tuple[list[dict], int]:
+def sessions(
+    offset: int = 0,
+    limit: int = 50,
+    user_id: str = WEB_USER_ID,
+) -> tuple[list[dict], int]:
     """侧栏列表（分页）：附带相对时间，返回 (items, total)。"""
-    convos, total = list_conversations(limit=limit, offset=offset)
+    convos, total = list_conversations(limit=limit, offset=offset, user_id=user_id)
     out = [{**c, "relative": relative_time(c["updated_at"])} for c in convos]
     return out, total
 
 
-def rename_conversation(sid: str, title: str) -> bool:
-    return rename_conversation_db(sid, title)
+def rename_conversation(sid: str, title: str, user_id: str = WEB_USER_ID) -> bool:
+    return rename_conversation_db(sid, title, user_id)
 
 
-def conversation(sid: str) -> list[dict]:
-    return load_conversation(sid)
+def conversation(sid: str, user_id: str = WEB_USER_ID) -> list[dict]:
+    return load_conversation(sid, user_id)
 
 
-def remove_conversation(sid: str) -> None:
-    delete_conversation(sid)
+def remove_conversation(sid: str, user_id: str = WEB_USER_ID) -> None:
+    delete_conversation(sid, user_id)
 
 
-def record_attachment(sid: str, doc_id: str, doc_name: str, kind: str) -> dict:
+def record_attachment(
+    sid: str,
+    doc_id: str,
+    doc_name: str,
+    kind: str,
+    user_id: str = WEB_USER_ID,
+) -> dict:
     """把「已上传文档」事件写进会话历史，切换会话/刷新后仍可见。"""
     if not sid or not doc_id:
         return {"ok": False, "error": "缺少会话或文档标识"}
-    history = load_conversation(sid)
+    history = load_conversation(sid, user_id)
     if any(
         m.get("role") == "attachment" and m.get("doc_id") == doc_id for m in history
     ):
@@ -725,8 +756,69 @@ def record_attachment(sid: str, doc_id: str, doc_name: str, kind: str) -> dict:
         }
     )
     title = next((m["content"] for m in history if m["role"] == "user"), None)
-    save_conversation(sid, title or "新对话", history)
+    save_conversation(sid, title or "新对话", history, user_id)
     return {"ok": True, "duplicated": False}
+
+
+def record_analysis_turn(
+    sid: str,
+    image_id: str,
+    user_text: str = "",
+    html: str = "",
+    title: str = "",
+    user_id: str = WEB_USER_ID,
+) -> dict:
+    """把分析（含拒绝）写入会话历史：用户回合 + assistant 回合，重载可还原。
+
+    幂等：同一 image_id 已存在 assistant 分析回合时直接返回，不重复插入。
+    """
+    from src.analysis.store import get_analysis
+
+    analysis = get_analysis(image_id)
+    report: dict = {}
+    if analysis and analysis.get("result_path"):
+        path = Path(analysis["result_path"])
+        if path.is_file():
+            try:
+                report = (json.loads(path.read_text(encoding="utf-8")) or {}).get(
+                    "report"
+                ) or {}
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": f"分析结果读取失败：{e}"}
+    history = load_conversation(sid, user_id)
+    if any(
+        m.get("role") == "assistant" and m.get("image_id") == image_id
+        for m in history
+    ):
+        return {"ok": True, "duplicated": True, "image_id": image_id}
+    user_text = (user_text or "").strip()
+    if user_text and not any(
+        m.get("role") == "user" and m.get("content") == user_text for m in history
+    ):
+        history.append(
+            {
+                "role": "user",
+                "content": user_text,
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+    if not html:
+        overall = str(report.get("overall_assessment") or "已生成三层分析报告")[:120]
+        html = f'<div class="md-answer">分析完成：{html.escape(overall)}</div>'
+    history.append(
+        {
+            "role": "assistant",
+            "content": html,
+            "report": report or None,
+            "image_id": image_id,
+            "title": (title or "").strip() or None,
+            "analysis": True,
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    title = next((m["content"] for m in history if m["role"] == "user"), None)
+    save_conversation(sid, title or "新对话", history, user_id)
+    return {"ok": True, "image_id": image_id}
 
 
 # ── 文档上传与入库（PDF / 表格） ──
@@ -738,7 +830,12 @@ _parse_semaphore = threading.Semaphore(
 )
 
 
-def save_upload(filename: str, data: bytes, kb_id: str = "default") -> dict:
+def save_upload(
+    filename: str,
+    data: bytes,
+    kb_id: str = "default",
+    user_id: str = WEB_USER_ID,
+) -> dict:
     """把上传文件存到 uploads/{kb_id}/{doc_id}/；按类型路由存储名。
 
     PDF → document.pdf；表格 → table{原扩展名}。
@@ -764,6 +861,7 @@ def save_upload(filename: str, data: bytes, kb_id: str = "default") -> dict:
     documents_store.add_document(
         doc_id=doc_id,
         kind=kind or "pdf",
+        user_id=user_id,
         doc_name=filename,
         kb_id=kb_id,
         status="processing",
@@ -788,6 +886,7 @@ def ingest_document(
     kb_id: str,
     task_id: str | None = None,
     force_pdfplumber: bool = False,
+    user_id: str = WEB_USER_ID,
 ) -> None:
     """后台任务入口（BackgroundTasks）：跑入库流水线，异常已落 failed 状态。
 
@@ -822,6 +921,7 @@ def ingest_table_doc(
     table_path: str,
     kb_id: str,
     task_id: str | None = None,
+    user_id: str = WEB_USER_ID,
 ) -> None:
     """表格后台任务入口：加载 + schema 推断 → 待确认状态。"""
     from src.ingestion.table_pipeline import ingest_table
@@ -830,7 +930,9 @@ def ingest_table_doc(
         if task_id:
             tasks_store.update_task(task_id, status="processing")
         try:
-            ingest_table(table_path, doc_id, doc_name=doc_name, kb_id=kb_id)
+            ingest_table(
+                table_path, doc_id, doc_name=doc_name, kb_id=kb_id, user_id=user_id
+            )
             if task_id:
                 tasks_store.update_task(task_id, status="done", progress=100)
         except Exception:
@@ -839,11 +941,15 @@ def ingest_table_doc(
                 tasks_store.update_task(task_id, status="failed", error="表格解析失败")
 
 
-def confirm_table(doc_id: str, roles: dict) -> dict:
+def confirm_table(
+    doc_id: str,
+    roles: dict,
+    user_id: str = WEB_USER_ID,
+) -> dict:
     """确认/纠正表格 schema：注册生效。"""
     from src.ingestion.table_pipeline import confirm_table_schema
 
-    return confirm_table_schema(doc_id, roles)
+    return confirm_table_schema(doc_id, roles, user_id=user_id)
 
 
 def restore_tables() -> int:
@@ -853,27 +959,27 @@ def restore_tables() -> int:
     return restore_active_tables()
 
 
-def documents() -> list[dict]:
+def documents(user_id: str = WEB_USER_ID) -> list[dict]:
     """文档库列表（新的在前）。"""
     from src.data import documents_store
 
-    return documents_store.list_documents()
+    return documents_store.list_documents(user_id)
 
 
-def document_status(doc_id: str) -> dict:
+def document_status(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
     from src.data import documents_store
 
-    return documents_store.get_document(doc_id) or {}
+    return documents_store.get_document(doc_id, user_id) or {}
 
 
-def delete_document(doc_id: str) -> dict:
+def delete_document(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
     """删除文档并级联清理：状态记录、上传文件、向量（PDF）、注册表（Table）。"""
     from src.data import documents_store
     from src.ingestion.pipeline import UPLOADS_DIR, delete_pdf_vectors
     from src.ingestion.table_pipeline import table_dataset_id, unregister_table
     from src.retrieval.hybrid import get_hybrid_retriever
 
-    doc = documents_store.get_document(doc_id)
+    doc = documents_store.get_document(doc_id, user_id)
     if not doc:
         raise KeyError(f"文档不存在：{doc_id}")
 
@@ -894,10 +1000,17 @@ def delete_document(doc_id: str) -> dict:
     else:
         dataset_id = doc.get("dataset_id") or table_dataset_id(doc_id)
         unregister_table(dataset_id)
+        from src.platform import users as users_store
+
+        from src.retrieval.hybrid import get_hybrid_retriever
+
         hybrid = get_hybrid_retriever()
         if hybrid.active_dataset == dataset_id:
             hybrid.active_dataset = "core"
             result["active_dataset_reset"] = "core"
+        if users_store.get_user_dataset(user_id) == dataset_id:
+            users_store.set_user_dataset(user_id, "core")
+            result["user_dataset_reset"] = "core"
 
     # 3. 删除上传文件目录
     work_dir = UPLOADS_DIR / kb_id / doc_id
@@ -911,9 +1024,9 @@ def delete_document(doc_id: str) -> dict:
             logger.warning("delete_document 删除文件目录失败 %s: %s", work_dir, e)
 
     # 4. 删除 SQLite 记录
-    deleted = documents_store.delete_document(doc_id)
+    deleted = documents_store.delete_document(doc_id, user_id)
     result["db_deleted"] = deleted
 
     # 5. 从所有会话历史中移除该文档的附件记录
-    result["attachment_records_removed"] = remove_attachment_from_all(doc_id)
+    result["attachment_records_removed"] = remove_attachment_from_all(doc_id, user_id)
     return result

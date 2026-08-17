@@ -31,13 +31,16 @@ PROFILE_PROMPT = """你是用户画像聚合模块。根据用户的长期记忆
 
 要求：
 - 每条用第三人称陈述句（"用户喜欢印象派…"），中文，单条一个事实；
-- 只保留稳定偏好/事实（审美、居住、职业、长期目标），去掉一次性/临时信息；
+- 记忆里有依据时必须包含：语言倾向（如"用户主要使用中文交流"）、
+  回复风格偏好（简洁/详细、专业/口语、是否喜欢列表/表格/图文）、
+  兴趣领域、稳定的审美偏好、身份背景（职业/居住地等）；
+- 只保留稳定偏好/事实，去掉一次性/临时信息；
 - 合并同义条目，不编造；
 - 直接输出画像内容（可用 "；" 分隔多条），不要解释、不要 markdown。"""
 
 
 def profile_enabled() -> bool:
-    return env_flag("MEMORY_PROFILE_REFRESH")
+    return env_flag("MEMORY_PROFILE_REFRESH", default="1")
 
 
 def profile_max_age_days() -> int:
@@ -89,8 +92,9 @@ def build_profile_text(items: list[dict], llm: Optional[Callable[[str], str]] = 
 def maybe_refresh_profile(
     user_id: str,
     llm: Optional[Callable[[str], str]] = None,
+    force: bool = False,
 ) -> dict:
-    """按需刷新用户画像：开关关闭/画像新鲜/无记忆 → 跳过；否则聚合落库。"""
+    """按需刷新用户画像：开关关闭/（非强制时）画像新鲜/无记忆 → 跳过；否则聚合落库。"""
     if not profile_enabled():
         return {}
     items = [
@@ -100,11 +104,50 @@ def maybe_refresh_profile(
     if not items:
         return {"skipped": "no_memories"}
     existing = load_profile_item(user_id)
-    if existing and _days_since(str(existing.get("updated_at") or "")) < profile_max_age_days():
+    if (
+        existing
+        and not force
+        and _days_since(str(existing.get("updated_at") or "")) < profile_max_age_days()
+    ):
         return {"skipped": "fresh"}
     text = build_profile_text(items, llm)
     if not text:
         return {"skipped": "empty_profile"}
+    item = add_memory(
+        user_id=user_id,
+        content=text,
+        kind="profile",
+        entity=PROFILE_ENTITY,
+        scope="user",
+        source="extracted",
+        importance=0.95,
+    )
+    return {
+        "action": item.get("action", "create"),
+        "item_id": item.get("id"),
+        "content_len": len(text),
+    }
+
+
+def sync_profile_item_from_doc(user_id: str) -> dict:
+    """把结构化用户文档确定性同步成旧的 profile 条目（供 UI 面板展示）。
+
+    不再调用 LLM：personalContext + topOfMind 直接拼成画像文本，
+    写入 kind='profile'、entity='user_profile'（自动 supersede 旧画像）。
+    """
+    from src.memory.user_doc import load_doc
+
+    doc = load_doc(user_id)
+    pc = str((doc.get("personalContext") or {}).get("summary") or "").strip()
+    tm = str((doc.get("topOfMind") or {}).get("summary") or "").strip()
+    parts = []
+    if pc:
+        parts.append(pc)
+    if tm:
+        parts.append("当前关注：" + tm)
+    if not parts:
+        return {"skipped": "empty_doc"}
+    text = ("用户画像：" + "；".join(parts))[:PROFILE_MAX_CHARS]
     item = add_memory(
         user_id=user_id,
         content=text,

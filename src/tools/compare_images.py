@@ -64,7 +64,8 @@ def compare_images(
     """把两幅画同帧交给视觉模型做结构化对比（一次视觉 API 调用，慢且有成本）。
 
     适用场景：用户明确要求"对比这两幅画的笔触/色彩/构图"等视觉层面的差异，
-    且两幅画都能定位到图片（本地或网络 URL）。仅元数据/背景对比请用 compare_subjects。
+    且两幅画都能定位到图片（本地或网络 URL）。仅元数据/背景对比请用
+    art_comparison 技能（skill_art_comparison）。
 
     Args:
         title_a: 第一幅画标题（部分匹配）

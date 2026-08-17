@@ -70,7 +70,7 @@ CORE_SCHEMA = TableSchema(
     school_col="movement",
 )
 
-# 核心库归一化后的作品表（normalize_core.py 产出；不存在则不注册 core）
+# 核心库归一化后的作品表（scripts/03_normalize_core.py 产出；不存在则不注册 core）
 CORE_DATA_PATH = Path(os.getenv("CORE_DATA_PATH", "./data/core/artworks_core.csv"))
 
 # semantic_search filters 的字段别名（Chroma metadata 与 df 列名差异）
@@ -389,7 +389,7 @@ def _register_core() -> None:
     """
     path = CORE_DATA_PATH
     if not Path(path).exists():
-        raise KeyError(f"核心库数据未就绪：{path}（先跑 normalize_core.py）")
+        raise KeyError(f"核心库数据未就绪：{path}（先跑 scripts/03_normalize_core.py）")
 
     def df_loader():
         df = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False)
@@ -399,7 +399,7 @@ def _register_core() -> None:
         # school/timeframe/image_file——不加别名会 KeyError 或产出空证据。
         if "artist" not in df.columns and "artist_name" in df.columns:
             df["artist"] = df["artist_name"]
-        # CSV 无 year_display（index_core 入库时才算）：这里按同一规则补，
+        # CSV 无 year_display（scripts/06_index_core 入库时才算）：这里按同一规则补，
         # 保证结构化工具与 Chroma metadata 的日期显示一致
         if "year_display" not in df.columns:
             inc = (

@@ -7,9 +7,15 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
+from src.skills.activation import (
+    apply_slash_activation,
+    build_activation_block,
+    parse_slash_skill,
+)
 from src.skills.loader import (
+    Skill,
     _parse_front_matter,
     _parse_list,
     _skill_runner,
@@ -18,6 +24,11 @@ from src.skills.loader import (
     register_skills,
 )
 from src.tools.guard import validate_args
+
+
+def _artwork_skill():
+    """取 artwork_deep_analysis（按 id 定位，不依赖目录排序）。"""
+    return next(s for s in load_skills() if s.id == "artwork_deep_analysis")
 
 
 def test_parse_front_matter_and_list():
@@ -35,10 +46,17 @@ max_steps: 4
     assert _parse_list("[]") == []
 
 
-def test_load_skills_finds_three_skills():
+def test_load_skills_finds_all_skills():
     skills = load_skills()
     ids = {s.id for s in skills}
-    assert {"artwork_deep_analysis", "document_summary", "exhibition_research"} <= ids
+    assert {
+        "artwork_deep_analysis",
+        "document_summary",
+        "exhibition_research",
+        "art_comparison",
+        "art_timeline",
+        "art_recommendation",
+    } <= ids
     by_id = {s.id: s for s in skills}
     assert "exact_lookup" in by_id["artwork_deep_analysis"].tools
     assert "web_search" in by_id["exhibition_research"].tools
@@ -47,13 +65,20 @@ def test_load_skills_finds_three_skills():
     art = by_id["artwork_deep_analysis"]
     assert len(art.steps) >= 4
     assert {"composition", "color", "brushwork", "subject", "verdict"} <= set(art.output_schema)
+    comp = by_id["art_comparison"]
+    assert {"subjects", "dimensions", "comparison", "conclusion"} <= set(comp.output_schema)
+    tl = by_id["art_timeline"]
+    assert {"subject", "periods", "conclusion"} <= set(tl.output_schema)
+    rec = by_id["art_recommendation"]
+    assert {"candidates", "by_artist"} <= set(rec.output_schema)
 
 
 def test_register_skills_returns_guard_valid_tools():
     tools = register_skills()
     names = {t.name for t in tools}
     assert {"skill_artwork_deep_analysis", "skill_document_summary",
-            "skill_exhibition_research"} <= names
+            "skill_exhibition_research", "skill_art_comparison",
+            "skill_art_timeline", "skill_art_recommendation"} <= names
     skill_tool = [t for t in tools if t.name == "skill_document_summary"][0]
     schema = skill_tool.args_schema.model_json_schema() if hasattr(
         skill_tool.args_schema, "model_json_schema"
@@ -63,7 +88,7 @@ def test_register_skills_returns_guard_valid_tools():
 
 
 def test_skill_runner_executes_tool_then_finishes():
-    skill = load_skills()[0]
+    skill = _artwork_skill()
     final_json = json.dumps({k: "填充内容" for k in skill.output_schema}, ensure_ascii=False)
     calls = [
         AIMessage(content="", tool_calls=[
@@ -106,7 +131,7 @@ def test_skill_runner_hits_step_cap():
 
     fake_tool = MagicMock()
     fake_tool.invoke.return_value = "OK"
-    skill = load_skills()[0]
+    skill = _artwork_skill()
     runner = _skill_runner(skill)
     with patch("src.skills.loader.get_deterministic_llm", return_value=LoopingLLM()), \
          patch.dict("src.skills.loader.TOOL_REGISTRY", {"exact_lookup": fake_tool}, clear=True):
@@ -115,7 +140,7 @@ def test_skill_runner_hits_step_cap():
 
 
 def test_skill_runner_fills_missing_fields():
-    skill = load_skills()[0]
+    skill = _artwork_skill()
     final_json = json.dumps({k: "补齐" for k in skill.output_schema}, ensure_ascii=False)
 
     class FillLLM:
@@ -147,6 +172,82 @@ def test_validate_output():
     assert not ok
     ok, _ = _validate_output("随便", {})
     assert ok
+
+
+# ── 技能斜杠激活 ────────────────────────────────────────────
+def _fake_skills() -> list[Skill]:
+    return [
+        Skill(
+            id="artwork_deep_analysis",
+            name="artwork_deep_analysis",
+            description="深度分析画作",
+            when_to_use="用户要求深度分析",
+            tools=["exact_lookup"],
+            max_steps=3,
+            instructions="必须先用 exact_lookup 定位画作。",
+            steps=["定位画作", "分析构图", "输出 JSON"],
+            output_schema={"title": "画作标题"},
+        )
+    ]
+
+
+def test_parse_slash_skill_by_id():
+    skills = _fake_skills()
+    parsed = parse_slash_skill("/artwork_deep_analysis 分析这幅画", skills)
+    assert parsed is not None
+    skill, task = parsed
+    assert skill.id == "artwork_deep_analysis"
+    assert task == "分析这幅画"
+
+
+def test_parse_slash_skill_unknown_returns_none():
+    skills = _fake_skills()
+    assert parse_slash_skill("/not-a-skill 分析", skills) is None
+    assert parse_slash_skill("普通问题", skills) is None
+
+
+def test_parse_slash_skill_empty_task():
+    skills = _fake_skills()
+    parsed = parse_slash_skill("/artwork_deep_analysis", skills)
+    assert parsed is not None
+    assert parsed[1] == ""
+
+
+def test_apply_slash_activation_rewrites_last_user_message():
+    skills = _fake_skills()
+    messages = [
+        HumanMessage(content="上一轮问题", name="user-input"),
+        HumanMessage(content="/artwork_deep_analysis 分析莫奈的睡莲", name="user-input"),
+    ]
+    out, name, block = apply_slash_activation(messages, skills)
+    assert name == "artwork_deep_analysis"
+    assert block is not None
+    assert "必须先用 exact_lookup 定位画作" in block
+    assert out[-1].content == "分析莫奈的睡莲"
+    assert out[0].content == "上一轮问题"
+
+
+def test_apply_slash_activation_no_match():
+    skills = _fake_skills()
+    messages = [HumanMessage(content="普通问题", name="user-input")]
+    out, name, block = apply_slash_activation(messages, skills)
+    assert name is None
+    assert block is None
+    assert out[0].content == "普通问题"
+
+
+def test_build_activation_block_contains_steps_and_schema():
+    block = build_activation_block(_fake_skills()[0])
+    assert "1. 定位画作" in block
+    assert "输出 JSON schema" in block
+    assert '"title"' in block
+
+
+def test_load_real_skills_are_activatable():
+    skills = load_skills()
+    assert skills, "agent_skills 目录应有至少一个技能"
+    parsed = parse_slash_skill(f"/{skills[0].id} 执行", skills)
+    assert parsed is not None
 
 
 if __name__ == "__main__":

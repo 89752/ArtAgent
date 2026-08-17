@@ -35,6 +35,8 @@ _LEGACY_DB_PATH = (
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 
+DEFAULT_USER_ID = "web_user"
+
 
 def _get_conn() -> sqlite3.Connection:
     """返回全局单例连接，首次调用时建表。"""
@@ -47,11 +49,21 @@ def _get_conn() -> sqlite3.Connection:
             """
             CREATE TABLE IF NOT EXISTS conversations (
                 session_id    TEXT PRIMARY KEY,
+                user_id       TEXT NOT NULL DEFAULT 'web_user',
                 title         TEXT NOT NULL,
                 messages_json TEXT NOT NULL,
                 updated_at    TEXT NOT NULL
             )
             """
+        )
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "user_id" not in cols:
+            _conn.execute(
+                "ALTER TABLE conversations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'web_user'"
+            )
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_user "
+            "ON conversations(user_id, updated_at)"
         )
         _conn.commit()
     return _conn
@@ -72,7 +84,12 @@ def _migrate_legacy_db() -> Path:
         return _LEGACY_DB_PATH
 
 
-def save_conversation(session_id: str, title: str, messages: list[dict]) -> None:
+def save_conversation(
+    session_id: str,
+    title: str,
+    messages: list[dict],
+    user_id: str = DEFAULT_USER_ID,
+) -> None:
     """写入/更新一条会话。title 取首条用户消息，messages 为完整气泡列表。"""
     if not session_id or not messages:
         return
@@ -82,29 +99,35 @@ def save_conversation(session_id: str, title: str, messages: list[dict]) -> None
         conn = _get_conn()
         conn.execute(
             """
-            INSERT INTO conversations (session_id, title, messages_json, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO conversations (session_id, user_id, title, messages_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(session_id)
             DO UPDATE SET title = excluded.title,
                           messages_json = excluded.messages_json,
                           updated_at = excluded.updated_at
             """,
-            (session_id, title[:60], payload, now),
+            (session_id, user_id, title[:60], payload, now),
         )
         conn.commit()
 
 
-def list_conversations(limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
+def list_conversations(
+    limit: int = 50,
+    offset: int = 0,
+    user_id: str = DEFAULT_USER_ID,
+) -> tuple[list[dict], int]:
     """按最近更新降序返回 (会话列表, 总数)，供侧栏分页渲染。"""
     with _lock:
         conn = _get_conn()
-        total = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM conversations WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
         rows = conn.execute(
             """
             SELECT session_id, title, updated_at FROM conversations
-            ORDER BY updated_at DESC LIMIT ? OFFSET ?
+            WHERE user_id = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            (user_id, limit, offset),
         ).fetchall()
     return (
         [{"session_id": r[0], "title": r[1], "updated_at": r[2]} for r in rows],
@@ -112,29 +135,36 @@ def list_conversations(limit: int = 50, offset: int = 0) -> tuple[list[dict], in
     )
 
 
-def rename_conversation(session_id: str, title: str) -> bool:
+def rename_conversation(
+    session_id: str,
+    title: str,
+    user_id: str = DEFAULT_USER_ID,
+) -> bool:
     """重命名会话标题；返回是否找到并更新。"""
     if not session_id or not title:
         return False
     with _lock:
         conn = _get_conn()
         cur = conn.execute(
-            "UPDATE conversations SET title = ? WHERE session_id = ?",
-            (title[:60], session_id),
+            "UPDATE conversations SET title = ? WHERE session_id = ? AND user_id = ?",
+            (title[:60], session_id, user_id),
         )
         conn.commit()
         return cur.rowcount > 0
 
 
-def load_conversation(session_id: str) -> list[dict]:
+def load_conversation(
+    session_id: str,
+    user_id: str = DEFAULT_USER_ID,
+) -> list[dict]:
     """读取某会话的完整消息列表；不存在时返回 []。"""
     if not session_id:
         return []
     with _lock:
         conn = _get_conn()
         row = conn.execute(
-            "SELECT messages_json FROM conversations WHERE session_id = ?",
-            (session_id,),
+            "SELECT messages_json FROM conversations WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
         ).fetchone()
     if not row:
         return []
@@ -144,15 +174,36 @@ def load_conversation(session_id: str) -> list[dict]:
         return []
 
 
-def delete_conversation(session_id: str) -> None:
+def delete_conversation(
+    session_id: str,
+    user_id: str = DEFAULT_USER_ID,
+) -> None:
     """删除单条会话。"""
     with _lock:
         conn = _get_conn()
-        conn.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
+        conn.execute(
+            "DELETE FROM conversations WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
+        )
         conn.commit()
 
 
-def remove_attachment_from_all(doc_id: str) -> int:
+def delete_user_conversations(user_id: str) -> int:
+    """删除某用户全部会话；返回删除条数（级联删除用）。"""
+    if not user_id:
+        return 0
+    with _lock:
+        cur = _get_conn().execute(
+            "DELETE FROM conversations WHERE user_id = ?", (user_id,)
+        )
+        _get_conn().commit()
+        return cur.rowcount
+
+
+def remove_attachment_from_all(
+    doc_id: str,
+    user_id: str = DEFAULT_USER_ID,
+) -> int:
     """从所有会话历史中移除引用某文档的附件记录；返回受影响会话数。
 
     文档删除后调用，避免会话里残留指向已删除文档的附件卡片。
@@ -162,7 +213,8 @@ def remove_attachment_from_all(doc_id: str) -> int:
     with _lock:
         conn = _get_conn()
         rows = conn.execute(
-            "SELECT session_id, messages_json FROM conversations"
+            "SELECT session_id, messages_json FROM conversations WHERE user_id = ?",
+            (user_id,),
         ).fetchall()
         now = datetime.now(timezone.utc).isoformat()
         changed = 0

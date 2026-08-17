@@ -158,10 +158,10 @@ def _check_state(sc: dict) -> list[str]:
     if not sc:
         return fails
     from src.memory.collections import list_collections
-    from src.memory.store import list_preferences
+    from src.memory.memory_items import list_memories
 
     if "memory" in sc:
-        prefs = list_preferences(EVAL_MEMORY_USER)
+        prefs = list_memories(EVAL_MEMORY_USER)
         text = json.dumps(prefs, ensure_ascii=False).lower()
         for kw in sc["memory"]:
             if kw.lower() not in text:
@@ -186,10 +186,10 @@ def _check_state(sc: dict) -> list[str]:
 def _snapshot_state() -> dict:
     try:
         from src.memory.collections import list_collections
-        from src.memory.store import list_preferences
+        from src.memory.memory_items import list_memories
 
         return {
-            "prefs": list_preferences(EVAL_MEMORY_USER),
+            "prefs": list_memories(EVAL_MEMORY_USER),
             "cols": [c.get("name") for c in list_collections(EVAL_MEMORY_USER)],
         }
     except Exception:  # noqa: BLE001
@@ -199,15 +199,20 @@ def _snapshot_state() -> dict:
 def _cleanup_state(snap: dict) -> None:
     try:
         from src.memory.collections import _get_conn
-        from src.memory.memory_items import clear_user_memories
-        from src.memory.store import delete_preference, list_preferences
+        from src.memory.memory_items import (
+            clear_user_memories,
+            delete_memory,
+            list_memories,
+        )
 
-        for pref in list_preferences(EVAL_MEMORY_USER):
-            if pref not in snap.get("prefs", []):
-                kind = pref.get("kind") if isinstance(pref, dict) else None
-                value = pref.get("value") if isinstance(pref, dict) else None
-                if kind and value:
-                    delete_preference(EVAL_MEMORY_USER, kind, value)
+        snap_ids = {
+            p.get("id")
+            for p in snap.get("prefs", [])
+            if isinstance(p, dict) and p.get("id")
+        }
+        for pref in list_memories(EVAL_MEMORY_USER):
+            if pref.get("id") not in snap_ids:
+                delete_memory(EVAL_MEMORY_USER, str(pref.get("id") or ""))
         cur_cols = [
             c.get("name")
             for c in __import__("src.memory.collections", fromlist=["list_collections"]).list_collections(
@@ -301,27 +306,26 @@ def _judge_expect(question: str, answer: str, expect: str) -> dict:
 
 # ── 1. 答案质量（核心）──────────────────────────────────────────
 def run_answer_quality(graph, limit: int | None, offset: int = 0) -> dict:
-    rows, skipped, judged = [], 0, 0
-    total_s, total_rounds = 0.0, 0
+    """答案质量：逐条缓存到 case_cache/answers.json，支持断点续跑与多段合并。"""
+    cache = _load_case_cache("answers")
     cases = ANSWER_GOLDEN[offset:]
     if limit:
         cases = cases[:limit]
     for i, case in enumerate(cases, offset):
+        if i in cache and not cache[i].get("error"):
+            continue
         t0 = time.time()
         result = _safe_invoke(graph, case["query"], f"ans-{i}")
         dt = time.time() - t0
         if result.get("error"):
-            skipped += 1
+            cache[i] = {"error": True}
             continue
-        total_s += dt
-        total_rounds += result.get("tool_rounds") or 0
         answer = str(result.get("final_answer") or "")
         score = _judge(case["query"], answer)
         if score.get("score"):
-            judged += 1
             state_fails = _check_state(case.get("state_check") or {})
-            rows.append(
-                {
+            cache[i] = {
+                "row": {
                     "id": case.get("id", f"ans-{i}"),
                     "task_type": case.get("task_type", "?"),
                     "score": int(score["score"]),
@@ -330,12 +334,35 @@ def run_answer_quality(graph, limit: int | None, offset: int = 0) -> dict:
                     "state_fails": state_fails,
                     "seconds": dt,
                     "tools": _tool_names(result.get("messages") or []),
-                }
-            )
+                },
+                "seconds": dt,
+                "rounds": result.get("tool_rounds") or 0,
+            }
             print(
-                f"[ans {judged}] {case.get('task_type')} score={score['score']} "
+                f"[ans {i + 1}/{len(ANSWER_GOLDEN)}] {case.get('task_type')} "
+                f"score={score['score']} "
                 f"state={'✅' if not state_fails else '❌'} {case['query'][:28]}"
             )
+        else:
+            cache[i] = {"error": True}
+    _save_case_cache("answers", cache)
+
+    # 汇总全部已缓存结果（含本次与历史批次），保证分段跑完后报告是合并的 30 条
+    rows, skipped, judged = [], 0, 0
+    total_s, total_rounds = 0.0, 0
+    for i, case in enumerate(ANSWER_GOLDEN):
+        entry = cache.get(i)
+        if entry is None:
+            continue
+        if entry.get("error"):
+            skipped += 1
+            continue
+        row = entry["row"]
+        rows.append(row)
+        judged += 1
+        total_s += float(entry.get("seconds") or 0)
+        total_rounds += int(entry.get("rounds") or 0)
+    rows.sort(key=lambda r: str(r.get("id") or ""))
     return {
         "rows": rows,
         "total": len(ANSWER_GOLDEN),

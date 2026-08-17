@@ -6,11 +6,12 @@
 
 隔离：namespace = (user_id, thread_id, scope)，所有读写强制带 user_id；
 工具层默认用户可用 MEMORY_USER_ID 覆盖（评估用 eval-test，生产用 web_user）；
-store.py（偏好兼容层）与 tools/memory.py（remember/recall/forget）都读写本表。
+v1 store.py（偏好兼容层）已于 2026-08-13 移除，tools/memory.py 与评估脚本统一读写本表。
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sqlite3
@@ -28,14 +29,30 @@ _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
 
 DEFAULT_MEMORY_USER = "default_user"
+_active_user_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "artagent_active_user", default=None
+)
 
-VALID_KINDS = {"preference", "fact", "profile", "event"}
+VALID_KINDS = {"preference", "fact", "profile", "event", "correction"}
 VALID_SCOPES = {"user", "thread", "agent"}
 
 
 def get_memory_user_id() -> str:
-    """工具层当前记忆身份（MEMORY_USER_ID 可覆盖，评估隔离用）。"""
+    """工具层当前记忆身份：优先请求级 ContextVar，其次 MEMORY_USER_ID 环境变量。"""
+    active = _active_user_ctx.get()
+    if active and active.strip():
+        return active.strip()
     return os.getenv("MEMORY_USER_ID", DEFAULT_MEMORY_USER).strip() or DEFAULT_MEMORY_USER
+
+
+def set_active_user_id(user_id: str) -> None:
+    """按请求设置当前记忆身份（多用户：API 层在 producer 线程调用）。"""
+    _active_user_ctx.set((user_id or "").strip() or DEFAULT_MEMORY_USER)
+
+
+def clear_active_user_id() -> None:
+    """清除请求级记忆身份（测试隔离 / 请求结束）。"""
+    _active_user_ctx.set(None)
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -56,6 +73,8 @@ def _get_conn() -> sqlite3.Connection:
                 embedding     TEXT,
                 importance    REAL NOT NULL DEFAULT 0.5,
                 source        TEXT NOT NULL DEFAULT 'user_explicit',
+                expected_valid_days INTEGER,
+                last_reviewed_at TEXT,
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT NOT NULL,
                 version       INTEGER NOT NULL DEFAULT 1,
@@ -64,6 +83,11 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(memory_items)").fetchall()}
+        if "expected_valid_days" not in cols:
+            _conn.execute("ALTER TABLE memory_items ADD COLUMN expected_valid_days INTEGER")
+        if "last_reviewed_at" not in cols:
+            _conn.execute("ALTER TABLE memory_items ADD COLUMN last_reviewed_at TEXT")
         _conn.execute(
             """
             CREATE TABLE IF NOT EXISTS memory_events (
@@ -225,8 +249,9 @@ def _row_to_dict(row: sqlite3.Row | tuple) -> dict:
         return dict(row)
     cols = (
         "id", "user_id", "thread_id", "scope", "kind", "content", "entity",
-        "embedding", "importance", "source", "created_at", "updated_at",
-        "version", "superseded_by", "deleted_at",
+        "embedding", "importance", "source",
+        "expected_valid_days", "last_reviewed_at",
+        "created_at", "updated_at", "version", "superseded_by", "deleted_at",
     )
     return dict(zip(cols, row))
 
@@ -258,6 +283,9 @@ def _active_duplicate(
     if entity:
         sql += " AND entity = ? COLLATE NOCASE"
         params.append(entity)
+    else:
+        # 无实体锚点时只与同样无实体的条目竞争，避免误覆盖带实体的记忆
+        sql += " AND (entity IS NULL OR entity = '')"
     if thread_id:
         sql += " AND thread_id = ?"
         params.append(thread_id)
@@ -278,6 +306,7 @@ def add_memory(
     importance: float = 0.5,
     smart_conflict: bool = False,
     llm=None,
+    expected_valid_days: Optional[int] = None,
 ) -> dict:
     """写入一条记忆；处理同义合并与漂移覆盖（supersede），并写审计。
 
@@ -300,6 +329,12 @@ def add_memory(
     except (TypeError, ValueError):
         importance = 0.5
     importance = max(0.0, min(1.0, importance))
+    try:
+        expected_valid_days = int(expected_valid_days)
+    except (TypeError, ValueError):
+        expected_valid_days = None
+    if expected_valid_days is not None:
+        expected_valid_days = max(1, min(3650, expected_valid_days))
 
     # 语义冲突决策放锁外（LLM 网络调用不持库锁）
     decision = None
@@ -337,14 +372,15 @@ def add_memory(
             """
             INSERT INTO memory_items
               (id, user_id, thread_id, scope, kind, content, entity, embedding,
-               importance, source, created_at, updated_at, version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+               importance, source, expected_valid_days, created_at, updated_at, version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (item_id, user_id, thread_id, scope, kind, content, entity, embedding,
-             importance, source, now, now),
+             importance, source, expected_valid_days, now, now),
         )
-        if old is not None and not (decision and decision["action"] == "MERGE"):
-            # 漂移覆盖：旧条目保留可追溯，但不再参与检索
+        if old is not None and entity and not (decision and decision["action"] == "MERGE"):
+            # 漂移覆盖（仅限有实体锚点的同一事实）：旧条目保留可追溯，
+            # 但不再参与检索；无实体的多条陈述是独立记忆，不互相覆盖。
             conn.execute(
                 "UPDATE memory_items SET superseded_by = ? WHERE id = ?",
                 (item_id, old["id"]),
@@ -357,13 +393,163 @@ def add_memory(
             "SELECT * FROM memory_items WHERE id = ?", (item_id,)
         ).fetchone()
         item = _row_to_dict(row)
-        if old is not None and decision and decision["action"] == "MERGE":
+        if old is not None and entity and decision and decision["action"] == "MERGE":
             item["action"] = "merge"
+        elif old is not None and entity:
+            item["action"] = "supersede"
         else:
-            item["action"] = "supersede" if old is not None else "create"
+            item["action"] = "create"
     _chroma_upsert(item)
     _evict_over_capacity(user_id)
     return item
+
+
+def import_memories(user_id: str, items: list[dict]) -> dict:
+    """批量导入记忆（source='imported'）：内容去重、校验后逐条写入。
+
+    返回 {"added": n, "dup": n, "invalid": n}；与自动抽取/用户明确的
+    内容重复时跳过（避免双份）。
+    """
+    from src.memory.extract import _dedup_key
+
+    stats = {"added": 0, "dup": 0, "invalid": 0}
+    existing_keys = {
+        _dedup_key(i.get("content")) for i in list_memories(user_id, scope="user")
+    }
+    for item in items or []:
+        content = str(item.get("content") or "").strip()
+        if not content:
+            stats["invalid"] += 1
+            continue
+        key = _dedup_key(content)
+        if key in existing_keys:
+            stats["dup"] += 1
+            continue
+        kind = str(item.get("kind") or "preference").strip().lower()
+        if kind not in VALID_KINDS or kind in ("profile", "event"):
+            kind = "preference"
+        try:
+            importance = float(item.get("importance") or 0.5)
+        except (TypeError, ValueError):
+            importance = 0.5
+        entity = str(item.get("entity") or "").strip() or None
+        add_memory(
+            user_id=user_id,
+            content=content,
+            kind=kind,
+            entity=entity,
+            scope="user",
+            source="imported",
+            importance=importance,
+        )
+        existing_keys.add(key)
+        stats["added"] += 1
+    return stats
+
+
+MAX_IMPORT_FILE_BYTES = 2 * 1024 * 1024
+_IMPORT_KINDS = VALID_KINDS - {"profile", "event"}
+
+
+def parse_import_file(
+    filename: str,
+    raw: bytes,
+    max_bytes: int = MAX_IMPORT_FILE_BYTES,
+) -> list[dict]:
+    """解析记忆导入文件，返回 import_memories 可消费的 items。
+
+    支持：
+      - .txt / .md / .text：每行一条记忆；
+      - .json：记忆对象数组（或 {"items": [...]}），字段
+        content（必填）/ kind / entity / importance；
+      - .csv：首行含 content 列时按表头映射，否则取第一列；
+        表头可选 content, kind, entity, importance。
+
+    解析失败抛 ValueError（中文提示）；空内容行/空对象自动跳过。
+    """
+    if not raw:
+        return []
+    if len(raw) > max_bytes:
+        raise ValueError(f"文件超过 {max_bytes // (1024 * 1024)}MB 限制")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise ValueError("文件编码仅支持 UTF-8（可带 BOM）")
+
+    suffix = Path(filename).suffix.lower()
+    if suffix in (".txt", ".md", ".text", ""):
+        return [
+            {"content": line.strip(), "kind": "preference"}
+            for line in text.splitlines()
+            if line.strip()
+        ]
+
+    if suffix == ".json":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            raise ValueError("JSON 文件格式错误，应为记忆对象数组")
+        if isinstance(payload, dict):
+            payload = payload.get("items")
+        if not isinstance(payload, list):
+            raise ValueError("JSON 文件应为记忆对象数组（或 {\"items\": [...]}）")
+        out: list[dict] = []
+        for it in payload:
+            if not isinstance(it, dict):
+                continue
+            content = str(it.get("content") or "").strip()
+            if not content:
+                continue
+            item = {"content": content, "kind": "preference"}
+            kind = str(it.get("kind") or "preference").strip().lower()
+            if kind in _IMPORT_KINDS:
+                item["kind"] = kind
+            entity = str(it.get("entity") or "").strip()
+            if entity:
+                item["entity"] = entity
+            try:
+                item["importance"] = float(it.get("importance") or 0.5)
+            except (TypeError, ValueError):
+                item["importance"] = 0.5
+            out.append(item)
+        return out
+
+    if suffix == ".csv":
+        import csv
+        import io
+
+        reader = csv.reader(io.StringIO(text))
+        rows = [r for r in reader if any(str(c).strip() for c in r)]
+        if not rows:
+            return []
+        header = [str(c).strip().lower() for c in rows[0]]
+        has_header = "content" in header
+        out = []
+        for row in rows[1:] if has_header else rows:
+            if not row or not str(row[0] or "").strip():
+                continue
+            if not has_header:
+                out.append({"content": str(row[0]).strip(), "kind": "preference"})
+                continue
+            rec = dict(zip(header, row))
+            content = str(rec.get("content") or "").strip()
+            if not content:
+                continue
+            item = {"content": content, "kind": "preference"}
+            kind = str(rec.get("kind") or "preference").strip().lower()
+            if kind in _IMPORT_KINDS:
+                item["kind"] = kind
+            entity = str(rec.get("entity") or "").strip()
+            if entity:
+                item["entity"] = entity
+            try:
+                item["importance"] = float(rec.get("importance") or 0.5)
+            except (TypeError, ValueError):
+                item["importance"] = 0.5
+            out.append(item)
+        return out
+
+    raise ValueError("仅支持 .txt / .md / .json / .csv 文件")
 
 
 def search_memories(

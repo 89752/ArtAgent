@@ -1,0 +1,27 @@
+{
+  "description": "绘画技法与美学分析评测集（框架判定 + 拒绝分支）。image_path 留空表示待补充样例图；填写后可用 eval/painting_analysis_eval.py 在线评估。",
+  "metrics": ["framework_accuracy", "reject_recall", "schema_completeness", "suggestion_specificity", "boundary_compliance"],
+  "cases": [
+    { "id": "realistic_01", "framework": "realistic", "image_path": "", "note": "写实风景，一点透视，消失点统一" },
+    { "id": "realistic_02", "framework": "realistic", "image_path": "", "note": "写实人像，三点透视，比例基本正确" },
+    { "id": "realistic_03", "framework": "realistic", "image_path": "", "note": "写实静物，透视消失点不统一（负例）" },
+    { "id": "realistic_04", "framework": "realistic", "image_path": "", "note": "写实室内场景，两点透视地平线偏高" },
+    { "id": "realistic_05", "framework": "realistic", "image_path": "", "note": "写实海景，空气透视层次清晰" },
+    { "id": "realistic_06", "framework": "realistic", "image_path": "", "note": "写实肖像，明暗对比强、背景简化" },
+    { "id": "realistic_07", "framework": "realistic", "image_path": "", "note": "素描习作，线条生硬、轮廓反复涂改" },
+    { "id": "realistic_08", "framework": "realistic", "image_path": "", "note": "水彩风景，低饱和灰调、构图偏满" },
+    { "id": "realistic_09", "framework": "realistic", "image_path": "", "note": "油画人物，互补色点缀、笔触厚涂" },
+    { "id": "realistic_10", "framework": "realistic", "image_path": "", "note": "线稿，比例失衡、左右不对称" },
+    { "id": "abstract_01", "framework": "abstract", "image_path": "", "note": "抽象表现，色块构成，无透视" },
+    { "id": "abstract_02", "framework": "abstract", "image_path": "", "note": "几何抽象，对称与节奏感强" },
+    { "id": "abstract_03", "framework": "abstract", "image_path": "", "note": "泼溅抽象，低饱和、肌理丰富" },
+    { "id": "abstract_04", "framework": "abstract", "image_path": "", "note": "极简抽象，大面积留白" },
+    { "id": "childlike_01", "framework": "childlike", "image_path": "", "note": "儿童蜡笔画，比例夸张、透视朴素" },
+    { "id": "childlike_02", "framework": "childlike", "image_path": "", "note": "低龄涂鸦，线条抖动、色彩鲜艳" },
+    { "id": "decorative_01", "framework": "decorative", "image_path": "", "note": "对称装饰纹样，图案化配色" },
+    { "id": "decorative_02", "framework": "decorative", "image_path": "", "note": "平面装饰风景，无透视、色块分区" },
+    { "id": "not_painting_01", "framework": "not_painting", "image_path": "", "note": "摄影照片（负例）" },
+    { "id": "not_painting_02", "framework": "not_painting", "image_path": "", "note": "纯文字截图（负例）" },
+    { "id": "not_painting_03", "framework": "not_painting", "image_path": "", "note": "表格/图表截图（负例）" }
+  ]
+}

@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import re
 import secrets
 import sqlite3
 import threading
@@ -45,10 +47,20 @@ def _get_conn() -> sqlite3.Connection:
             CREATE TABLE IF NOT EXISTS users (
                 user_id    TEXT PRIMARY KEY,
                 name       TEXT NOT NULL,
+                username   TEXT UNIQUE,
+                password_hash TEXT,
+                is_admin   INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
             """
         )
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "username" not in cols:
+            _conn.execute("ALTER TABLE users ADD COLUMN username TEXT UNIQUE")
+        if "password_hash" not in cols:
+            _conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        if "is_admin" not in cols:
+            _conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
         _conn.execute(
             """
             CREATE TABLE IF NOT EXISTS api_keys (
@@ -75,6 +87,139 @@ def init_db() -> None:
     """建表并确保默认 web_user 存在（旧单用户数据归属）。"""
     _get_conn()
     ensure_default_user()
+    ensure_default_account()
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_hex(8)
+    digest = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    return f"{salt}:{digest}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    if not stored or ":" not in stored:
+        return False
+    salt, digest = stored.split(":", 1)
+    return hashlib.sha256(f"{salt}:{password}".encode()).hexdigest() == digest
+
+
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,40}$")
+_RESERVED_USERNAMES = {"user", "web_user", "admin", "root", "system"}
+PASSWORD_MIN_LEN = 8
+
+
+def validate_username(username: str) -> str:
+    """自助注册用用户名校验：3-40 位字母/数字/._-，禁保留名。"""
+    u = (username or "").strip()
+    if not _USERNAME_RE.match(u):
+        raise ValueError("用户名需为 3-40 位，仅限字母、数字、下划线、点或短横线")
+    if u.lower() in _RESERVED_USERNAMES:
+        raise ValueError("该用户名不可用，请换一个")
+    return u
+
+
+def validate_password(password: str) -> str:
+    """自助注册/改密用密码强度校验。"""
+    if not password or len(password) < PASSWORD_MIN_LEN:
+        raise ValueError(f"密码至少 {PASSWORD_MIN_LEN} 位")
+    if len(password) > 128:
+        raise ValueError("密码过长（最多 128 位）")
+    return password
+
+
+def register_user(username: str, password: str, name: str = "") -> dict:
+    """自助注册：校验用户名/密码 → 建号 → 返回 {user, api_key}。"""
+    username = validate_username(username)
+    password = validate_password(password)
+    name = (name or "").strip()[:60] or username
+    uid = f"u_{secrets.token_hex(8)}"
+    key = f"sk-{secrets.token_hex(24)}"
+    with _lock:
+        conn = _get_conn()
+        if conn.execute(
+            "SELECT 1 FROM users WHERE username = ?", (username,)
+        ).fetchone():
+            raise KeyError(f"用户名已存在：{username}")
+        conn.execute(
+            """
+            INSERT INTO users (user_id, name, username, password_hash, is_admin, created_at)
+            VALUES (?, ?, ?, ?, 0, ?)
+            """,
+            (uid, name, username, _hash_password(password), _now()),
+        )
+        conn.execute(
+            "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, 'default', ?)",
+            (key, uid, _now()),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO user_settings (user_id, dataset_id) VALUES (?, 'core')",
+            (uid,),
+        )
+        conn.commit()
+    logger.info("[users] 自助注册新用户 %s (%s)", uid, username)
+    return {"user": get_user(uid), "api_key": key}
+
+
+def change_password(
+    user_id: str,
+    old_password: str,
+    new_password: str,
+    keep_token: str | None = None,
+) -> bool:
+    """本人修改密码：校验旧密码 → 更新哈希 → 吊销其他会话 token（保留当前）。"""
+    user = get_user(user_id)
+    if user is None:
+        raise KeyError("用户不存在")
+    if not _verify_password(old_password or "", user.get("password_hash")):
+        raise ValueError("当前密码不正确")
+    new_password = validate_password(new_password)
+    with _lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            (_hash_password(new_password), user_id),
+        )
+        if keep_token:
+            conn.execute(
+                "DELETE FROM api_keys WHERE user_id = ? AND label = 'session' AND key != ?",
+                (user_id, keep_token),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM api_keys WHERE user_id = ? AND label = 'session'",
+                (user_id,),
+            )
+        conn.commit()
+    logger.info("[users] 用户 %s 已修改密码", user_id)
+    return True
+
+
+def ensure_default_account() -> dict:
+    """默认登录账号 user / 11111111（正式多用户模式的默认身份）。"""
+    with _lock:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT * FROM users WHERE username = ?", ("user",)
+        ).fetchone()
+        if row:
+            return dict(row)
+        user_id = "user"
+        conn.execute(
+            """
+            INSERT INTO users (user_id, name, username, password_hash, is_admin, created_at)
+            VALUES (?, ?, ?, ?, 1, ?)
+            """,
+            (user_id, "默认用户", "user", _hash_password("11111111"), _now()),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO user_settings (user_id, dataset_id) VALUES (?, 'core')",
+            (user_id,),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return dict(row)
 
 
 def _now() -> str:
@@ -113,8 +258,11 @@ def create_user(name: str, api_key: str | None = None, label: str = "default") -
     with _lock:
         conn = _get_conn()
         conn.execute(
-            "INSERT INTO users (user_id, name, created_at) VALUES (?, ?, ?)",
-            (user_id, name, _now()),
+            """
+            INSERT INTO users (user_id, name, username, password_hash, is_admin, created_at)
+            VALUES (?, ?, ?, ?, 0, ?)
+            """,
+            (user_id, name, None, None, _now()),
         )
         conn.execute(
             "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, ?, ?)",
@@ -127,6 +275,99 @@ def create_user(name: str, api_key: str | None = None, label: str = "default") -
         conn.commit()
     logger.info("[users] 已创建用户 %s (%s)", user_id, name)
     return {"user": get_user(user_id), "api_key": key}
+
+
+def create_user_with_password(
+    name: str,
+    username: str,
+    password: str,
+    user_id: str | None = None,
+    is_admin: bool = False,
+) -> dict:
+    """创建带账号密码的用户；返回 {user, api_key}。"""
+    name = (name or "").strip()[:60] or username or f"user-{secrets.token_hex(3)}"
+    username = (username or "").strip()[:40] or f"u_{secrets.token_hex(4)}"
+    uid = user_id or f"u_{secrets.token_hex(8)}"
+    key = f"sk-{secrets.token_hex(24)}"
+    with _lock:
+        conn = _get_conn()
+        if conn.execute(
+            "SELECT 1 FROM users WHERE username = ?", (username,)
+        ).fetchone():
+            raise KeyError(f"用户名已存在：{username}")
+        conn.execute(
+            """
+            INSERT INTO users (user_id, name, username, password_hash, is_admin, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (uid, name, username, _hash_password(password), 1 if is_admin else 0, _now()),
+        )
+        conn.execute(
+            "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, ?, ?)",
+            (key, uid, "default", _now()),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO user_settings (user_id, dataset_id) VALUES (?, 'core')",
+            (uid,),
+        )
+        conn.commit()
+    return {"user": get_user(uid), "api_key": key}
+
+
+def get_user_by_username(username: str) -> Optional[dict]:
+    if not username:
+        return None
+    with _lock:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT * FROM users WHERE username = ?", (username,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def verify_login(username: str, password: str) -> Optional[dict]:
+    """校验账号密码；成功返回用户，失败返回 None。"""
+    user = get_user_by_username((username or "").strip())
+    if user is None or not _verify_password(password or "", user.get("password_hash")):
+        return None
+    return user
+
+
+def issue_session_token(user_id: str) -> str:
+    """为已登录用户签发会话 token（存 api_keys，label='session'）。"""
+    token = secrets.token_hex(24)
+    with _lock:
+        _get_conn().execute(
+            "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, 'session', ?)",
+            (token, user_id, _now()),
+        )
+        _get_conn().commit()
+    return token
+
+
+def reset_password(user_id: str, password: str) -> bool:
+    """重置用户密码；返回是否更新成功。"""
+    if not user_id or not password:
+        return False
+    with _lock:
+        cur = _get_conn().execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            (_hash_password(password), user_id),
+        )
+        _get_conn().commit()
+        return cur.rowcount > 0
+
+
+def public_user(user: Optional[dict]) -> Optional[dict]:
+    """对外暴露的用户信息（不含密码哈希）。"""
+    if not user:
+        return None
+    return {
+        "user_id": user.get("user_id"),
+        "name": user.get("name"),
+        "username": user.get("username"),
+        "is_admin": bool(user.get("is_admin")),
+    }
 
 
 def get_user(user_id: str) -> Optional[dict]:
@@ -234,7 +475,8 @@ def delete_user(user_id: str, cascade: bool = True) -> dict:
         raise KeyError(f"用户不存在：{user_id}")
 
     result: dict = {"user_id": user_id, "sessions": 0, "preferences": 0,
-                    "summaries": 0, "documents": 0, "api_keys": 0}
+                    "summaries": 0, "documents": 0, "feedback": 0,
+                    "api_keys": 0}
     if cascade:
         # 会话/偏好/摘要（级联接口依赖平台集成进度；缺失或签名不符时跳过并告警）
         try:
@@ -246,15 +488,24 @@ def delete_user(user_id: str, cascade: bool = True) -> dict:
         try:
             from src.memory.memory_items import clear_user_memories
             from src.memory.summary import delete_user_summaries
+            from src.memory.user_doc import delete_user_doc
+            from src.memory.lifecycle import delete_user_meta
 
             result["preferences"] = clear_user_memories(user_id)
             result["summaries"] = delete_user_summaries(user_id)
+            result["user_doc"] = delete_user_doc(user_id)
+            result["lifecycle_meta"] = delete_user_meta(user_id)
         except (ImportError, TypeError) as e:
             logger.warning("[users] 偏好/摘要级联接口缺失，跳过：%s", e)
 
-        # 文档尚未按用户隔离（documents_store 无 user_id 维度）：不级联删除，
-        # 避免误删共享文档；待平台集成用户隔离后再接回。
-        logger.warning("[users] 文档未按用户隔离，跳过文档级联（平台集成待续）")
+        try:
+            from src.data.documents_store import delete_documents_by_user
+            from src.memory.feedback import delete_user_feedback
+
+            result["documents"] = delete_documents_by_user(user_id)
+            result["feedback"] = delete_user_feedback(user_id)
+        except (ImportError, TypeError) as e:
+            logger.warning("[users] 文档/反馈级联接口缺失，跳过：%s", e)
 
     with _lock:
         conn = _get_conn()

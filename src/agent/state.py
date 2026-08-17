@@ -59,6 +59,10 @@ class AgentState(BaseModel):
     memory_items: list[dict] = Field(default_factory=list)
     # 当前会话已上传的文档清单（[{doc_name, pages, kind, text_chunks, image_pages}]）
     uploaded_docs: list[dict] = Field(default_factory=list)
+    # 当前会话已上传的图片（[{image_id, original_name, width, height, session_id}]）
+    uploaded_images: list[dict] = Field(default_factory=list)
+    # 当前会话已产生的分析报告（[{image_id, framework, result_path, updated_at}]）
+    analysis_reports: list[dict] = Field(default_factory=list)
     # 信息缺口澄清路由信号："ask"=追问用户并短路；"continue"=放行
     ask_user: str = "continue"
     # RAG 开关（收尾项）：False = 无需检索，走直接回答
@@ -105,8 +109,9 @@ class AgentState(BaseModel):
     retry_count: int = 0
 
     # ── 长期记忆 ───────────────────────────────────────────────
-    # 稳定用户标识，跨会话记忆的 key
-    user_id: str = "default_user"
+    # 稳定用户标识，跨会话记忆的 key；空串时由 load_memory/save_memory
+    # 回落 get_memory_user_id()（环境变量/ContextVar），服务端显式传入
+    user_id: str = ""
     # 会话标识（Web 传 sid；用于滚动摘要按会话存取）
     conversation_id: str = "default"
     # 从持久化存储读出的用户偏好：{"artists": [...], "styles": [...]}

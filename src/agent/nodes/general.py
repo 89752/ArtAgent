@@ -46,52 +46,6 @@ TOOL_BY_NAME: dict[str, object] = {
 }
 
 
-# 路由决策注入：路由层判定后，向 general 分支下发"必须调用工具"的
-# 强指令（区别于 intent_tool_suggestions 的软建议），防止模型自行短路。
-ROUTE_DIRECTIVES: dict[str, str] = {
-    "rag": (
-        "路由决策：本问题需要本地知识/用户文档证据，优先调用 semantic_search；"
-        "本地不足时再用 exact_lookup / query_painter_knowledge 或 web_search 补充。"
-    ),
-    "web": (
-        "路由决策：本问题需要实时/时效信息，必须调用 web_search 获取，"
-        "不得直接凭记忆回答。"
-    ),
-    "comparison": (
-        "路由决策：本问题是对比类，必须调用 compare_subjects 收集双方证据后"
-        "再组织回答，不得直接凭记忆回答。"
-    ),
-    "timeline": (
-        "路由决策：本问题需要梳理风格演变，必须调用 timeline_by_periods 获取"
-        "分期证据后再组织回答，不得直接凭记忆编造分期。"
-    ),
-    "recommendation": (
-        "路由决策：本问题需要个性化推荐，必须调用 recommend_with_exclusions "
-        "生成候选后再组织回答（用户信息不足时先澄清）。"
-    ),
-}
-
-
-def _route_directive_message(route: str) -> SystemMessage | None:
-    """把路由决策转成 system 指令；未知/空路由不注入。"""
-    if not route:
-        return None
-    if route.startswith("tool:"):
-        name = route.split(":", 1)[1]
-        if not name:
-            return None
-        return SystemMessage(
-            content=(
-                f"路由决策：本问题应优先调用工具 {name}。"
-                "请按工具说明正确传参；若确实不适用再选择其他工具。"
-            )
-        )
-    text = ROUTE_DIRECTIVES.get(route)
-    if text:
-        return SystemMessage(content=text)
-    return None
-
-
 def _enforce_memory_write(response, state) -> object:
     """守卫：用户明确要求记忆、但模型本轮没调 remember → 系统代调。
 
@@ -267,19 +221,6 @@ def _get_llm_with_tools():
     return get_deterministic_llm().bind_tools(GENERAL_TOOLS)
 
 
-def _intent_suggestion_message(state: AgentState):
-    """把意图打分的工具建议注入为一条 system 消息（软指引，不强制）。"""
-    from src.agent.intent_tree import intent_tool_suggestions
-
-    hints = intent_tool_suggestions(state.intent_scores)
-    if not hints:
-        return None
-    body = "意图分析建议优先考虑的工具（仅供参考，按需选择）：\n" + "\n".join(
-        f"- {h}" for h in hints
-    )
-    return SystemMessage(content=body)
-
-
 def general_agent(state: AgentState) -> dict:
     """核心 LLM 节点：ContextBuilder 组装结构化上下文，决定直接回答或调用工具。"""
     from src.agent.context import (
@@ -298,12 +239,18 @@ def general_agent(state: AgentState) -> dict:
         trim_history,
     )
     from src.skills.loader import load_skills
+    from src.skills.activation import apply_slash_activation
 
+    skills = load_skills()
     history = trim_history(state.messages)
+    history, activated_skill, activation_block = apply_slash_activation(history, skills)
     system = SYSTEM_PROMPT
-    skills_index = format_skills_index(load_skills())
+    skills_index = format_skills_index(skills)
     if skills_index:
         system += "\n\n" + skills_index
+    if activation_block:
+        system += "\n\n" + activation_block
+        log_event(logger, "skill", action="slash_activate", skill=activated_skill)
     blocks = ContextBlocks(
         system=system,
         profile=build_profile_block(state.user_preferences),
@@ -314,6 +261,9 @@ def general_agent(state: AgentState) -> dict:
                 "recommended_artists": state.recommended_artists,
                 "pending_clarification": state.pending_clarification,
                 "uploaded_docs": state.uploaded_docs,
+                "uploaded_images": state.uploaded_images,
+                "analysis_reports": state.analysis_reports,
+                "session_id": state.conversation_id,
             }
         ),
         evidence=format_numbered_evidence_block(
@@ -324,12 +274,6 @@ def general_agent(state: AgentState) -> dict:
     )
     blocks = apply_budget(blocks)
     messages = blocks.to_system_messages()
-    suggestion = _intent_suggestion_message(state)
-    if suggestion is not None:
-        messages.append(suggestion)
-    directive = _route_directive_message(state.route)
-    if directive is not None:
-        messages.append(directive)
     messages.extend(condense_tool_messages(history))
     context_chars = estimate_context_chars(blocks)
     log_event(logger, "context_volume", chars=context_chars,
@@ -401,7 +345,7 @@ def _ledger_updates(merged, state: AgentState) -> dict:
             for d in data:
                 if isinstance(d, dict) and d.get("title"):
                     shown.append(str(d["title"]))
-        elif name == "recommend_with_exclusions" and isinstance(data, dict):
+        elif name == "skill_art_recommendation" and isinstance(data, dict):
             for c in data.get("candidates") or []:
                 if isinstance(c, dict) and c.get("author"):
                     recommended.append(str(c["author"]))

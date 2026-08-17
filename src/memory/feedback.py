@@ -33,6 +33,7 @@ def _get_conn() -> sqlite3.Connection:
             """
             CREATE TABLE IF NOT EXISTS feedback (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    TEXT NOT NULL DEFAULT 'web_user',
                 session_id TEXT NOT NULL,
                 rating     INTEGER NOT NULL CHECK(rating IN (1, -1)),
                 reason     TEXT NOT NULL DEFAULT '',
@@ -40,6 +41,14 @@ def _get_conn() -> sqlite3.Connection:
                 created_at TEXT NOT NULL
             )
             """
+        )
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(feedback)").fetchall()}
+        if "user_id" not in cols:
+            _conn.execute(
+                "ALTER TABLE feedback ADD COLUMN user_id TEXT NOT NULL DEFAULT 'web_user'"
+            )
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id, id)"
         )
         _conn.commit()
     return _conn
@@ -54,6 +63,7 @@ def add_feedback(
     rating: int,
     reason: str = "",
     comment: str = "",
+    user_id: str = "web_user",
 ) -> int:
     """写入一条反馈；返回自增 id。rating 仅接受 1 / -1。"""
     rating = int(rating)
@@ -65,10 +75,10 @@ def add_feedback(
         conn = _get_conn()
         cur = conn.execute(
             """
-            INSERT INTO feedback (session_id, rating, reason, comment, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO feedback (user_id, session_id, rating, reason, comment, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (str(session_id)[:128], rating, reason, comment, _now()),
+            (user_id, str(session_id)[:128], rating, reason, comment, _now()),
         )
         conn.commit()
     return int(cur.lastrowid)
@@ -77,19 +87,22 @@ def add_feedback(
 def list_feedback(
     limit: int = 100,
     offset: int = 0,
+    user_id: str = "web_user",
 ) -> tuple[list[dict], int]:
     """按时间倒序返回 (反馈列表, 总数)，供导出/人工审核。"""
     limit = min(max(1, int(limit)), 1000)
     offset = max(0, int(offset))
     with _lock:
         conn = _get_conn()
-        total = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM feedback WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
         rows = conn.execute(
             """
             SELECT id, session_id, rating, reason, comment, created_at
-            FROM feedback ORDER BY id DESC LIMIT ? OFFSET ?
+            FROM feedback WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            (user_id, limit, offset),
         ).fetchall()
     return (
         [
@@ -101,6 +114,18 @@ def list_feedback(
         ],
         total,
     )
+
+
+def delete_user_feedback(user_id: str) -> int:
+    """删除某用户全部反馈；返回删除条数（级联删除用）。"""
+    if not user_id:
+        return 0
+    with _lock:
+        cur = _get_conn().execute(
+            "DELETE FROM feedback WHERE user_id = ?", (user_id,)
+        )
+        _get_conn().commit()
+        return cur.rowcount
 
 
 def export_feedback(path: Path, limit: int = 10000) -> int:

@@ -7,7 +7,9 @@
 
 端点：https://api.jina.ai/v1/rerank，模型默认 jina-reranker-v3.5
 （可用 RERANK_MODEL 覆盖）；API Key 通过 RERANK_API_KEY 配置，
-未配置时精排降级回粗排原序。
+未配置时精排降级回粗排原序。本机无法直连 Jina 时，可配
+RERANK_PROXY（如 http://127.0.0.1:7890）只让 Jina 请求走代理，
+不影响 LLM 等其他调用。
 
 工程纪律：显式超时 + 有限重试；失败返回 None 由调用方降级回 RRF 原序
 ——精排是增强不是依赖，检索绝不因 reranker 挂掉而失败。
@@ -42,6 +44,11 @@ def _active_api_key() -> str:
     return os.getenv("RERANK_API_KEY", "").strip()
 
 
+def _active_proxy() -> str:
+    """Jina 专用代理（RERANK_PROXY，调用时动态读取）；空串表示直连。"""
+    return os.getenv("RERANK_PROXY", "").strip()
+
+
 def rerank_available() -> bool:
     """Jina API 依赖 RERANK_API_KEY。"""
     return bool(_active_api_key())
@@ -64,8 +71,13 @@ def _call_jina(
         "documents": documents,
         "top_n": min(top_n, len(documents)),
     }
+    proxy = _active_proxy()
     resp = requests.post(
-        JINA_RERANK_URL, headers=_headers(), json=payload, timeout=REQUEST_TIMEOUT
+        JINA_RERANK_URL,
+        headers=_headers(),
+        json=payload,
+        timeout=REQUEST_TIMEOUT,
+        proxies={"http": proxy, "https": proxy} if proxy else None,
     )
     resp.raise_for_status()
     results = resp.json().get("results") or []

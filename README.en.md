@@ -20,7 +20,7 @@ python api.py
 # Open http://127.0.0.1:7860
 ```
 
-> The repository does not include data assets. Running locally requires `data/` (core library CSV, Chroma vector index, SQLite memory store, `data/core/images/` images); if you only have the CSV, rebuild the index with `python scripts/index_core.py --csv data/core/artworks_core.csv`.
+> The repository does not include data assets. Running locally requires `data/` (core library CSV, Chroma vector index, SQLite memory store, `data/core/images/` images); if you only have the CSV, rebuild the index with `python scripts/06_index_core.py --csv data/core/artworks_core.csv`.
 
 ## Use Cases
 

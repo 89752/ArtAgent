@@ -49,8 +49,8 @@ NORMALIZE_PROMPT = """把用户表达的记忆意图规范化为一条第三人�
 
 
 def smart_merge_enabled() -> bool:
-    """MEMORY_SMART_MERGE 开关（默认关，避免默认链路引入额外 LLM 成本）。"""
-    return env_flag("MEMORY_SMART_MERGE")
+    """MEMORY_SMART_MERGE 开关（默认开，对齐 DeerFlow 的合并式记忆维护）。"""
+    return env_flag("MEMORY_SMART_MERGE", default="1")
 
 
 def _default_llm() -> Callable[[str], str]:

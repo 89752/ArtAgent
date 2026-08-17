@@ -1,18 +1,18 @@
 """工具执行治理：统一超时、重试与失败包装。
 
-graph 内所有工具调用经 governed_invoke 执行：超时（默认 60s，env TOOL_TIMEOUT_SEC）、
-瞬时失败重试（默认 1 次，env TOOL_RETRIES）。最终失败返回结构化错误 JSON，
-不抛异常中断整轮推理。
+graph 内所有工具调用经 governed_invoke 执行：超时、瞬时失败重试、输出截断。
+参数来源：config.yaml（governance.*），环境变量 TOOL_TIMEOUT_SEC 等仍可覆盖。
+最终失败返回结构化错误 JSON，不抛异常中断整轮推理。
 """
 
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from typing import Any, Callable
 
+from src.utils.config import get_float, get_int
 from src.utils.logging_config import get_logger
 
 logger = get_logger("utils.governance")
@@ -43,25 +43,16 @@ def run_with_timeout(fn: Callable[[], Any], timeout_sec: float) -> Any:
 
 
 def _timeout_sec() -> float:
-    try:
-        return max(1.0, float(os.getenv("TOOL_TIMEOUT_SEC", "60")))
-    except ValueError:
-        return 60.0
+    return get_float("governance.tool_timeout_sec", 60.0, lo=1.0)
 
 
 def _retries() -> int:
-    try:
-        return max(0, int(os.getenv("TOOL_RETRIES", "1")))
-    except ValueError:
-        return 1
+    return get_int("governance.tool_retries", 1, lo=0)
 
 
 def _output_limit() -> int:
     """单条工具返回的 JSON 上限（对齐 skills runner 的 2000 字符）。"""
-    try:
-        return max(200, int(os.getenv("TOOL_OUTPUT_MAX_CHARS", "2000")))
-    except ValueError:
-        return 2000
+    return get_int("governance.tool_output_max_chars", 2000, lo=200)
 
 
 def _truncate_payload(payload: Any, limit: int) -> Any:

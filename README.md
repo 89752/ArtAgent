@@ -18,9 +18,18 @@ cp .env.example .env
 # 3. 启动 Web 界面
 python api.py
 # 打开 http://127.0.0.1:7860
+
+# 前端开发（可选，React + Vite，需要 Node 20+）
+cd frontend
+npm install
+npm run dev
+# 打开 http://127.0.0.1:5173（/api 与 /static 自动代理到 7860）
+
+# 前端生产构建：产物输出到 static/dist，由 FastAPI 直接托管
+npm run build
 ```
 
-> 仓库不包含数据资产。运行前需要本地 `data/`（核心库 CSV、Chroma 向量索引、SQLite 记忆库、`data/core/images/` 图片）；只有 CSV 时可执行 `python scripts/index_core.py --csv data/core/artworks_core.csv` 重建索引。
+> 仓库不包含数据资产。运行前需要本地 `data/`（核心库 CSV、Chroma 向量索引、SQLite 记忆库、`data/core/images/` 图片）；只有 CSV 时可执行 `python scripts/06_index_core.py --csv data/core/artworks_core.csv` 重建索引。
 
 ## 应用场景
 
@@ -67,7 +76,7 @@ python api.py
 | 对话模型 | DeepSeek / Qwen（OpenAI 兼容 API） |
 | 视觉模型 | Qwen-Omni（图像分析、PDF 整页图） |
 | 记忆与会话 | SQLite（memory_items / memory_events / conversations / conversation_summary） |
-| Web 前端 | FastAPI + SSE + 原生 HTML/CSS/JS |
+| Web 前端 | React 19 + TypeScript + Vite（SSE 流式对话） |
 | 测试 | pytest 快档（54 个测试文件，离线，CI 已接入） |
 
 ## 评估
@@ -114,7 +123,8 @@ pytest                                           # 快档离线测试
 ```text
 api.py                 # FastAPI 后端（SSE 流式，python api.py 启动）
 web/                   # 服务层：LangGraph 推理与渲染
-static/                # 原生前端（index.html + app.js + app.css）
+frontend/              # React 前端（Vite + TypeScript；构建产物输出到 static/dist）
+static/                # 静态资源（svg）与前端构建产物（dist/）
 src/
 ├─ agent/              # LangGraph 图、意图树、改写、节点、上下文
 ├─ memory/             # 长期记忆：条目化存储 / 自动抽取 / 冲突 / 画像 / 情景

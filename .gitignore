@@ -1,5 +1,6 @@
 # ── Secrets（务必排除，切勿提交 API key） ──
 .env
+config.yaml
 
 # ── 数据集与向量索引（体积大，不入库；README 说明如何获取/重建） ──
 # 注意：/data/ 只匹配仓库根目录的数据目录；若写成 data/ 会把 src/data/ 里的
@@ -24,12 +25,6 @@ SemArt/
 eval/agent_eval_report.md
 eval/results.md
 eval/case_cache/
-
-# ── AI 工具本地配置/产物（不入库） ──
-.claude/
-.agents/
-.workbuddy/
-skills-lock.json
 
 # ── Python ──
 __pycache__/
@@ -57,3 +52,8 @@ Thumbs.db
 *.log
 flagged/
 gradio_cached_examples/
+
+# ── Node 前端（React + Vite） ──
+node_modules/
+/static/dist/
+.pnpm-store/

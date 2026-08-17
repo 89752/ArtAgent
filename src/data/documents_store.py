@@ -32,6 +32,7 @@ _LEGACY_STATUS_FILE = Path(os.getenv("INDEX_DIR", "./data/index")) / "doc_status
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS documents (
     doc_id       TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL DEFAULT 'web_user',
     kb_id        TEXT NOT NULL DEFAULT 'default',
     kind         TEXT NOT NULL CHECK(kind IN ('pdf', 'table')),
     doc_name     TEXT,
@@ -71,6 +72,14 @@ def init_db() -> None:
     """建表；迁移旧 JSON；重置服务重启导致中断的解析任务（防僵尸轮询）。"""
     with _connect() as conn:
         conn.executescript(_CREATE_TABLE_SQL)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
+        if "user_id" not in cols:
+            conn.execute(
+                "ALTER TABLE documents ADD COLUMN user_id TEXT NOT NULL DEFAULT 'web_user'"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id, started_at)"
+        )
         cur = conn.execute(
             """
             UPDATE documents SET status = 'failed', error = ?
@@ -170,6 +179,7 @@ def _insert_from_legacy(doc_id: str, info: dict) -> None:
 def add_document(
     doc_id: str,
     kind: str,
+    user_id: str = "web_user",
     doc_name: str = "",
     kb_id: str = "default",
     status: str = "processing",
@@ -189,16 +199,17 @@ def add_document(
         conn.execute(
             """
             INSERT OR IGNORE INTO documents
-            (doc_id, kb_id, kind, doc_name, status, started_at, finished_at,
+            (doc_id, user_id, kb_id, kind, doc_name, status, started_at, finished_at,
              file_path, file_size, pages, text_chunks, image_pages,
              elapsed_sec, error, metadata)
             VALUES
-            (:doc_id, :kb_id, :kind, :doc_name, :status, :started_at, :finished_at,
+            (:doc_id, :user_id, :kb_id, :kind, :doc_name, :status, :started_at, :finished_at,
              :file_path, :file_size, :pages, :text_chunks, :image_pages,
              :elapsed_sec, :error, :metadata)
             """,
             {
                 "doc_id": doc_id,
+                "user_id": user_id,
                 "kb_id": kb_id,
                 "kind": kind,
                 "doc_name": doc_name,
@@ -251,34 +262,53 @@ def upsert_document(
     doc_id: str,
     kind: str = "pdf",
     status: str = "processing",
+    user_id: str = "web_user",
     **fields,
 ) -> None:
     """更新文档记录；不存在时自动创建（原 pipeline.update_doc_status 语义）。"""
     if get_document(doc_id) is None:
-        add_document(doc_id=doc_id, kind=kind, status=status, **fields)
+        add_document(doc_id=doc_id, kind=kind, user_id=user_id, status=status, **fields)
     else:
         fields["status"] = status  # status 是命名参数，不会进 fields，必须显式补回
         update_document(doc_id, **fields)
 
 
-def get_document(doc_id: str) -> Optional[dict]:
+def get_document(doc_id: str, user_id: str = "web_user") -> Optional[dict]:
     with _connect() as conn:
-        row = conn.execute("SELECT * FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM documents WHERE doc_id = ? AND user_id = ?",
+            (doc_id, user_id),
+        ).fetchone()
     return _to_status_dict(row) if row else None
 
 
-def list_documents() -> list[dict]:
+def list_documents(user_id: str = "web_user") -> list[dict]:
     with _connect() as conn:
-        rows = conn.execute("SELECT * FROM documents ORDER BY started_at DESC").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM documents WHERE user_id = ? ORDER BY started_at DESC",
+            (user_id,),
+        ).fetchall()
     return [_to_status_dict(r) for r in rows]
 
 
-def delete_document(doc_id: str) -> bool:
+def delete_document(doc_id: str, user_id: str = "web_user") -> bool:
     """删除 SQLite 中的记录；返回是否真删了一条。"""
     with _connect() as conn:
-        cur = conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+        cur = conn.execute(
+            "DELETE FROM documents WHERE doc_id = ? AND user_id = ?", (doc_id, user_id)
+        )
         conn.commit()
     return cur.rowcount > 0
+
+
+def delete_documents_by_user(user_id: str) -> int:
+    """删除某用户全部文档记录；返回删除条数（级联删除用，文件另行清理）。"""
+    if not user_id:
+        return 0
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM documents WHERE user_id = ?", (user_id,))
+        conn.commit()
+    return cur.rowcount
 
 
 # ------------------------------------------------------------------ #
