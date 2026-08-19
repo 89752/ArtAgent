@@ -12,6 +12,7 @@ import pytest
 import src.memory.conversations as conv
 import src.memory.memory_items as mi
 from src.analysis import store as an
+from src.data import db
 from src.data import documents_store as docs
 from src.ingestion import table_pipeline as tp
 from src.memory import feedback as fb
@@ -29,7 +30,8 @@ def _isolate(monkeypatch):
     an.DB_PATH = tmp / "user_images.db"
     an.init_db()
     conv._DB_PATH = tmp / "conversations.db"
-    conv._conn = None
+    conv._db_ready = False
+    db.close_all()
     monkeypatch.delenv("MEMORY_USER_ID", raising=False)
     with patch("src.memory.memory_items._embed", return_value=None):
         try:

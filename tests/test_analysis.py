@@ -3,7 +3,6 @@
 离线：monkeypatch 视觉调用与引擎；API 用 TestClient + 临时 SQLite 隔离。
 """
 
-import copy
 import json
 import os
 import tempfile
@@ -22,6 +21,7 @@ import src.analysis.metrics as metrics_mod
 import src.analysis.store as store
 import src.analysis.validate as validate_mod
 import web.analysis_service as analysis_service
+from src.data import db
 from src.data import documents_store
 from src.memory import conversations as conv_mod
 from src.memory import feedback as fb_mod
@@ -37,20 +37,39 @@ engine.USER_IMAGE_ROOT = _TMP / "uploads" / "user_images"
 documents_store.DB_PATH = _TMP / "documents.db"
 documents_store._LEGACY_STATUS_FILE = _TMP / "doc_status.json"
 conv_mod._DB_PATH = _TMP / "conversations.db"
-conv_mod._conn = None
+conv_mod._db_ready = False
 summary_mod._DB_PATH = _TMP / "conversations.db"
-summary_mod._conn = None
+summary_mod._db_ready = False
 fb_mod._DB_PATH = _TMP / "feedback.db"
-fb_mod._conn = None
+fb_mod._db_ready = False
 runs_mod._DB_PATH = _TMP / "observability.db"
-runs_mod._conn = None
+runs_mod._db_ready = False
 tasks_mod._DB_PATH = _TMP / "tasks.db"
-tasks_mod._conn = None
+tasks_mod._db_ready = False
+db.close_all()
 
 
 @pytest.fixture(autouse=True)
 def clean_tables():
+    # 重新断言各存储路径：pytest 命令行顺序可能让其他文件的 fixture
+    # 改写本文件的模块全局 _DB_PATH，导致跨文件数据串扰
+    documents_store.DB_PATH = _TMP / "documents.db"
+    documents_store._LEGACY_STATUS_FILE = _TMP / "doc_status.json"
+    conv_mod._DB_PATH = _TMP / "conversations.db"
+    conv_mod._db_ready = False
+    summary_mod._DB_PATH = _TMP / "conversations.db"
+    summary_mod._db_ready = False
+    fb_mod._DB_PATH = _TMP / "feedback.db"
+    fb_mod._db_ready = False
+    runs_mod._DB_PATH = _TMP / "observability.db"
+    runs_mod._db_ready = False
+    tasks_mod._DB_PATH = _TMP / "tasks.db"
+    tasks_mod._db_ready = False
+    db.close_all()
+    store.DB_PATH = _TMP / "user_images.db"
+    engine.USER_IMAGE_ROOT = _TMP / "uploads" / "user_images"
     store.init_db()
+    documents_store.init_db()
     with store._connect() as conn:
         conn.execute("DELETE FROM painting_analysis_results")
         conn.execute("DELETE FROM user_images")
@@ -451,26 +470,6 @@ def test_painting_analysis_rejected_event(client, monkeypatch):
     with client.stream("POST", f"/api/painting-analysis/{image_id}") as r:
         text = "".join(r.iter_text())
     assert '"type": "rejected"' in text
-
-
-def test_get_analysis_cached_result(client):
-    r = client.post(
-        "/api/user-images/upload",
-        files={"file": ("p.png", _png_bytes(), "image/png")},
-        data={"session_id": "art-sess3"},
-    )
-    image_id = r.json()["image_id"]
-    target = engine.USER_IMAGE_ROOT / image_id
-    target.mkdir(parents=True, exist_ok=True)
-    result_path = target / "result.json"
-    result_path.write_text(
-        json.dumps({"image_id": image_id, "report": {"framework": "abstract"}}),
-        encoding="utf-8",
-    )
-    analysis_store_save = store.save_analysis(image_id, "abstract", str(result_path))
-    r = client.get(f"/api/painting-analysis/{image_id}")
-    assert r.status_code == 200
-    assert r.json()["report"]["framework"] == "abstract"
 
 
 def test_analysis_message_persisted(client):

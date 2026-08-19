@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import base64
-import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,7 +41,7 @@ def render_page_image(pdf_path: str, page_no: int, out_dir: Path) -> str:
 
 
 def embed_image_file(image_path: str) -> list[float]:
-    """DashScope 多模态编码一张本地图片（base64 内联）。"""
+    """用配置的多模态嵌入提供商编码一张本地图片（base64 内联）。"""
     b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
     return get_mm_embed_fn()({"image": f"data:image/png;base64,{b64}"})
 

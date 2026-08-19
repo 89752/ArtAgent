@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from src.data import db
+
 _DB_DIR = Path(os.getenv(
     "ARTAGENT_MEMORY_DIR",
     str(Path(__file__).resolve().parent.parent.parent / "data" / "memory"),
@@ -21,15 +23,14 @@ _DB_DIR = Path(os.getenv(
 _DB_PATH = _DB_DIR / "feedback.db"
 
 _lock = threading.Lock()
-_conn: sqlite3.Connection | None = None
+_db_ready = False
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _DB_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.execute(
+    global _db_ready
+    conn = db.get_conn(_DB_PATH)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS feedback (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,16 +43,17 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        cols = {r[1] for r in _conn.execute("PRAGMA table_info(feedback)").fetchall()}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(feedback)").fetchall()}
         if "user_id" not in cols:
-            _conn.execute(
+            conn.execute(
                 "ALTER TABLE feedback ADD COLUMN user_id TEXT NOT NULL DEFAULT 'web_user'"
             )
-        _conn.execute(
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id, id)"
         )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def _now() -> str:
@@ -153,8 +155,9 @@ def count_feedback(rating: Optional[int] = None) -> int:
 
 def _reset_for_tests(path: Path | None = None) -> None:
     """测试专用：重置到指定数据库文件。"""
-    global _conn, _DB_PATH
-    _conn = None
+    global _db_ready, _DB_PATH
+    db.close_all()
+    _db_ready = False
     _DB_PATH = path or Path("./data/memory/_test_feedback.db")
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:

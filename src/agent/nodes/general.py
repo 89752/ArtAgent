@@ -11,7 +11,7 @@ import time
 import uuid
 from typing import Literal
 
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt import ToolNode
 
 from src.agent.state import AgentState
@@ -225,7 +225,6 @@ def general_agent(state: AgentState) -> dict:
     """核心 LLM 节点：ContextBuilder 组装结构化上下文，决定直接回答或调用工具。"""
     from src.agent.context import (
         ContextBlocks,
-        ContextBudget,
         apply_budget,
         build_profile_block,
         build_session_block,
@@ -234,7 +233,6 @@ def general_agent(state: AgentState) -> dict:
         estimate_context_chars,
         extract_evidence_from_messages,
         format_numbered_evidence_block,
-        format_multi_evidence,
         format_skills_index,
         trim_history,
     )
@@ -269,7 +267,6 @@ def general_agent(state: AgentState) -> dict:
         evidence=format_numbered_evidence_block(
             extract_evidence_from_messages(state.messages)
         ),
-        subtasks=format_multi_evidence(state.multi_evidence),
         memory=state.memory_block,
     )
     blocks = apply_budget(blocks)

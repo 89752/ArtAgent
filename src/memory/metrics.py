@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from src.data import db
 from src.utils.logging_config import get_logger
 
 logger = get_logger("memory.metrics")
@@ -24,16 +25,14 @@ _DB_DIR = Path(os.getenv(
 _DB_PATH = _DB_DIR / "agent_memory.db"
 
 _lock = threading.RLock()
-_conn: Optional[sqlite3.Connection] = None
+_db_ready = False
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _DB_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute(
+    global _db_ready
+    conn = db.get_conn(_DB_PATH, row_factory=sqlite3.Row)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS extraction_metrics (
                 id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,8 +50,9 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def _now() -> str:
@@ -134,8 +134,9 @@ def recent_extraction_metrics(limit: int = 50) -> list[dict]:
 
 def _reset_for_tests(path: Optional[Path] = None) -> None:
     """测试专用：重置到指定数据库文件。"""
-    global _conn, _DB_PATH
-    _conn = None
+    global _db_ready, _DB_PATH
+    db.close_all()
+    _db_ready = False
     _DB_PATH = path or (Path(__file__).resolve().parent.parent.parent
                         / "data" / "index" / "_test_metrics.db")
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)

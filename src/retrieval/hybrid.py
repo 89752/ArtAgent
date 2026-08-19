@@ -123,11 +123,26 @@ def get_or_create_chroma_collection(name: str):
 
 @lru_cache(maxsize=1)
 def _get_bge_m3_model():
-    """加载 bge-m3 多语言模型（全局单例；核心库专用）。"""
+    """加载 bge-m3 多语言模型（全局单例；核心库专用）。
+
+    强制 local_files_only=True：索引用模型必须已在本机 HF 缓存（索引与查询
+    共用同一向量空间）。否则 SentenceTransformer 每次加载都会向 HuggingFace
+    Hub 探测文件，国内网络会卡在连接重试上数分钟。
+    """
     from sentence_transformers import SentenceTransformer
     import torch
 
-    model = SentenceTransformer(EMBEDDING_MODEL_M3, trust_remote_code=True)
+    try:
+        model = SentenceTransformer(
+            EMBEDDING_MODEL_M3, trust_remote_code=True, local_files_only=True
+        )
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"bge-m3 嵌入模型未在本地缓存，无法加载（{EMBEDDING_MODEL_M3}）。"
+            "请先手动下载一次（可设 HF_ENDPOINT=https://hf-mirror.com 走镜像）："
+            f"python -c \"from sentence_transformers import SentenceTransformer; "
+            f"SentenceTransformer('{EMBEDDING_MODEL_M3}', trust_remote_code=True)\""
+        ) from e
     model.max_seq_length = BGE_M3_MAX_SEQ_LENGTH
     # GPU 可用时用 fp16：显存减半、吞吐翻倍以上；fp16/fp32 的余弦相似度差异可忽略
     if torch.cuda.is_available():

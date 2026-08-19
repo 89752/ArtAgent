@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from src.data import db
 from src.utils.logging_config import get_logger
 
 logger = get_logger("platform.users")
@@ -33,16 +34,14 @@ _DB_DIR = Path(os.getenv(
 _DB_PATH = _DB_DIR / "platform.db"
 
 _lock = threading.Lock()
-_conn: sqlite3.Connection | None = None
+_db_ready = False
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _DB_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute(
+    global _db_ready
+    conn = db.get_conn(_DB_PATH, row_factory=sqlite3.Row)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 user_id    TEXT PRIMARY KEY,
@@ -54,14 +53,14 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        cols = {r[1] for r in _conn.execute("PRAGMA table_info(users)").fetchall()}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "username" not in cols:
-            _conn.execute("ALTER TABLE users ADD COLUMN username TEXT UNIQUE")
+            conn.execute("ALTER TABLE users ADD COLUMN username TEXT UNIQUE")
         if "password_hash" not in cols:
-            _conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+            conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
         if "is_admin" not in cols:
-            _conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
-        _conn.execute(
+            conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS api_keys (
                 key        TEXT PRIMARY KEY,
@@ -71,7 +70,7 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        _conn.execute(
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id    TEXT PRIMARY KEY,
@@ -79,15 +78,23 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def init_db() -> None:
-    """建表并确保默认 web_user 存在（旧单用户数据归属）。"""
+    """建表并确保默认 web_user 存在（旧单用户数据归属）。
+
+    默认管理员账号（user/11111111）不再自动创建：共享部署不预设任何
+    已知凭据，如需保留旧单机体验，设置 ARTAGENT_SEED_DEFAULT_ACCOUNT=1。
+    """
     _get_conn()
     ensure_default_user()
-    ensure_default_account()
+    if os.getenv("ARTAGENT_SEED_DEFAULT_ACCOUNT", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        ensure_default_account()
 
 
 def _hash_password(password: str) -> str:
@@ -195,7 +202,11 @@ def change_password(
 
 
 def ensure_default_account() -> dict:
-    """默认登录账号 user / 11111111（正式多用户模式的默认身份）。"""
+    """可选默认登录账号 user / 11111111（旧单机模式的默认管理员）。
+
+    仅当 ARTAGENT_SEED_DEFAULT_ACCOUNT=1 时由 init_db 调用；共享部署
+    不应开启（已知凭据即安全风险），改用 manage_users.py 创建管理员。
+    """
     with _lock:
         conn = _get_conn()
         row = conn.execute(
@@ -403,16 +414,6 @@ def create_api_key(user_id: str, label: str = "default") -> str:
     return key
 
 
-def list_api_keys(user_id: str) -> list[dict]:
-    with _lock:
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT key, label, created_at FROM api_keys WHERE user_id = ?",
-            (user_id,),
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
 def revoke_api_key(key: str) -> bool:
     with _lock:
         conn = _get_conn()
@@ -520,8 +521,9 @@ def delete_user(user_id: str, cascade: bool = True) -> dict:
 
 def _reset_for_tests(path: Path | None = None) -> None:
     """测试专用：重置到指定数据库文件。"""
-    global _conn, _DB_PATH
-    _conn = None
+    global _db_ready, _DB_PATH
+    db.close_all()
+    _db_ready = False
     _DB_PATH = path or Path("./data/platform/_test_platform.db")
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:

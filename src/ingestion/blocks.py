@@ -8,7 +8,7 @@ Chunk：最终入库的检索单元，统一携带 doc_id/page_id/block_type/sec
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 BlockType = Literal["text", "table", "equation", "image"]

@@ -1,6 +1,6 @@
 ---
 name: art_recommendation
-description: 根据用户审美偏好推荐画家/作品，排除用户已喜欢或已提到的画家（触发词：推荐/类似/喜欢...还有什么/还有谁）
+description: 根据用户审美偏好推荐画家/作品，排除用户已喜欢或已提到的画家（触发词：推荐几幅/推荐几位/类似风格/浓烈奔放/偏好/喜欢...还有什么/还有谁；一次性风格请求同样适用）
 when_to_use: 用户表达偏好并要求推荐
 version: 1
 tools: [semantic_search, exact_lookup, query_painter_knowledge, web_search, wiki_lookup, list_preferences]
@@ -16,3 +16,4 @@ output_schema_json: {"features": "提炼出的风格特征", "liked_artists": "�
 # 执行纪律
 - 必须排除用户已喜欢/已提到的画家，不得重复推荐。
 - 候选必须有检索证据；不硬凑数量。
+- conclusion 使用与用户提问相同的语言（用户中文提问则中文输出）。

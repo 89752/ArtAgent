@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -186,6 +186,7 @@ def ingest_pdf(
     kb_id: str = "default",
     work_dir: Optional[Path] = None,
     force_pdfplumber: bool = False,
+    user_id: str = "web_user",
 ) -> dict:
     """
     PDF 入库主流程（同步执行；Web 层用 BackgroundTasks 包成后台任务）。
@@ -204,6 +205,7 @@ def ingest_pdf(
     documents_store.upsert_document(
         doc_id,
         kind="pdf",
+        user_id=user_id,
         doc_name=doc_name,
         kb_id=kb_id,
         status="processing",
@@ -254,14 +256,14 @@ def ingest_pdf(
             "error": "",
             "metadata": {"route_distribution": plan.distribution},
         }
-        documents_store.upsert_document(doc_id, **summary)
+        documents_store.upsert_document(doc_id, user_id=user_id, **summary)
         log_event(logger, "ingest_done", doc_id=doc_id, **summary)
         return {"doc_id": doc_id, **summary, "route_distribution": plan.distribution}
 
     except Exception as e:  # noqa: BLE001 — 失败也要落状态供前端轮询
         logger.exception("[ingest] 解析失败 doc_id=%s", doc_id)
         documents_store.upsert_document(
-            doc_id, status="failed", error=str(e),
+            doc_id, user_id=user_id, status="failed", error=str(e),
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
         )
         raise

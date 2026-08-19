@@ -19,6 +19,8 @@ import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
+from src.data import db
+
 # 与偏好库同目录：data/memory/conversations.db（P1 目录收敛）
 # 测试可通过 ARTAGENT_MEMORY_DIR 覆盖，避免污染真实数据
 _DB_DIR = Path(os.getenv(
@@ -33,19 +35,18 @@ _LEGACY_DB_PATH = (
 ) if not os.getenv("ARTAGENT_MEMORY_DIR") else None
 
 _lock = threading.Lock()
-_conn: sqlite3.Connection | None = None
+_db_ready = False
 
 DEFAULT_USER_ID = "web_user"
 
 
 def _get_conn() -> sqlite3.Connection:
     """返回全局单例连接，首次调用时建表。"""
-    global _conn, _DB_PATH
-    if _conn is None:
-        _DB_PATH = _migrate_legacy_db()
-        _DB_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.execute(
+    global _DB_PATH, _db_ready
+    _DB_PATH = _migrate_legacy_db()
+    conn = db.get_conn(_DB_PATH)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversations (
                 session_id    TEXT PRIMARY KEY,
@@ -56,17 +57,18 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        cols = {r[1] for r in _conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
         if "user_id" not in cols:
-            _conn.execute(
+            conn.execute(
                 "ALTER TABLE conversations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'web_user'"
             )
-        _conn.execute(
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversations_user "
             "ON conversations(user_id, updated_at)"
         )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def _migrate_legacy_db() -> Path:

@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from src.data import db
 from src.utils.json_utils import parse_json
 from src.utils.logging_config import get_logger
 
@@ -35,18 +36,16 @@ _DB_DIR = Path(os.getenv(
 _DB_PATH = _DB_DIR / "agent_memory.db"
 
 _lock = threading.RLock()
-_conn: Optional[sqlite3.Connection] = None
+_db_ready = False
 
 _SECTIONS = ("personalContext", "topOfMind", "recent", "earlier", "longTerm")
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _DB_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute(
+    global _db_ready
+    conn = db.get_conn(_DB_PATH, row_factory=sqlite3.Row)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_docs (
                 user_id    TEXT PRIMARY KEY,
@@ -56,13 +55,14 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        cols = {r[1] for r in _conn.execute("PRAGMA table_info(user_docs)").fetchall()}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(user_docs)").fetchall()}
         if "revision" not in cols:
-            _conn.execute(
+            conn.execute(
                 "ALTER TABLE user_docs ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"
             )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def _now() -> str:
@@ -270,8 +270,9 @@ def update_user_doc(
 
 def _reset_for_tests(path: Optional[Path] = None) -> None:
     """测试专用：重置到指定数据库文件。"""
-    global _conn, _DB_PATH
-    _conn = None
+    global _db_ready, _DB_PATH
+    db.close_all()
+    _db_ready = False
     _DB_PATH = path or (Path(__file__).resolve().parent.parent.parent
                         / "data" / "index" / "_test_user_doc.db")
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)

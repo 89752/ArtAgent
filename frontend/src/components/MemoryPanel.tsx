@@ -43,19 +43,27 @@ export function MemoryPanel({ embedded = false }: { embedded?: boolean }) {
   };
 
   useEffect(() => {
-    if (!embedded && modal === "memory") {
+    // 设置页按需挂载 embedded 面板；挂载时也必须立即读取记忆。
+    if (embedded || modal === "memory") {
       setItems(null);
       void load();
     }
   }, [modal, embedded]);
 
   useEffect(() => {
+    let delayedReload: number | null = null;
     const onMemoryUpdated = () => {
-      if (useUiStore.getState().modal === "memory" || embedded) void load();
+      if (useUiStore.getState().modal !== "memory" && !embedded) return;
+      void load();
+      // 自动记忆在后台有约 2 秒防抖；即时刷新后再补一次，展示刚落库的条目。
+      if (delayedReload !== null) window.clearTimeout(delayedReload);
+      delayedReload = window.setTimeout(() => void load(), 3000);
     };
     window.addEventListener("artagent:memory-updated", onMemoryUpdated);
-    return () =>
+    return () => {
       window.removeEventListener("artagent:memory-updated", onMemoryUpdated);
+      if (delayedReload !== null) window.clearTimeout(delayedReload);
+    };
   }, [embedded]);
 
   const del = async (it: MemoryItem) => {

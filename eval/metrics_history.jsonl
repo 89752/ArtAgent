@@ -5,3 +5,51 @@
 {"ts": "2026-08-07 10:06:02", "adversarial": {"total": 10, "ok": 10, "skipped": 0}}
 {"ts": "2026-08-07 10:17:08", "adversarial": {"total": 10, "ok": 10, "skipped": 0}}
 {"ts": "2026-08-14 17:44:19", "answers": {"total": 30, "skipped": 16, "judged": 14}}
+{"ts": "2026-08-18 00:04:04", "answers": {"total": 30, "skipped": 2, "judged": 8}}
+{"ts": "2026-08-18 00:22:03", "answers": {"total": 30, "skipped": 0, "judged": 10}}
+{"ts": "2026-08-18 00:36:03", "answers": {"total": 30, "skipped": 0, "judged": 20}}
+{"ts": "2026-08-18 01:00:29", "answers": {"total": 30, "skipped": 1, "judged": 29}}
+{"ts": "2026-08-18 01:05:02", "answers": {"total": 30, "skipped": 0, "judged": 30}}
+{"ts": "2026-08-18 01:08:36", "answers": {"total": 30, "skipped": 0, "judged": 30}}
+{"ts": "2026-08-18 02:04:26", "multi_turn": {"total": 6, "ok": 6, "skipped": 0}}
+{"ts": "2026-08-18 09:35:11", "cases": {"total": 2, "skipped": 0, "quality": 2, "fact_hit": 2, "tool_ok": 2, "behavior_ok": 0, "state_ok": 0, "safety_ok": 1}}
+{"ts": "2026-08-18 10:53:07", "cases": {"total": 54, "skipped": 6, "quality": 18, "fact_hit": 31, "tool_ok": 37, "behavior_ok": 3, "state_ok": 1, "safety_ok": 5}, "multi_turn": {"total": 6, "ok": 6, "skipped": 0}}
+{"ts": "2026-08-18 11:54:22", "cases": {"total": 57, "skipped": 3, "quality": 21, "fact_hit": 34, "tool_ok": 40, "behavior_ok": 3, "state_ok": 1, "safety_ok": 5}}
+{"ts": "2026-08-18 12:00:48", "cases": {"total": 60, "skipped": 0, "quality": 23, "fact_hit": 36, "tool_ok": 42, "behavior_ok": 5, "state_ok": 1, "safety_ok": 5}}
+{"ts": "2026-08-18 12:01:49", "cases": {"total": 59, "skipped": 0, "quality": 23, "fact_hit": 36, "tool_ok": 42, "behavior_ok": 5, "state_ok": 1, "safety_ok": 5}}
+{"ts": "2026-08-18 12:03:27", "multi_turn": {"total": 6, "ok": 6, "skipped": 0}}
+{"ts": "2026-08-18 12:06:13", "cases": {"total": 59, "skipped": 0, "quality": 23, "fact_hit": 36, "tool_ok": 42, "behavior_ok": 5, "state_ok": 1, "safety_ok": 5}}
+{"ts": "2026-08-18 12:12:06", "cases": {"total": 59, "skipped": 0, "quality": 23, "fact_hit": 36, "tool_ok": 43, "behavior_ok": 5, "state_ok": 1, "safety_ok": 5}}
+{"ts": "2026-08-18 12:14:12", "cases": {"total": 59, "skipped": 0, "quality": 23, "fact_hit": 36, "tool_ok": 43, "behavior_ok": 5, "state_ok": 1, "safety_ok": 5}}
+{"ts": "2026-08-18 13:10:11", "multi_turn": {"total": 10, "ok": 8, "skipped": 0}}
+{"ts": "2026-08-18 13:20:46", "cases": {"total": 10, "skipped": 0, "quality": 8, "fact_hit": 10, "tool_ok": 9, "behavior_ok": 0, "state_ok": 0, "safety_ok": 1}, "multi_turn": {"total": 10, "ok": 8, "skipped": 0}}
+{"ts": "2026-08-18 13:42:05", "cases": {"total": 15, "skipped": 5, "quality": 13, "fact_hit": 15, "tool_ok": 13, "behavior_ok": 0, "state_ok": 0, "safety_ok": 1}, "multi_turn": {"total": 10, "ok": 8, "skipped": 0}}
+{"ts": "2026-08-18 14:19:50", "cases": {"total": 29, "skipped": 1, "quality": 26, "fact_hit": 29, "tool_ok": 26, "behavior_ok": 4, "state_ok": 3, "safety_ok": 1}, "multi_turn": {"total": 10, "ok": 8, "skipped": 0}}
+{"ts": "2026-08-18 14:36:02", "cases": {"total": 43, "skipped": 1, "quality": 26, "fact_hit": 33, "tool_ok": 37, "behavior_ok": 6, "state_ok": 3, "safety_ok": 1}, "multi_turn": {"total": 10, "ok": 8, "skipped": 0}}
+{"ts": "2026-08-18 14:49:05", "cases": {"total": 59, "skipped": 1, "quality": 29, "fact_hit": 37, "tool_ok": 41, "behavior_ok": 7, "state_ok": 6, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 8, "skipped": 0}}
+{"ts": "2026-08-18 14:58:31", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 38, "tool_ok": 42, "behavior_ok": 7, "state_ok": 6, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 8, "skipped": 0}}
+{"ts": "2026-08-18 15:03:40", "cases": {"total": 59, "skipped": 1, "quality": 30, "fact_hit": 39, "tool_ok": 43, "behavior_ok": 7, "state_ok": 9, "safety_ok": 10}, "multi_turn": {"total": 8, "ok": 8, "skipped": 0}}
+{"ts": "2026-08-18 15:04:05", "multi_turn": {"total": 10, "ok": 8, "skipped": 2}}
+{"ts": "2026-08-18 15:14:32", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 44, "behavior_ok": 7, "state_ok": 9, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 9, "skipped": 0}}
+{"ts": "2026-08-18 15:16:08", "cases": {"total": 59, "skipped": 0, "quality": 30, "fact_hit": 39, "tool_ok": 43, "behavior_ok": 7, "state_ok": 9, "safety_ok": 10}, "multi_turn": {"total": 9, "ok": 9, "skipped": 0}}
+{"ts": "2026-08-18 15:23:42", "cases": {"total": 59, "skipped": 0, "quality": 30, "fact_hit": 39, "tool_ok": 43, "behavior_ok": 7, "state_ok": 9, "safety_ok": 10}, "multi_turn": {"total": 9, "ok": 9, "skipped": 0}}
+{"ts": "2026-08-18 15:24:36", "cases": {"total": 59, "skipped": 0, "quality": 30, "fact_hit": 39, "tool_ok": 43, "behavior_ok": 7, "state_ok": 9, "safety_ok": 10}, "multi_turn": {"total": 9, "ok": 9, "skipped": 0}}
+{"ts": "2026-08-18 15:27:41", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 44, "behavior_ok": 7, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 9, "ok": 9, "skipped": 0}}
+{"ts": "2026-08-18 15:37:05", "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 15:37:24", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 44, "behavior_ok": 7, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 15:51:18", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 44, "behavior_ok": 7, "state_ok": 10, "safety_ok": 9}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 16:11:05", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 45, "behavior_ok": 7, "state_ok": 10, "safety_ok": 9}}
+{"ts": "2026-08-18 16:11:48", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 45, "behavior_ok": 7, "state_ok": 10, "safety_ok": 9}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 16:12:44", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 45, "behavior_ok": 7, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 16:23:30", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 49, "behavior_ok": 8, "state_ok": 10, "safety_ok": 10}}
+{"ts": "2026-08-18 16:27:57", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 49, "behavior_ok": 8, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 16:28:59", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 49, "behavior_ok": 9, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 16:41:12", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 50, "behavior_ok": 10, "state_ok": 10, "safety_ok": 10}}
+{"ts": "2026-08-18 16:41:47", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 50, "behavior_ok": 10, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 16:49:02", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 50, "behavior_ok": 10, "state_ok": 10, "safety_ok": 10}}
+{"ts": "2026-08-18 16:52:13", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 50, "behavior_ok": 10, "state_ok": 10, "safety_ok": 10}}
+{"ts": "2026-08-18 16:52:38", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 50, "behavior_ok": 10, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 16:56:32", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 50, "behavior_ok": 10, "state_ok": 10, "safety_ok": 10}}
+{"ts": "2026-08-18 16:56:55", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 50, "behavior_ok": 10, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-18 17:02:01", "cases": {"total": 60, "skipped": 0, "quality": 30, "fact_hit": 40, "tool_ok": 50, "behavior_ok": 10, "state_ok": 10, "safety_ok": 10}, "multi_turn": {"total": 10, "ok": 10, "skipped": 0}}
+{"ts": "2026-08-19 00:42:20", "retrieval": {"total": 100, "hits": 82, "recall_at_k": 0.82}}

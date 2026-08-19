@@ -77,26 +77,12 @@ SCENE_CARDS = [
     },
 ]
 
-_INTENT_LABELS = {
-    "comparison": "🆚 跨维度对比",
-    "timeline": "📅 时间线梳理",
-    "recommendation": "💡 偏好推荐",
-    "general": "💬 综合问答",
-}
 _NODE_LABELS = {
-    # 注：comp_*/tl_*/rec_* 等旧分支节点已删除（子管线下沉为工具），
-    # 不再保留标签；历史消息里的思考链为已渲染文本，无需回查本表。
     "load_memory": "读取长期记忆",
-    "rewrite_split": "改写与拆分",
-    "classify": "识别意图",
-    "rag_gate": "判断是否需要检索",
-    "direct_answer": "直接回答",
     "ask_user": "澄清信息不足",
-    "multi_retrieve": "并行检索子任务",
     "general_agent": "ReAct 推理",
     "general_tools": "执行工具",
     "reflection": "反思答案质量",
-    "web_fallback": "联网兜底检索",
     "save_memory": "写入偏好记忆",
 }
 
@@ -129,33 +115,6 @@ def _chain_detail(node: str, out: dict) -> str:
             if arts
             else "暂无历史偏好"
         )
-    if node in ("contextualize", "rewrite_split"):
-        q = (out.get("user_query") or "").strip()
-        return (
-            f"理解为：<span class='hl'>{html.escape(q[:40])}"
-            f"{'…' if len(q) > 40 else ''}</span>"
-            if q
-            else ""
-        )
-    if node == "classify":
-        it = out.get("intent", "")
-        return (
-            f"意图 = <span class='hl'>{html.escape(_INTENT_LABELS.get(it, it))}</span>"
-        )
-    if node == "rag_gate":
-        return (
-            "无需检索，直接回答"
-            if out.get("rag_needed") is False
-            else "需要检索，进入检索路径"
-        )
-    if node == "direct_answer":
-        a = (out.get("final_answer") or "").strip()
-        return (
-            f"直接回答：<span class='hl'>{html.escape(a[:48])}"
-            f"{'…' if len(a) > 48 else ''}</span>"
-            if a
-            else ""
-        )
     if node == "ask_user":
         q = (out.get("pending_clarification") or "").strip()
         return (
@@ -163,11 +122,6 @@ def _chain_detail(node: str, out: dict) -> str:
             if q
             else "信息充足，继续"
         )
-    if node == "multi_retrieve":
-        grouped = out.get("multi_evidence") or {}
-        if not grouped:
-            return "单一子任务，直接进入 agent"
-        return "并行检索 <span class='hl'>%d</span> 个子任务" % len(grouped)
     if node == "general_tools":
         shown = out.get("shown_artworks") or []
         rec = out.get("recommended_artists") or []
@@ -177,37 +131,6 @@ def _chain_detail(node: str, out: dict) -> str:
         if rec:
             parts.append(f"已推荐 <span class='hl'>{len(rec)}</span> 位")
         return "；".join(parts) if parts else ""
-    if node == "comp_decompose":
-        subs = out.get("subjects") or []
-        return "对象：" + "、".join(
-            f"<span class='hl'>{html.escape(s)}</span>" for s in subs
-        )
-    if node == "comp_retrieve":
-        docs = out.get("retrieved_docs") or {}
-        return f"检索到 <span class='hl'>{sum(len(v) for v in docs.values())}</span> 条评论证据"
-    if node == "rec_extract":
-        feat = (out.get("extracted_features") or "").strip()
-        return (
-            f"推理特征：<span class='hl'>{html.escape(feat[:48])}"
-            f"{'…' if len(feat) > 48 else ''}</span>"
-            if feat
-            else ""
-        )
-    if node == "rec_search":
-        return f"匹配候选 <span class='hl'>{len(out.get('artworks') or [])}</span> 幅"
-    if node == "rec_filter":
-        cands = out.get("candidates") or []
-        names = "、".join(html.escape(c.get("author", "")) for c in cands[:4])
-        return (
-            f"筛出 <span class='hl'>{len(cands)}</span> 位：{names}"
-            if cands
-            else "未筛出匹配画家"
-        )
-    if node == "tl_subject":
-        subs = out.get("subjects") or []
-        return f"对象：<span class='hl'>{html.escape(subs[0])}</span>" if subs else ""
-    if node == "tl_periods":
-        return f"覆盖 <span class='hl'>{len(out.get('retrieved_docs') or {})}</span> 个时期"
     if node == "general_agent":
         msgs = out.get("messages") or []
         if msgs and getattr(msgs[-1], "tool_calls", None):
@@ -220,10 +143,6 @@ def _chain_detail(node: str, out: dict) -> str:
             "结论：<span class='hl'>通过</span>"
             if out.get("reflection_notes") == "PASS"
             else "结论：<span class='hl'>信息不足，触发兜底</span>"
-        )
-    if node == "web_fallback":
-        return (
-            f"联网补充 <span class='hl'>{len(out.get('web_results') or [])}</span> 条"
         )
     if node == "save_memory":
         extract_result = out.get("memory_extract_result") or {}
@@ -516,8 +435,15 @@ def stream_answer(
                 last_user = i
         if last_user >= 0:
             history = history[:last_user]
+    history = history + [{"role": "user", "content": message}]
+    # 在任何耗时推理开始前先落下用户消息。这样即使用户立即刷新、关闭页面，
+    # 新会话也已经存在，不会因最终回答尚未来得及保存而被前端当作空会话丢弃。
+    initial_title = next(
+        (m.get("content", "") for m in history if m.get("role") == "user"),
+        message,
+    )
+    save_conversation(sid, initial_title or "新对话", history, user_id)
     history = history + [
-        {"role": "user", "content": message},
         {"role": "assistant", "content": _think_box([], done=False)},
     ]
     steps: list[dict] = []
@@ -549,7 +475,6 @@ def stream_answer(
     analysis_reports = list_analysis_by_session(sid, user_id)
 
     intent, final_answer = "", ""
-    struct_artworks: list[dict] = []
     tool_artworks: list[dict] = []
     tool_msgs: list = []
     evidence: list[dict] = []
@@ -557,7 +482,6 @@ def stream_answer(
     tool_rounds = 0
     tool_names: list[str] = []
     reflection_triggered = False
-    web_fallback_used = False
     error_msg = ""
     cancelled = False
 
@@ -565,7 +489,7 @@ def stream_answer(
         for chunk in graph.stream(
             {
                 # messages 由 checkpointer 跨轮累积；其余标量每轮重置，
-                # 避免上一轮的 intent/subjects/检索结果/retry_count 串味。
+                # 避免上一轮的 intent/retry_count 串味。
                 "messages": [HumanMessage(content=message)],
                 "user_query": message,
                 "user_id": user_id,
@@ -574,24 +498,14 @@ def stream_answer(
                 "uploaded_images": uploaded_images,
                 "analysis_reports": analysis_reports,
                 "intent": "",
-                "rag_needed": True,
                 "tool_rounds": 0,
                 "context_chars": 0,
                 "executed_tool_signatures": [],
                 "ask_user": "",
                 "pending_clarification": "",
                 "dataset_id": active_dataset,  # 每轮重置当前生效数据源
-                "subjects": [],
-                "sub_queries": [],
-                "extracted_features": "",
-                "retrieved_docs": {},
-                "artworks": [],
-                "images": [],
-                "candidates": [],
                 "reflection_notes": "",
-                "web_results": [],
                 "retry_count": 0,
-                "tool_results": [],
                 "final_answer": "",
             },
             config={"configurable": {"thread_id": sid}},
@@ -611,26 +525,10 @@ def stream_answer(
                         tool_rounds = out["tool_rounds"]
                     if node == "reflection" and out.get("reflection_notes") == "RETRY":
                         reflection_triggered = True
-                    if node == "web_fallback":
-                        web_fallback_used = True
                     if out.get("intent"):
                         intent = out["intent"]
                     if out.get("final_answer"):
                         final_answer = out["final_answer"]
-                    if out.get("artworks"):
-                        struct_artworks = out["artworks"]
-                    for key in ("multi_evidence", "retrieved_docs"):
-                        groups = out.get(key) or {}
-                        if isinstance(groups, dict):
-                            for vals in groups.values():
-                                if isinstance(vals, list):
-                                    evidence.extend(
-                                        v for v in vals if isinstance(v, dict)
-                                    )
-                    if isinstance(out.get("web_results"), list):
-                        evidence.extend(
-                            v for v in out["web_results"] if isinstance(v, dict)
-                        )
                     if out.get("messages"):
                         msgs = out["messages"]
                         tool_artworks.extend(_parse_artworks_from_messages(msgs))
@@ -647,7 +545,7 @@ def stream_answer(
                 )
                 yield {"type": "delta", "html": history[-1]["content"]}
 
-        artworks = struct_artworks or tool_artworks
+        artworks = tool_artworks
         with_thumbs = intent in ("timeline", "recommendation", "general")
         reply = (
             (final_answer or "（未能生成回答，请重试）")
@@ -659,7 +557,7 @@ def stream_answer(
         history[-1]["content"] = _assistant_bubble(
             steps, reply, artworks, with_thumbs, done=True
         )
-        history[-1]["sources"] = _collect_sources(tool_msgs, struct_artworks, evidence)
+        history[-1]["sources"] = _collect_sources(tool_msgs, tool_artworks, evidence)
         if cancelled:
             _clear_thread_checkpoint(sid)
     except Exception as e:  # noqa: BLE001 — 面向用户兜底，避免整页崩溃
@@ -690,7 +588,7 @@ def stream_answer(
         latency_ms=(time.time() - start_ts) * 1000,
         final_answer_len=len(final_answer or ""),
         reflection_triggered=reflection_triggered,
-        web_fallback=web_fallback_used,
+        web_fallback=False,
         cancelled=cancelled,
         error=error_msg,
     )
@@ -901,6 +799,7 @@ def ingest_document(
             ingest_pdf(
                 pdf_path, doc_id, doc_name=doc_name, kb_id=kb_id,
                 force_pdfplumber=force_pdfplumber,
+                user_id=user_id,
             )
             if task_id:
                 tasks_store.update_task(task_id, status="done", progress=100)
@@ -963,13 +862,46 @@ def documents(user_id: str = WEB_USER_ID) -> list[dict]:
     """文档库列表（新的在前）。"""
     from src.data import documents_store
 
-    return documents_store.list_documents(user_id)
+    docs = documents_store.list_documents(user_id)
+    return [_reconcile_pdf_task_status(doc, user_id) for doc in docs]
 
 
 def document_status(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
     from src.data import documents_store
 
-    return documents_store.get_document(doc_id, user_id) or {}
+    doc = documents_store.get_document(doc_id, user_id) or {}
+    return _reconcile_pdf_task_status(doc, user_id) if doc else {}
+
+
+def _reconcile_pdf_task_status(doc: dict, user_id: str) -> dict:
+    """修复旧版本遗留的“任务已结束、文档仍解析中”状态。"""
+    from src.data import documents_store
+
+    if doc.get("kind") != "pdf" or doc.get("status") != "processing":
+        return doc
+    task = tasks_store.get_task(str(doc.get("doc_id") or ""))
+    if not task:
+        return doc
+    payload = task.get("payload") or {}
+    if payload.get("user_id") and payload.get("user_id") != user_id:
+        return doc
+    task_status = task.get("status")
+    if task_status == "done":
+        patch = {
+            "status": "done",
+            "finished_at": task.get("finished_at") or "",
+            "error": "",
+        }
+    elif task_status in ("failed", "interrupted"):
+        patch = {
+            "status": "failed",
+            "finished_at": task.get("finished_at") or "",
+            "error": task.get("error") or "文档解析未完成，请重试",
+        }
+    else:
+        return doc
+    documents_store.update_document(doc["doc_id"], **patch)
+    return {**doc, **patch}
 
 
 def delete_document(doc_id: str, user_id: str = WEB_USER_ID) -> dict:

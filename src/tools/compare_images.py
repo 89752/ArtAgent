@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import base64
-from typing import Optional
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool

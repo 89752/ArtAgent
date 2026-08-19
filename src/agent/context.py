@@ -164,53 +164,6 @@ def format_numbered_evidence_block(
     return "\n".join(lines)
 
 
-def format_multi_evidence(
-    grouped: dict[str, list[dict]],
-    budget: int = EVIDENCE_CHAR_BUDGET,
-) -> str:
-    """多子任务证据块：按子问题分组、全局编号引用。
-
-    【子任务1】对比莫奈和梵高的色彩
-    - [1] ...
-    【子任务2】推荐几幅类似莫奈的风景画
-    - [2] ...
-    """
-    blocks: list[str] = []
-    used = 0
-    seq = 0
-    for idx, (sub, items) in enumerate((grouped or {}).items(), 1):
-        lines: list[str] = []
-        for item in dedup_artworks(items):
-            seq += 1
-            title = str(item.get("title") or "(未命名)")
-            author = str(item.get("author") or item.get("artist") or "")
-            date = str(item.get("date") or "")
-            snippet = str(
-                item.get("description_snippet")
-                or item.get("description")
-                or item.get("content")
-                or ""
-            ).strip()
-            if len(snippet) > SNIPPET_LEN:
-                snippet = snippet[:SNIPPET_LEN] + "..."
-            head = f"- [{seq}] {title}"
-            if author:
-                head += f"（{author}"
-                if date:
-                    head += f", {date}"
-                head += "）"
-            line = f"{head}：{snippet}" if snippet else head
-            if used + len(line) + 24 > budget:  # 留出子任务标题的余量
-                break
-            lines.append(line)
-            used += len(line)
-        if lines:
-            blocks.append(f"【子任务{idx}】{sub}\n" + "\n".join(lines))
-        if used >= budget:
-            break
-    return "\n\n".join(blocks)
-
-
 def build_profile_block(
     preferences: dict,
     budget: int = PROFILE_CHAR_BUDGET,

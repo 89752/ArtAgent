@@ -15,7 +15,6 @@ from PIL import Image, ImageOps
 
 from src.analysis.gate import classify_framework
 from src.analysis.metrics import analyze_metrics
-from src.analysis.prompts import FRAMEWORK_LABELS
 from src.analysis.report import generate_layered_report
 from src.analysis.store import (
     get_image,

@@ -13,9 +13,8 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 from src.utils.logging_config import get_logger
 

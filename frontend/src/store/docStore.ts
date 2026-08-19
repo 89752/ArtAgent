@@ -4,7 +4,7 @@ import type { ChipEntry, Doc } from "../api/types";
 import { uploadWithProgress } from "../api/upload";
 import { attachUserImage, uploadUserImage } from "../api/userImages";
 import { askOversize, toast } from "../lib/dialogs";
-import { genId } from "../lib/utils";
+import { genId, updateUrl } from "../lib/utils";
 import { useUiStore } from "./uiStore";
 
 const PENDING_PREFIX = "artagent.pending.v1.";
@@ -333,15 +333,21 @@ export const useDocStore = create<DocState>()((set, get) => ({
         get().finishUpload();
         return;
       }
-      get().updateChip(sid, entry.id, {
+      const completedEntry: ChipEntry = {
+        ...entry,
         doc_id: j.doc_id || null,
         kind: j.kind || entry.kind,
         status: "processing",
         progress: undefined,
-      });
+      };
+      get().updateChip(sid, entry.id, completedEntry);
       set({ docPollDelay: 3000 });
       get().persistChips(sid);
-      if (get().chipStillPending(entry, sid)) void get().recordAttachment(entry, sid);
+      // entry 是上传开始时的旧对象，doc_id 仍为 null。使用服务器响应构造的
+      // 新对象记录附件，确保刷新后会话仍能恢复这次上传。
+      if (get().chipStillPending(completedEntry, sid)) {
+        void get().recordAttachment(completedEntry, sid);
+      }
       toast(`已上传《${j.doc_name || entry.name}》，正在解析…`);
       void get().loadDocuments();
       get().finishUpload();
@@ -413,6 +419,8 @@ export const useDocStore = create<DocState>()((set, get) => ({
         "POST",
         { doc_id: entry.doc_id },
       );
+      // 仅上传附件、尚未发消息的会话也必须可通过刷新恢复。
+      updateUrl(sid);
     } catch (e) {
       console.error("记录附件失败", e);
     }
@@ -496,25 +504,42 @@ export const useDocStore = create<DocState>()((set, get) => ({
   },
 
   deleteDocument: async (d, onDocDeleted) => {
+    const siblings = splitSiblings(d, get().docs);
+    let targets = [d];
+    if (siblings.length) {
+      const source = d.split_source_name || inferredSplitSource(d.doc_name || "");
+      const together = await confirmDelete(
+        "删除同源文件",
+        `检测到另外 ${siblings.length} 个文件可能与「${d.doc_name || "当前文件"}」来自同一次拆分${
+          source ? `（原文件可能为「${source}」）` : ""
+        }。是否一起删除？\n\n选择“删除”将删除这组文件；选择“取消”后可继续仅删除当前文件。`,
+      );
+      if (together) targets = [d, ...siblings];
+    }
     const ok = await confirmDelete(
-      "删除文档",
-      `确定删除「${d.doc_name || "未命名文档"}」？\n将同时删除上传文件和索引向量，不可恢复。`,
+      targets.length > 1 ? "删除整组文档" : "删除文档",
+      targets.length > 1
+        ? `确定删除这 ${targets.length} 个可能同源的拆分文件？\n将同时删除上传文件和索引向量，不可恢复。`
+        : `确定删除「${d.doc_name || "未命名文档"}」？\n将同时删除上传文件和索引向量，不可恢复。`,
     );
     if (!ok) return;
     try {
-      const j = await sendJson<{ ok: boolean; error?: string }>(
-        `/api/documents/${encodeURIComponent(d.doc_id)}`,
-        "DELETE",
-      );
-      if (!j.ok) {
-        toast(j.error || "删除失败", "err");
-        return;
+      const deletedIds: string[] = [];
+      for (const target of targets) {
+        const j = await sendJson<{ ok: boolean; error?: string }>(
+          `/api/documents/${encodeURIComponent(target.doc_id)}`,
+          "DELETE",
+        );
+        if (!j.ok) throw new Error(j.error || `删除「${target.doc_name || "文档"}」失败`);
+        deletedIds.push(target.doc_id);
+        onDocDeleted?.(target.doc_id);
       }
-      toast("已删除文档");
-      onDocDeleted?.(d.doc_id);
+      toast(deletedIds.length > 1 ? `已删除 ${deletedIds.length} 个同源文件` : "已删除文档");
       const chipsBySid = { ...get().chipsBySid };
       for (const sid of Object.keys(chipsBySid)) {
-        chipsBySid[sid] = chipsBySid[sid].filter((c) => c.doc_id !== d.doc_id);
+        chipsBySid[sid] = chipsBySid[sid].filter(
+          (c) => !c.doc_id || !deletedIds.includes(c.doc_id),
+        );
       }
       set({ chipsBySid });
       void get().loadDocuments();
@@ -537,4 +562,28 @@ export const useDocStore = create<DocState>()((set, get) => ({
 async function confirmDelete(title: string, text: string): Promise<boolean> {
   const { confirmAsk } = useUiStore.getState();
   return confirmAsk({ title, text, okText: "删除", danger: true });
+}
+
+function inferredSplitSource(name: string): string {
+  return name.replace(/_part\d+\.pdf$/i, ".pdf");
+}
+
+function splitSiblings(doc: Doc, docs: Doc[]): Doc[] {
+  if (doc.kind !== "pdf") return [];
+  if (doc.split_group_id) {
+    return docs.filter(
+      (candidate) =>
+        candidate.doc_id !== doc.doc_id &&
+        candidate.split_group_id === doc.split_group_id,
+    );
+  }
+  // 兼容旧版本：仅把严格符合 xxx_partN.pdf 且基础名一致的文件视为“可能同源”。
+  const match = (doc.doc_name || "").match(/^(.*)_part\d+\.pdf$/i);
+  if (!match) return [];
+  const base = match[1].toLocaleLowerCase();
+  return docs.filter((candidate) => {
+    if (candidate.doc_id === doc.doc_id || candidate.kind !== "pdf") return false;
+    const other = (candidate.doc_name || "").match(/^(.*)_part\d+\.pdf$/i);
+    return Boolean(other && other[1].toLocaleLowerCase() === base);
+  });
 }

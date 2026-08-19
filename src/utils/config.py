@@ -1,4 +1,4 @@
-"""ArtAgent 统一配置加载器（对齐 DeerFlow 的 config.yaml 模式）。
+"""ArtAgent 统一配置加载器
 
 优先级：环境变量 > config.yaml > 内置默认值。
 - config.yaml 里的 `$ENV_NAME` 会被替换成环境变量值（如 $LLM_API_KEY）
@@ -18,118 +18,63 @@ from typing import Any
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = Path(
-    os.getenv("ARTAGENT_CONFIG_PATH", str(PROJECT_ROOT / "config.yaml"))
-)
+CONFIG_PATH = Path(os.getenv("ARTAGENT_CONFIG_PATH", str(PROJECT_ROOT / "config.yaml")))
 
-# 环境变量 → 配置点路径（点分）
+# 环境变量 → 配置点路径（点分）。
+# 注意：memory.* / project.* / logging.* / ingestion.* / cost.* 以及
+# retrieval 下的 RERANK_* / LEXICAL_* 等开关由各模块直接读取同名环境变量，
+# 不走 config.yaml，故不在此注册；retrieval.pdf_image_embed_* 是例外
+# （经 config 消费，用于 PDF 整页图嵌入提供商）。
 _ENV_MAP: dict[str, str] = {
     "LLM_API_KEY": "models.llm_api_key",
     "LLM_BASE_URL": "models.llm_base_url",
     "LLM_MODEL": "models.llm_model",
+    "VISION_API_KEY": "models.vision_api_key",
+    "VISION_BASE_URL": "models.vision_base_url",
     "VISION_MODEL": "models.vision_model",
-    "RERANK_API_KEY": "retrieval.rerank_api_key",
-    "RERANK_MODEL": "retrieval.rerank_model",
-    "RERANK_PROXY": "retrieval.rerank_proxy",
-    "RERANK_ENABLED": "retrieval.rerank_enabled",
-    "RERANK_POOL": "retrieval.rerank_pool",
-    "LEXICAL_ENABLED": "retrieval.lexical_enabled",
-    "LEXICAL_TRANSLATE": "retrieval.lexical_translate",
-    "RELEVANCE_FILTER_ENABLED": "retrieval.relevance_filter_enabled",
-    "DEFAULT_DATASET": "retrieval.default_dataset",
-    "MEMORY_USER_ID": "memory.user_id",
-    "MEMORY_VECTOR_BACKEND": "memory.vector_backend",
-    "MEMORY_MAX_ITEMS_PER_USER": "memory.max_items_per_user",
-    "MEMORY_MAX_CHARS_PER_USER": "memory.max_chars_per_user",
-    "MEMORY_AUTO_EXTRACT": "memory.auto_extract",
-    "MEMORY_EXTRACT_INTERVAL": "memory.extract_interval",
-    "MEMORY_EXTRACT_DEBOUNCE_SEC": "memory.extract_debounce_sec",
-    "MEMORY_SMART_MERGE": "memory.smart_merge",
-    "MEMORY_PROFILE_REFRESH": "memory.profile_refresh",
-    "MEMORY_PROFILE_MAX_AGE_DAYS": "memory.profile_max_age_days",
+    "JUDGE_MODEL": "models.judge_model",
+    "JUDGE_API_KEY": "models.judge_api_key",
+    "JUDGE_BASE_URL": "models.judge_base_url",
+    "PDF_IMAGE_EMBED_PROVIDER": "retrieval.pdf_image_embed_provider",
+    "PDF_IMAGE_EMBED_MODEL": "retrieval.pdf_image_embed_model",
+    "PDF_IMAGE_EMBED_API_KEY": "retrieval.pdf_image_embed_api_key",
+    "PDF_IMAGE_EMBED_BASE_URL": "retrieval.pdf_image_embed_base_url",
     "TOOL_TIMEOUT_SEC": "governance.tool_timeout_sec",
     "TOOL_RETRIES": "governance.tool_retries",
     "TOOL_OUTPUT_MAX_CHARS": "governance.tool_output_max_chars",
-    "COST_PER_1K_INPUT_TOKENS": "cost.per_1k_input_tokens",
-    "COST_PER_1K_OUTPUT_TOKENS": "cost.per_1k_output_tokens",
-    "ARTAGENT_LOG_LEVEL": "logging.level",
-    "ARTAGENT_LOG_FILE": "logging.file",
-    "MINERU_TOKEN": "ingestion.mineru_token",
-    "MINERU_OCR": "ingestion.mineru_ocr",
     "SUBAGENT_MAX_CONCURRENT": "subagents.max_concurrent",
     "SUBAGENT_MAX_TOTAL_PER_RUN": "subagents.max_total_per_run",
     "SUBAGENT_TIMEOUT_SEC": "subagents.timeout_sec",
     "SUBAGENT_MAX_TURNS": "subagents.max_turns",
-    "INDEX_DIR": "project.index_dir",
-    "UPLOADS_DIR": "project.uploads_dir",
-    "CORE_DATA_PATH": "project.core_data_path",
-    "SEMART_DATA_DIR": "project.semart_data_dir",
-    "USER_IMAGES_DIR": "project.user_images_dir",
-    "ARTAGENT_MEMORY_DIR": "project.memory_dir",
-    "AGENTS_DIR": "project.agents_dir",
 }
 
 
 def _defaults() -> dict[str, Any]:
-    """内置默认值（与 config.example.yaml 保持一致，保证无文件也能跑）。"""
+    """内置默认值（与 config.yaml 保持一致，保证无文件也能跑）。"""
     return {
-        "project": {
-            "data_dir": "./data",
-            "index_dir": "./data/index",
-            "uploads_dir": "./data/uploads",
-            "memory_dir": None,
-            "core_data_path": "./data/core/artworks_core.csv",
-            "semart_data_dir": "./SemArt",
-            "user_images_dir": "./data/uploads/user_images",
-            "agents_dir": None,
-        },
         "models": {
             "llm_api_key": None,
-            "llm_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "llm_model": "deepseek-v3",
-            "vision_model": "qwen3.5-omni-plus-2026-03-15",
+            "llm_base_url": None,
+            "llm_model": None,
+            "vision_api_key": None,
+            "vision_base_url": None,
+            "vision_model": None,
+            "judge_model": None,
+            "judge_api_key": None,
+            "judge_base_url": None,
             "request_timeout_sec": 180,
             "max_retries": 2,
         },
         "retrieval": {
-            "rerank_enabled": True,
-            "rerank_pool": 40,
-            "rerank_api_key": None,
-            "rerank_model": "jina-reranker-v3.5",
-            "rerank_proxy": None,
-            "lexical_enabled": True,
-            "lexical_translate": True,
-            "relevance_filter_enabled": True,
-            "default_dataset": "core",
-        },
-        "memory": {
-            "user_id": "default_user",
-            "vector_backend": "sqlite",
-            "max_items_per_user": 200,
-            "max_chars_per_user": 40000,
-            "auto_extract": True,
-            "extract_interval": 1,
-            "extract_debounce_sec": 2,
-            "smart_merge": True,
-            "profile_refresh": True,
-            "profile_max_age_days": 7,
+            "pdf_image_embed_provider": "dashscope",
+            "pdf_image_embed_model": "tongyi-embedding-vision-plus",
+            "pdf_image_embed_api_key": None,
+            "pdf_image_embed_base_url": None,
         },
         "governance": {
             "tool_timeout_sec": 60,
             "tool_retries": 1,
             "tool_output_max_chars": 2000,
-        },
-        "cost": {
-            "per_1k_input_tokens": 0,
-            "per_1k_output_tokens": 0,
-        },
-        "logging": {
-            "level": "INFO",
-            "file": None,
-        },
-        "ingestion": {
-            "mineru_token": None,
-            "mineru_ocr": True,
         },
         "subagents": {
             "max_concurrent": 3,
@@ -234,7 +179,9 @@ def get(dotted: str, default: Any = None) -> Any:
     return _get_path(load_config(), dotted, default)
 
 
-def get_int(dotted: str, default: int, lo: int | None = None, hi: int | None = None) -> int:
+def get_int(
+    dotted: str, default: int, lo: int | None = None, hi: int | None = None
+) -> int:
     raw = get(dotted, default)
     try:
         value = int(raw)
@@ -256,22 +203,3 @@ def get_float(dotted: str, default: float, lo: float | None = None) -> float:
     if lo is not None:
         value = max(lo, value)
     return value
-
-
-def get_bool(dotted: str, default: bool) -> bool:
-    raw = get(dotted, default)
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
-    return bool(default)
-
-
-def get_path(dotted: str, default: str | None) -> Path | None:
-    raw = get(dotted, default)
-    if not raw:
-        return None
-    path = Path(str(raw))
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    return path

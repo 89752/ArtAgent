@@ -113,6 +113,9 @@ export interface Doc {
   supports_timeline?: boolean;
   supports_recommendation?: boolean;
   route_distribution?: unknown;
+  split_group_id?: string;
+  split_source_name?: string;
+  split_part_count?: number;
   error?: string;
 }
 

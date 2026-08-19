@@ -450,7 +450,7 @@ async def attach_session_document(
     user_id: str = Depends(optional_user),
 ):
     """把已上传文档记录进会话历史（前端刷新/切换会话后仍可见）。"""
-    doc = service.document_status(payload.doc_id)
+    doc = service.document_status(payload.doc_id, user_id)
     if not doc:
         return JSONResponse({"ok": False, "error": "文档不存在"}, status_code=404)
     return JSONResponse(service.record_attachment(
@@ -683,8 +683,17 @@ async def upload_document(
 
             parts = split_pdf(data, _UPLOAD_MAX_BYTES, filename)
             docs = []
+            split_group_id = uuid.uuid4().hex
             for part_name, part_bytes in parts:
                 saved = service.save_upload(part_name, part_bytes, user_id=user_id)
+                documents_store.update_document(
+                    saved["doc_id"],
+                    metadata={
+                        "split_group_id": split_group_id,
+                        "split_source_name": filename,
+                        "split_part_count": len(parts),
+                    },
+                )
                 tid = tasks_store.create_task(
                     type="ingest_pdf",
                     task_id=saved["doc_id"],
@@ -1070,54 +1079,15 @@ async def painting_analysis(
     image_id: str,
     focus: str = "all",
     framework_override: str = "",
+    rerun: bool = False,
     user_id: str = Depends(optional_user),
 ):
-    """SSE：stage 进度 + done/rejected/error；已有同参缓存则直接返回。"""
+    """SSE：stage 进度 + done/rejected/error；rerun=true 强制重新分析。"""
     from src.analysis.store import get_image
 
     if not get_image(image_id, user_id):
         return JSONResponse({"ok": False, "error": "图片不存在"}, status_code=404)
-    return _analysis_sse(image_id, focus, framework_override, rerun=False)
-
-
-@app.post("/api/painting-analysis/{image_id}/rerun")
-async def painting_analysis_rerun(
-    image_id: str,
-    focus: str = "all",
-    framework_override: str = "",
-    user_id: str = Depends(optional_user),
-):
-    """以新的 focus / framework_override 强制重新分析。"""
-    from src.analysis.store import get_image
-
-    if not get_image(image_id, user_id):
-        return JSONResponse({"ok": False, "error": "图片不存在"}, status_code=404)
-    return _analysis_sse(image_id, focus, framework_override, rerun=True)
-
-
-@app.get("/api/painting-analysis/{image_id}")
-def get_painting_analysis(image_id: str, user_id: str = Depends(optional_user)):
-    """取缓存报告（历史重载）。"""
-    from src.analysis.store import get_analysis, get_image
-
-    rec = get_image(image_id, user_id)
-    if not rec:
-        return JSONResponse({"ok": False, "error": "图片不存在"}, status_code=404)
-    analysis = get_analysis(image_id)
-    if not analysis or not analysis.get("result_path"):
-        return JSONResponse({"ok": False, "error": "尚未分析"}, status_code=404)
-    path = Path(analysis["result_path"])
-    if not path.is_file():
-        return JSONResponse(
-            {"ok": False, "error": "分析结果文件丢失"}, status_code=404
-        )
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse(
-            {"ok": False, "error": f"分析结果读取失败：{e}"}, status_code=500
-        )
-    return JSONResponse({"ok": True, **payload})
+    return _analysis_sse(image_id, focus, framework_override, rerun=rerun)
 
 
 @app.post("/api/painting-analysis/{image_id}/message")

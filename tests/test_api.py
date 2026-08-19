@@ -9,19 +9,19 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 
 import api
 from src.analysis import engine as analysis_engine
 from src.analysis import store as analysis_store
+from src.data import db
 from src.data import documents_store
 from src.ingestion import pipeline as pipeline_mod
 from src.ingestion import table_pipeline as tp
@@ -31,7 +31,6 @@ from src.memory import memory_items as mi_mod
 from src.memory import summary as summary_mod
 from src.observability import runs as runs_mod
 from src.retrieval import hybrid as hybrid_mod
-from src.retrieval.hybrid import HybridRetriever
 from src.tasks import store as tasks_mod
 from src.platform import users as users_store
 from web import service as svc
@@ -42,17 +41,18 @@ os.environ["RATE_LIMIT_RPM"] = "0"
 documents_store.DB_PATH = _TMP / "documents.db"
 documents_store._LEGACY_STATUS_FILE = _TMP / "doc_status.json"
 conv_mod._DB_PATH = _TMP / "conversations.db"
-conv_mod._conn = None
+conv_mod._db_ready = False
 summary_mod._DB_PATH = _TMP / "conversations.db"
-summary_mod._conn = None
+summary_mod._db_ready = False
 fb_mod._DB_PATH = _TMP / "feedback.db"
-fb_mod._conn = None
+fb_mod._db_ready = False
 runs_mod._DB_PATH = _TMP / "observability.db"
-runs_mod._conn = None
+runs_mod._db_ready = False
 tasks_mod._DB_PATH = _TMP / "tasks.db"
-tasks_mod._conn = None
+tasks_mod._db_ready = False
 mi_mod._DB_PATH = _TMP / "agent_memory.db"
-mi_mod._conn = None
+mi_mod._db_ready = False
+db.close_all()
 users_store._reset_for_tests(_TMP / "platform.db")
 analysis_store.DB_PATH = _TMP / "user_images.db"
 analysis_engine.USER_IMAGE_ROOT = _TMP / "uploads" / "user_images"
@@ -67,7 +67,27 @@ def client():
 @pytest.fixture(autouse=True)
 def _api_clean():
     api._rate_buckets.clear()
+    # 重新断言各存储路径：pytest 命令行顺序可能让其他文件的 fixture
+    # 改写本文件的模块全局 _DB_PATH，导致跨文件数据串扰
+    documents_store.DB_PATH = _TMP / "documents.db"
+    documents_store._LEGACY_STATUS_FILE = _TMP / "doc_status.json"
+    conv_mod._DB_PATH = _TMP / "conversations.db"
+    conv_mod._db_ready = False
+    summary_mod._DB_PATH = _TMP / "conversations.db"
+    summary_mod._db_ready = False
+    fb_mod._DB_PATH = _TMP / "feedback.db"
+    fb_mod._db_ready = False
+    runs_mod._DB_PATH = _TMP / "observability.db"
+    runs_mod._db_ready = False
+    mi_mod._DB_PATH = _TMP / "agent_memory.db"
+    mi_mod._db_ready = False
+    db.close_all()
     tasks_mod._reset_for_tests(_TMP / "tasks.db")
+    users_store._reset_for_tests(_TMP / "platform.db")
+    analysis_store.DB_PATH = _TMP / "user_images.db"
+    analysis_engine.USER_IMAGE_ROOT = _TMP / "uploads" / "user_images"
+    documents_store.init_db()
+    analysis_store.init_db()
     with patch("src.memory.memory_items._embed", return_value=None):
         try:
             yield
@@ -110,7 +130,9 @@ def test_answer_block_escapes_html():
 
 
 def test_chain_detail_escapes_user_content():
-    out = svc._chain_detail("rewrite_split", {"user_query": "<img src=x onerror=1>"})
+    out = svc._chain_detail(
+        "ask_user", {"pending_clarification": "<img src=x onerror=1>"}
+    )
     assert "&lt;img" in out
     assert "<img" not in out
 
@@ -542,6 +564,57 @@ def test_delete_nonexistent_raises():
         restore()
 
 
+def test_pdf_ingest_preserves_non_default_user_status(monkeypatch):
+    """真实登录用户的 PDF 完成后不能因默认用户查询而卡在 processing。"""
+    tmp = Path(tempfile.mkdtemp(prefix="s6_owner_"))
+    restore = _doc_isolate(tmp)
+    try:
+        doc_id = "owned-pdf"
+        user_id = "user-42"
+        work_dir = pipeline_mod.UPLOADS_DIR / "default" / doc_id
+        work_dir.mkdir(parents=True)
+        pdf_path = work_dir / "document.pdf"
+        pdf_path.write_bytes(b"fake pdf")
+        documents_store.add_document(
+            doc_id=doc_id, kind="pdf", user_id=user_id, doc_name="large.pdf",
+            status="processing", file_path=str(pdf_path), file_size=8,
+        )
+
+        plan = type("Plan", (), {"pages": [], "distribution": {}})()
+        monkeypatch.setattr(pipeline_mod, "classify_document", lambda _path: plan)
+        monkeypatch.setattr(pipeline_mod, "index_page_images", lambda *a, **k: 0)
+
+        pipeline_mod.ingest_pdf(
+            str(pdf_path), doc_id, doc_name="large.pdf", user_id=user_id,
+        )
+
+        owned = documents_store.get_document(doc_id, user_id)
+        assert owned is not None
+        assert owned["status"] == "done"
+        assert documents_store.get_document(doc_id, "web_user") is None
+    finally:
+        restore()
+
+
+def test_documents_repairs_legacy_stuck_pdf_from_done_task():
+    doc_id = "legacy-stuck-pdf"
+    user_id = "user-legacy"
+    documents_store.add_document(
+        doc_id=doc_id, kind="pdf", user_id=user_id, doc_name="large.pdf",
+        status="processing",
+    )
+    tasks_mod.create_task(
+        "ingest_pdf", {"doc_id": doc_id, "kind": "pdf", "user_id": user_id},
+        task_id=doc_id,
+    )
+    tasks_mod.update_task(doc_id, status="done", progress=100)
+
+    docs = svc.documents(user_id)
+
+    assert docs[0]["status"] == "done"
+    assert documents_store.get_document(doc_id, user_id)["status"] == "done"
+
+
 # ══════════════ 重新生成 / 断开回归 ══════════════
 class _FakeGraph:
     checkpointer = None
@@ -556,11 +629,25 @@ class _FakeGraph:
 
 def _answers_graph(answer: str):
     return _FakeGraph([
-        {"rewrite_split": {"user_query": "q"}},
-        {"classify": {"intent": "general"}},
+        {"load_memory": {"user_preferences": {}}},
+        {"ask_user": {"ask_user": "continue"}},
         {"general_agent": {"final_answer": answer}},
         {"reflection": {"reflection_notes": "PASS"}},
     ])
+
+
+def test_stream_persists_user_turn_before_model_finishes(monkeypatch):
+    """生成中刷新时，会话和首条用户消息也必须已经可恢复。"""
+    sid = "s-refresh-during-stream"
+    monkeypatch.setattr(svc, "graph", _answers_graph("稍后完成"))
+    stream = svc.stream_answer("刷新也不能丢", sid)
+
+    first = next(stream)
+
+    assert first["type"] == "delta"
+    saved = svc.conversation(sid)
+    assert saved == [{"role": "user", "content": "刷新也不能丢"}]
+    stream.close()
 
 
 def test_regenerate_replaces_old_qa(client, monkeypatch):

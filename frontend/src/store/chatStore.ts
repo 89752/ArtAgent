@@ -416,6 +416,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }));
     }
     set({ view: "chat" });
+    // 会话一开始就进入 URL；不能等 SSE done，否则生成过程中刷新会丢失 sid。
+    updateUrl(sidAtSend);
 
     if (!opts.editInPlace && !opts.regenerate) {
       const userTurn: UserTurn = {

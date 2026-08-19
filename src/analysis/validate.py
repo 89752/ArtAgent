@@ -81,18 +81,6 @@ def missing_fields(report: dict) -> list[str]:
     return missing
 
 
-def check_framework_consistency(report: dict) -> list[str]:
-    """非写实框架下透视必须不适用。"""
-    issues: list[str] = []
-    framework = str(report.get("framework") or "")
-    l1 = report.get("layer1_technique")
-    if framework in _NON_REALISTIC and isinstance(l1, dict):
-        persp = l1.get("perspective")
-        if isinstance(persp, dict) and persp.get("applies") is True:
-            issues.append("非写实框架下 perspective.applies 必须为 false")
-    return issues
-
-
 def fix_framework_consistency(report: dict) -> dict:
     """强制修正：非写实框架下透视标记为不适用。"""
     out = copy.deepcopy(report)

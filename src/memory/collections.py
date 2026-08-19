@@ -12,19 +12,20 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.data import db
+
 _DB_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "memory"
 _DB_PATH = _DB_DIR / "agent_memory.db"
 
 _lock = threading.Lock()
-_conn: sqlite3.Connection | None = None
+_db_ready = False
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _DB_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.execute(
+    global _db_ready
+    conn = db.get_conn(_DB_PATH)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS collections (
                 user_id    TEXT NOT NULL,
@@ -35,8 +36,9 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def save_collection(user_id: str, name: str, items: list[str]) -> None:

@@ -266,7 +266,10 @@ def upsert_document(
     **fields,
 ) -> None:
     """更新文档记录；不存在时自动创建（原 pipeline.update_doc_status 语义）。"""
-    if get_document(doc_id) is None:
+    # 文档在上传时已经按真实用户落库。这里必须用同一 user_id 查询，
+    # 否则非默认用户的记录会被误判为不存在；随后 INSERT OR IGNORE 又会
+    # 因 doc_id 主键冲突被忽略，最终状态便会永远停在 processing。
+    if get_document(doc_id, user_id) is None:
         add_document(doc_id=doc_id, kind=kind, user_id=user_id, status=status, **fields)
     else:
         fields["status"] = status  # status 是命名参数，不会进 fields，必须显式补回

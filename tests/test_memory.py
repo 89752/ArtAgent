@@ -26,6 +26,7 @@ import src.memory.metrics as mtr
 import src.memory.collections as col
 import src.memory.summary as summary_mod
 import src.memory.user_doc as ud
+from src.data import db
 
 
 @pytest.fixture(autouse=True)
@@ -36,9 +37,10 @@ def _isolate(monkeypatch):
     lc._reset_for_tests(tmp)
     mtr._reset_for_tests(tmp)
     summary_mod._DB_PATH = tmp.parent / "conversations.db"
-    summary_mod._conn = None
+    summary_mod._db_ready = False
     col._DB_PATH = tmp
-    col._conn = None
+    col._db_ready = False
+    db.close_all()
     mi.clear_active_user_id()
     monkeypatch.setenv("MEMORY_USER_ID", "test-user")
     for name in (
@@ -965,7 +967,8 @@ def test_parse_import_file_empty():
 def _summary_tmp_db():
     tmp = Path(tempfile.mkdtemp()) / "conversations.db"
     summary_mod._DB_PATH = tmp
-    summary_mod._conn = None
+    summary_mod._db_ready = False
+    db.close_all()
     return tmp
 
 
@@ -1031,7 +1034,8 @@ def test_low_volume_below_turn_threshold_skips():
 
 def _col_tmp_db():
     col._DB_PATH = Path(tempfile.mkdtemp()) / "agent_memory.db"
-    col._conn = None
+    col._db_ready = False
+    db.close_all()
 
 
 def test_save_and_list_collections():

@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from langchain_core.tools import tool
 
 from src.memory.memory_items import (

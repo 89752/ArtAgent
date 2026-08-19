@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -44,7 +44,6 @@ from src.retrieval.lexical import (
     translate_query,
 )
 from src.retrieval import reranker as reranker_mod
-from src.retrieval import relevance as relevance_mod
 from src.retrieval.relevance import _filter_enabled, llm_relevance_filter
 from src.retrieval.structured_retriever import (
     CORE_SCHEMA,
@@ -53,6 +52,7 @@ from src.retrieval.structured_retriever import (
     get_structured_retriever,
     register_structured_dataset,
 )
+import src.retrieval.userdoc_image_retriever as uir
 from src.agent.state import AgentState
 from src.agent.nodes import general as general_mod
 import src.utils.governance as gov_mod
@@ -1002,66 +1002,6 @@ def test_schema_no_axis_no_timeline():
     assert schema.supports_recommendation is True
 
 
-def test_group_by_axis_sorted_and_unknown_dropped():
-    groups = _sr_retriever().group_by_axis("Van Gogh")
-    assert list(groups.keys()) == ["1851-1900"]
-    assert len(groups["1851-1900"]) == 2
-
-
-def test_group_by_axis_only_unknown_kept():
-    df = _sr_df()
-    df["TIMEFRAME"] = ""
-    r = StructuredTableRetriever("t_only_unknown", SR_SCHEMA, df=df)
-    groups = r.group_by_axis("Van Gogh")
-    assert list(groups.keys()) == ["Unknown"]
-    assert len(groups["Unknown"]) == 3
-
-
-def test_group_by_axis_entity_not_found():
-    assert _sr_retriever().group_by_axis("zzz-nobody") == {}
-
-
-def test_group_by_axis_without_axis_col():
-    schema = TableSchema(entity_col="AUTHOR", description_col="DESCRIPTION")
-    r = StructuredTableRetriever("t_no_axis", schema, df=_sr_df())
-    assert r.group_by_axis("Van Gogh") == {}
-
-
-def test_group_by_axis_sorted_multiple_groups():
-    df = _sr_df()
-    df.loc[3, "TIMEFRAME"] = "1801-1850"
-    df.loc[0, "AUTHOR"] = "MONET, Claude"
-    r = StructuredTableRetriever("t_multi", SR_SCHEMA, df=df)
-    assert list(r.group_by_axis("Monet").keys()) == ["1801-1850", "1851-1900"]
-
-
-def test_exclude_by_entity_dataframe():
-    out = _sr_retriever().exclude_by_entity(["Vincent van Gogh"])
-    assert len(out) == 1 and out.iloc[0]["AUTHOR"] == "MONET, Claude"
-
-
-def test_exclude_by_entity_empty_names_returns_all():
-    assert len(_sr_retriever().exclude_by_entity([])) == 4
-
-
-def test_exclude_by_entity_short_tokens_ignored():
-    assert len(_sr_retriever().exclude_by_entity(["AI"])) == 4
-
-
-def test_exclude_from_results_dicts():
-    results = [
-        {"title": "Irises", "author": "GOGH, Vincent van"},
-        {"title": "Water Lilies", "author": "MONET, Claude"},
-    ]
-    out = _sr_retriever().exclude_from_results(results, ["Van Gogh"])
-    assert [r["title"] for r in out] == ["Water Lilies"]
-
-
-def test_exclude_from_results_empty_names():
-    results = [{"title": "Irises", "author": "GOGH, Vincent van"}]
-    assert _sr_retriever().exclude_from_results(results, []) == results
-
-
 def test_fuzzy_search_by_entity():
     hits = _sr_retriever().search("Monet", top_k=5)
     assert len(hits) == 1
@@ -1303,3 +1243,90 @@ def test_status_dict_shape():
     assert doc["rows"] == 7
     assert doc["supports_timeline"] is True
     assert doc["supports_recommendation"] is False
+
+
+# ══════════════ 多模态嵌入提供商选择 ══════════════
+def _fake_embed_config(provider="dashscope", model="m1", api_key="k1", base_url="b1"):
+    vals = {
+        "retrieval.pdf_image_embed_provider": provider,
+        "retrieval.pdf_image_embed_model": model,
+        "retrieval.pdf_image_embed_api_key": api_key,
+        "retrieval.pdf_image_embed_base_url": base_url,
+        "models.llm_api_key": "llm-key",
+        "models.llm_base_url": "https://llm.example/v1",
+    }
+    return lambda dotted, default=None: vals.get(dotted, default)
+
+
+def test_mm_embed_default_provider_dashscope(monkeypatch):
+    monkeypatch.setattr(uir, "get", _fake_embed_config())
+    fake = lambda item: [1.0]  # noqa: E731
+    with patch(
+        "src.retrieval.userdoc_image_retriever._dashscope_embed_fn",
+        return_value=fake,
+    ) as m:
+        fn = uir.get_mm_embed_fn()
+    assert fn is fake
+    m.assert_called_once_with("m1", "k1")
+
+
+def test_mm_embed_api_key_falls_back_to_llm(monkeypatch):
+    monkeypatch.setattr(uir, "get", _fake_embed_config(api_key=None))
+    with patch("src.retrieval.userdoc_image_retriever._dashscope_embed_fn") as m:
+        uir.get_mm_embed_fn()
+    m.assert_called_once_with("m1", "llm-key")
+
+
+def test_mm_embed_openai_provider(monkeypatch):
+    monkeypatch.setattr(
+        uir, "get",
+        _fake_embed_config(provider="openai", base_url="https://emb.example/v1"),
+    )
+    with patch("src.retrieval.userdoc_image_retriever._openai_embed_fn") as m:
+        fn = uir.get_mm_embed_fn()
+    assert fn is m.return_value
+    m.assert_called_once_with("m1", "k1", "https://emb.example/v1")
+
+
+def test_mm_embed_unknown_provider_raises(monkeypatch):
+    monkeypatch.setattr(uir, "get", _fake_embed_config(provider="voyage"))
+    with pytest.raises(ValueError, match="voyage"):
+        uir.get_mm_embed_fn()
+
+
+def test_mm_embed_missing_key_raises(monkeypatch):
+    vals = _fake_embed_config(api_key=None)
+
+    def get(dotted, default=None):
+        if dotted in (
+            "retrieval.pdf_image_embed_api_key",
+            "models.llm_api_key",
+        ):
+            return None
+        return vals(dotted, default)
+
+    monkeypatch.setattr(uir, "get", get)
+    with pytest.raises(ValueError, match="API Key"):
+        uir.get_mm_embed_fn()
+
+
+def test_openai_embed_fn_transforms_input(monkeypatch):
+    import openai
+
+    fake_client = MagicMock()
+    fake_client.embeddings.create.return_value = SimpleNamespace(
+        data=[SimpleNamespace(embedding=[0.5, 0.25])]
+    )
+    monkeypatch.setattr(openai, "OpenAI", MagicMock(return_value=fake_client))
+
+    embed = uir._openai_embed_fn("vision-embed", "sk-x", "https://emb.example/v1")
+    assert embed({"text": "印象派"}) == [0.5, 0.25]
+    fake_client.embeddings.create.assert_called_once_with(
+        model="vision-embed", input=["印象派"], encoding_format="float"
+    )
+
+    fake_client.embeddings.create.reset_mock()
+    embed({"image": "data:image/png;base64,AAA"})
+    assert fake_client.embeddings.create.call_args.kwargs["input"] == [
+        "data:image/png;base64,AAA"
+    ]

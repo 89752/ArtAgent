@@ -1,19 +1,25 @@
-"""
-用户 PDF 多模态路线检索器：DashScope 多模态向量空间。
+"""用户 PDF 多模态路线检索器（嵌入提供商可配置）。
 
-整页图片用 tongyi-embedding-vision-plus 编码（1152 维），与 BGE 文本空间
-维度/语义分布不同，独立 collection（user_pdf_images）不混库。
-查询时用同一模型编码文本 query，实现"文搜图"跨模态检索。
+整页图片用多模态嵌入模型编码（默认 DashScope tongyi-embedding-vision-plus，
+1152 维），与 BGE 文本空间维度/语义分布不同，独立 collection
+（user_pdf_images）不混库。查询时用同一模型编码文本 query，实现
+"文搜图"跨模态检索。
+
+提供商经 config.yaml 的 retrieval.pdf_image_embed_* 配置：
+  - provider: dashscope（默认）或 openai（OpenAI 兼容 /embeddings 端点）；
+  - model / api_key / base_url 均可覆盖，api_key / base_url 缺省回落对话模型配置。
+
+注意：切换嵌入模型会改变向量空间，旧向量不可比，需重建 user_pdf_images
+collection 后重新入库。
 """
 
 from __future__ import annotations
-
-import os
 
 from dotenv import load_dotenv
 
 from src.retrieval.base import RetrievalResult
 from src.retrieval.hybrid import get_or_create_chroma_collection
+from src.utils.config import get
 from src.utils.logging_config import get_logger
 
 load_dotenv()
@@ -21,24 +27,78 @@ load_dotenv()
 logger = get_logger("retrieval.userdoc_image")
 
 COLLECTION_NAME = "user_pdf_images"
-MM_EMBED_MODEL = "tongyi-embedding-vision-plus"  # 1152 维；qwen3-vl-embedding 为对照组
 
 
-def get_mm_embed_fn():
-    """返回 DashScope 多模态编码函数（文本/图片同空间）。"""
+def _dashscope_embed_fn(model: str, api_key: str):
+    """DashScope 多模态编码（文本/图片同空间）。"""
 
     def embed(item: dict) -> list[float]:
         """item: {"text": ...} 或 {"image": "data:image/...;base64,..."}"""
         import dashscope
         from dashscope import MultiModalEmbedding
 
-        dashscope.api_key = os.getenv("LLM_API_KEY")
-        resp = MultiModalEmbedding.call(model=MM_EMBED_MODEL, input=[item])
+        dashscope.api_key = api_key
+        resp = MultiModalEmbedding.call(model=model, input=[item])
         if resp.status_code != 200:
             raise RuntimeError(f"多模态编码失败：{resp.code} {resp.message}")
         return resp.output["embeddings"][0]["embedding"]
 
     return embed
+
+
+def _to_openai_input(item: dict):
+    """把 DashScope 风格 item（{"text": ...} / {"image": "data:..."}）
+    转成 OpenAI 兼容 embeddings 接受的字符串输入。"""
+    if "text" in item:
+        return item["text"]
+    if "image" in item:
+        return item["image"]
+    return item
+
+
+def _openai_embed_fn(model: str, api_key: str, base_url: str):
+    """OpenAI 兼容 /embeddings 调用（多模态能力取决于端点实现）。"""
+
+    def embed(item: dict) -> list[float]:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        resp = client.embeddings.create(
+            model=model,
+            input=[_to_openai_input(item)],
+            encoding_format="float",
+        )
+        return resp.data[0].embedding
+
+    return embed
+
+
+def get_mm_embed_fn():
+    """返回多模态编码函数（按 config 选择提供商）。"""
+    provider = str(
+        get("retrieval.pdf_image_embed_provider", "dashscope")
+    ).strip().lower()
+    model = str(get("retrieval.pdf_image_embed_model", "tongyi-embedding-vision-plus"))
+    api_key = get("retrieval.pdf_image_embed_api_key") or get("models.llm_api_key")
+    base_url = get("retrieval.pdf_image_embed_base_url") or get("models.llm_base_url")
+
+    if provider == "dashscope":
+        if not api_key:
+            raise ValueError(
+                "缺少多模态嵌入 API Key"
+                "（retrieval.pdf_image_embed_api_key 或 LLM_API_KEY）"
+            )
+        return _dashscope_embed_fn(model, api_key)
+    if provider == "openai":
+        if not api_key or not base_url:
+            raise ValueError(
+                "openai 嵌入提供商需要 api_key 与 base_url"
+                "（缺省回落对话模型配置）"
+            )
+        return _openai_embed_fn(model, api_key, base_url)
+    raise ValueError(
+        f"未知的 PDF 图片嵌入提供商：{provider}（支持 dashscope / openai）"
+    )
 
 
 class UserDocImageRetriever:

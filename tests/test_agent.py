@@ -4,7 +4,6 @@
 """
 
 import json
-import os
 import sys
 import tempfile
 import time
@@ -29,13 +28,11 @@ from src.agent.context import (
     estimate_context_chars,
     extract_evidence_from_messages,
     format_numbered_evidence_block,
-    format_multi_evidence,
     trim_history,
 )
 from src.agent.graph import get_graph
-from src.agent.nodes.common import _info_gap, ask_user
+from src.agent.nodes.common import _info_gap, ask_user, classify_intent
 from src.agent.nodes.general import MAX_TOOL_ROUNDS, _guarded_tool_calls, _ledger_updates, general_tools
-from src.agent.rewrite import RewriteResult, normalize_query, rewrite_and_split, rewrite_enabled
 from src.agent.state import AgentState
 from src.observability import runs as runs_mod
 from src.retrieval import structured_retriever as sr
@@ -208,12 +205,22 @@ def test_normal_queries_pass():
     assert _info_gap("梵高有哪些作品", "general")[0] is False
 
 
+def test_classify_intent_keywords():
+    assert classify_intent("对比莫奈和梵高的色彩") == "comparison"
+    assert classify_intent("莫奈和梵高谁更擅长光影") == "comparison"
+    assert classify_intent("梳理透纳的风格演变") == "timeline"
+    assert classify_intent("我喜欢浓烈奔放的风格，推荐几位画家") == "recommendation"
+    assert classify_intent("还有哪些作品采用了类似的光影处理") == "recommendation"
+    assert classify_intent("梵高有哪些作品") == "general"
+
+
 def test_ask_user_asks_and_short_circuits():
     state = AgentState(user_query="给我推荐几幅画", intent="recommendation")
     out = ask_user(state)
     assert out["ask_user"] == "ask"
     assert out["pending_clarification"]
     assert out["final_answer"] == out["pending_clarification"]
+    assert out["intent"] == "recommendation"
 
 
 def test_ask_user_continues_when_info_sufficient():
@@ -225,15 +232,14 @@ def test_ask_user_continues_when_info_sufficient():
     out = ask_user(state)
     assert out["ask_user"] == "continue"
     assert out["pending_clarification"] == ""
+    assert out["intent"] == "recommendation"
 
 
-def test_rewrite_ambiguous_triggers_ask():
-    state = AgentState(
-        user_query="关于那幅画你了解吗", intent="general", rewrite_ambiguous=True,
-    )
+def test_ask_user_writes_derived_intent():
+    state = AgentState(user_query="我喜欢莫奈，推荐几幅类似的画")
     out = ask_user(state)
-    assert out["ask_user"] == "ask"
-    assert "确定" in out["pending_clarification"]
+    assert out["intent"] == "recommendation"
+    assert out["ask_user"] == "continue"
 
 
 def test_rewrite_not_ambiguous_passes_on_normal_question():
@@ -481,23 +487,6 @@ def test_evidence_block_respects_budget():
     assert "[2]" not in block
 
 
-def test_multi_evidence_groups_by_subtask_with_global_numbering():
-    grouped = {
-        "对比莫奈和梵高": [_item("A", aid="Q1")],
-        "推荐类似画": [_item("B", aid="Q2"), _item("A", aid="Q1")],
-    }
-    block = format_multi_evidence(grouped)
-    assert "【子任务1】对比莫奈和梵高" in block
-    assert "【子任务2】推荐类似画" in block
-    assert "[1] A" in block
-    assert "[2] B" in block
-    assert block.count("[1] A") == 1
-
-
-def test_multi_evidence_empty():
-    assert format_multi_evidence({}) == ""
-
-
 def test_profile_and_session_and_summary_blocks():
     assert "喜欢画家：Monet" in build_profile_block({"artists": ["Monet"]})
     assert "已推荐画家：Rubens" in build_session_block({"recommended_artists": ["Rubens"]})
@@ -602,129 +591,6 @@ def test_condense_tool_messages_compresses_long_json():
     assert "evidence" in str(out[0].content)
     assert out[0].tool_call_id == "c1" and out[0].id == "m1"
     assert out[1].content == "tool execution error"
-
-
-# ══════════════ 查询改写 ══════════════
-def test_normalize_query_strips_quotes():
-    assert normalize_query('  "这幅画"  ') == "这幅画"
-    assert normalize_query("“星月夜”") == "星月夜"
-    assert normalize_query("") == ""
-
-
-def test_rewrite_enabled_default_and_toggle():
-    assert rewrite_enabled() is True
-    os.environ["REWRITE_ENABLED"] = "0"
-    try:
-        assert rewrite_enabled() is False
-    finally:
-        os.environ.pop("REWRITE_ENABLED", None)
-    assert rewrite_enabled() is True
-
-
-def test_llm_rewrite_and_split_success():
-    def fake_llm(prompt):
-        assert "最新问题" in prompt
-        return (
-            '{"rewritten_question": "对比莫奈和梵高的色彩，'
-            '并推荐类似的画", "sub_questions": ["对比莫奈和梵高的色彩", '
-            '"推荐几幅类似莫奈的风景画"]}'
-        )
-
-    result = rewrite_and_split("对比莫奈和梵高，顺便推荐类似的画", llm=fake_llm)
-    assert result.rewritten_question.startswith("对比莫奈和梵高的色彩")
-    assert len(result.sub_questions) == 2
-
-
-def test_llm_failure_falls_back_to_normalized():
-    def boom(prompt):
-        raise RuntimeError("llm down")
-
-    result = rewrite_and_split("  找梵高的画  ", llm=boom)
-    assert result == RewriteResult("找梵高的画", ["找梵高的画"])
-
-
-def test_malformed_json_falls_back():
-    result = rewrite_and_split("找莫奈的画", llm=lambda p: "not json")
-    assert result.rewritten_question == "找莫奈的画"
-    assert result.sub_questions == ["找莫奈的画"]
-
-
-def test_empty_sub_questions_becomes_rewritten():
-    raw = '{"rewritten_question": "什么是巴洛克", "sub_questions": []}'
-    result = rewrite_and_split("什么是巴洛克", llm=lambda p: raw)
-    assert result.rewritten_question == "什么是巴洛克"
-    assert result.sub_questions == ["什么是巴洛克"]
-
-
-def test_key_entities_and_ambiguous_parsed():
-    raw = (
-        '{"rewritten_question": "莫奈的睡莲有哪些", "sub_questions": [], '
-        '"key_entities": ["Monet", "Water Lilies"], "ambiguous": true}'
-    )
-    result = rewrite_and_split("就是那个，莫奈的睡莲，你懂的", llm=lambda p: raw)
-    assert result.key_entities == ["Monet", "Water Lilies"]
-    assert result.ambiguous is True
-
-
-def test_missing_new_fields_default_safe():
-    raw = '{"rewritten_question": "什么是巴洛克", "sub_questions": []}'
-    result = rewrite_and_split("什么是巴洛克", llm=lambda p: raw)
-    assert result.key_entities == []
-    assert result.ambiguous is False
-
-
-def test_over_compressed_rewrite_falls_back_to_original():
-    def fake_llm(prompt):
-        return (
-            '{"rewritten_question": "莫奈晚年", "sub_questions": ["莫奈晚年"], '
-            '"key_entities": ["莫奈"], "ambiguous": false}'
-        )
-
-    result = rewrite_and_split("他晚年怎么了？", llm=fake_llm)
-    assert result.rewritten_question == "他晚年怎么了？"
-    assert result.sub_questions == ["他晚年怎么了？"]
-
-
-def test_rewrite_prompt_asks_compression_and_extraction():
-    def fake_llm(prompt):
-        assert "压缩" in prompt or "去掉口头禅" in prompt
-        assert "key_entities" in prompt
-        assert "ambiguous" in prompt
-        return ('{"rewritten_question": "q", "sub_questions": [], '
-                '"key_entities": [], "ambiguous": false}')
-
-    rewrite_and_split("就是那个，嗯，你懂的", llm=fake_llm)
-
-
-def test_history_only_keeps_last_two_turns():
-    history = [
-        HumanMessage(content="第1轮：找梵高的画"),
-        AIMessage(content="第1轮回答"),
-        HumanMessage(content="第2轮：这幅画呢"),
-        AIMessage(content="第2轮回答"),
-        HumanMessage(content="第3轮：它现在在哪里"),
-    ]
-
-    def fake_llm(prompt):
-        assert "第1轮：找梵高的画" not in prompt
-        assert "第3轮" in prompt
-        assert "第2轮" in prompt
-        return '{"rewritten_question": "《星月夜》现在收藏在哪里？", "sub_questions": []}'
-
-    result = rewrite_and_split("它现在在哪里", history, llm=fake_llm)
-    assert "《星月夜》" in result.rewritten_question
-
-
-def test_disabled_skips_llm():
-    os.environ["REWRITE_ENABLED"] = "0"
-    try:
-        def boom(prompt):
-            raise AssertionError("关闭后不应调用 LLM")
-
-        result = rewrite_and_split(" 找伦勃朗的画 ", llm=boom)
-        assert result.rewritten_question == "找伦勃朗的画"
-    finally:
-        os.environ.pop("REWRITE_ENABLED", None)
 
 
 # ══════════════ 可观测轨迹 ══════════════

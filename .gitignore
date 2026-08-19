@@ -1,6 +1,6 @@
 # ── Secrets（务必排除，切勿提交 API key） ──
+# .env 存密钥与本地值；config.yaml 已入库且只含 $ENV 引用，不含密钥
 .env
-config.yaml
 
 # ── 数据集与向量索引（体积大，不入库；README 说明如何获取/重建） ──
 # 注意：/data/ 只匹配仓库根目录的数据目录；若写成 data/ 会把 src/data/ 里的

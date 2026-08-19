@@ -16,20 +16,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from src.data import db
+
 _DB_PATH = Path(os.getenv("INDEX_DIR", "./data/index")) / "tasks.db"
 _lock = threading.Lock()
-_conn: sqlite3.Connection | None = None
+_db_ready = False
 
 VALID_STATUS = {"pending", "processing", "done", "failed", "interrupted"}
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute(
+    global _db_ready
+    conn = db.get_conn(_DB_PATH, row_factory=sqlite3.Row)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id     TEXT PRIMARY KEY,
@@ -44,8 +44,9 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def _now() -> str:
@@ -168,19 +169,11 @@ def mark_interrupted_on_startup() -> int:
     return cur.rowcount
 
 
-def delete_task(task_id: str) -> bool:
-    with _lock:
-        cur = _get_conn().execute(
-            "DELETE FROM tasks WHERE task_id = ?", (task_id,)
-        )
-        _get_conn().commit()
-    return cur.rowcount > 0
-
-
 def _reset_for_tests(path: Path | None = None) -> None:
     """测试专用：重置到指定数据库文件。"""
-    global _conn, _DB_PATH
-    _conn = None
+    global _db_ready, _DB_PATH
+    db.close_all()
+    _db_ready = False
     _DB_PATH = path or Path("./data/index/_test_tasks.db")
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:

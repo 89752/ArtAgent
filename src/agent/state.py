@@ -1,16 +1,6 @@
-"""
-ArtAgent 状态定义（混合架构版）
+"""ArtAgent 状态定义（温和版：纯 ReAct + 记忆 + 澄清 + 反思）。"""
 
-一个 AgentState 贯穿所有分支：
-  - general       → ReAct 工具循环
-  - comparison    → 跨维度风格对比子管线
-  - timeline      → 时间线梳理 + 配图子管线
-  - recommendation→ 基于偏好的链式推荐子管线
-
-所有分支最终汇聚到 reflection，必要时走 web_fallback。
-"""
-
-from typing import Annotated, Any
+from typing import Annotated
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
@@ -28,23 +18,6 @@ class AgentState(BaseModel):
     # ── 路由 ───────────────────────────────────────────────────
     # 意图类型：general / comparison / timeline / recommendation
     intent: str = ""
-    # 路由决策：direct / rag / web / comparison / timeline /
-    # recommendation / tool:<name>
-    route: str = ""
-    # 路由决策理由（可观测，写入 trace / route_diag）
-    route_reason: str = ""
-    # 意图树打分结果：[{id, path, kind, score, reason, tool_name}]
-    intent_scores: list[dict] = Field(default_factory=list)
-    # 查询改写结果：改写后的独立完整问题
-    rewritten_question: str = ""
-    # 拆分出的子问题（多意图并行检索的输入）
-    sub_questions: list[str] = Field(default_factory=list)
-    # 改写时抽取的关键实体（画家/画作/流派，供检索/上下文增强）
-    rewritten_key_entities: list[str] = Field(default_factory=list)
-    # 改写判定"语义不明"标记（接 ask_user 澄清）
-    rewrite_ambiguous: bool = False
-    # 多意图并行检索结果：{子问题: 证据列表}，供上下文分组注入
-    multi_evidence: dict[str, list[dict]] = Field(default_factory=dict)
     # 会话滚动摘要（由增量摘要器写入，注入 context.summary 块）
     conversation_summary: str = ""
     # load_memory 检索注入的记忆块文本（token 预算内）
@@ -65,8 +38,6 @@ class AgentState(BaseModel):
     analysis_reports: list[dict] = Field(default_factory=list)
     # 信息缺口澄清路由信号："ask"=追问用户并短路；"continue"=放行
     ask_user: str = "continue"
-    # RAG 开关（收尾项）：False = 无需检索，走直接回答
-    rag_needed: bool = True
     # ReAct 工具轮次计数（防循环失控上限）
     tool_rounds: int = 0
     # 本轮已执行过的工具调用签名（防重复调用烧光预算）
@@ -82,29 +53,9 @@ class AgentState(BaseModel):
     # 用户上传表格接入后可切换，默认核心库。
     dataset_id: str = "core"
 
-    # ── 规划 / 拆解 ────────────────────────────────────────────
-    # 对比/推荐场景抽取出的对象，如 ["Claude Monet", "Vincent van Gogh"]
-    subjects: list[str] = Field(default_factory=list)
-    # 拆解后的子查询（对比按对象、时间线按时期）
-    sub_queries: list[str] = Field(default_factory=list)
-    # 推荐场景：LLM 推理生成的结构化风格特征（本项目核心亮点）
-    extracted_features: str = ""
-
-    # ── 检索结果 ───────────────────────────────────────────────
-    # 分组检索结果：key 为子查询/对象/时期，value 为画作 dict 列表
-    retrieved_docs: dict[str, list[dict]] = Field(default_factory=dict)
-    # 扁平化的候选画作（供 UI 卡片、图像佐证消费）
-    artworks: list[dict] = Field(default_factory=list)
-    # 时间线/推荐场景配图：[{title, author, image_file, image_path}]
-    images: list[dict] = Field(default_factory=list)
-    # 推荐场景过滤后的候选画家/作品
-    candidates: list[dict] = Field(default_factory=list)
-
     # ── 反思 / 兜底 ────────────────────────────────────────────
     # 反思节点判定：PASS / RETRY
     reflection_notes: str = ""
-    # web 兜底检索结果
-    web_results: list[dict] = Field(default_factory=list)
     # 兜底重试次数（防止死循环）
     retry_count: int = 0
 
@@ -120,9 +71,6 @@ class AgentState(BaseModel):
     shown_artworks: list[str] = Field(default_factory=list)
     recommended_artists: list[str] = Field(default_factory=list)
     pending_clarification: str = ""
-
-    # ── 工具结果（ReAct 分支原始记录，兼容旧代码） ──────────────
-    tool_results: list[Any] = Field(default_factory=list)
 
     # ── 最终输出 ───────────────────────────────────────────────
     final_answer: str = ""

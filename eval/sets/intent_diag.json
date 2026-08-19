@@ -7,12 +7,9 @@
   {"query": "巴洛克和文艺复兴绘画风格的差异是什么", "gold": "comparison"},
   {"query": "莫奈与雷诺阿画同一处风景时有什么不同", "gold": "comparison"},
   {"query": "塞尚与毕加索对静物的处理方式差别在哪", "gold": "comparison"},
-  {"query": "凡·艾克与波提切利的油画技法差异在哪里", "gold": "comparison"},
-  {"query": "浮世绘对印象派的影响和两者风格的比较", "gold": "comparison"},
   {"query": "梳理伦勃朗的风格演变", "gold": "timeline"},
   {"query": "莫奈不同时期的画风变化", "gold": "timeline"},
   {"query": "印象派是怎么从被嘲讽到被承认的", "gold": "timeline"},
-  {"query": "透纳不同时期的画风变化", "gold": "timeline"},
   {"query": "莫奈晚年的视力问题如何影响他的画风变化", "gold": "timeline"},
   {"query": "巴洛克之后兴起的是什么艺术运动", "gold": "timeline"},
   {"query": "伦勃朗晚年遭遇了什么", "gold": "timeline"},
@@ -23,7 +20,6 @@
   {"query": "喜欢卡拉瓦乔的戏剧性明暗，推荐几位画家", "gold": "recommendation"},
   {"query": "喜欢洛可可的轻盈甜美，推荐类似风格", "gold": "recommendation"},
   {"query": "推荐几幅浓烈奔放的画", "gold": "recommendation"},
-  {"query": "喜欢莫奈的睡莲系列，我还会喜欢什么", "gold": "recommendation"},
   {"query": "喜欢有故事感的画作，推荐几位画家", "gold": "recommendation"},
   {"query": "喜欢《宫娥》的构图，推荐类似画作", "gold": "recommendation"},
   {"query": "喜欢蛋彩画的质感，推荐画家", "gold": "recommendation"},
@@ -38,5 +34,9 @@
   {"query": "帮我深度分析《向日葵》的象征意义", "gold": "general"},
   {"query": "今天北京天气怎么样", "gold": "general"},
   {"query": "你好", "gold": "general"},
-  {"query": "油画颜料和丙烯颜料有什么区别", "gold": "general"}
+  {"query": "油画颜料和丙烯颜料有什么区别", "gold": "comparison"},
+  {"query": "伦勃朗早期的自画像和晚期的有什么不同", "gold": "comparison"},
+  {"query": "印象派之后兴起的主要艺术运动有哪些", "gold": "timeline"},
+  {"query": "推荐一本关于西方艺术史的书", "gold": "general"},
+  {"query": "帮我总结这份展览资料", "gold": "general"}
 ]

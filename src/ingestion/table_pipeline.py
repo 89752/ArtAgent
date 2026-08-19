@@ -19,12 +19,10 @@ import time
 from pathlib import Path
 
 from src.data import documents_store
-from src.ingestion.pipeline import UPLOADS_DIR
-from src.ingestion.schema_inference import InferredSchema, infer_table_schema
+from src.ingestion.schema_inference import infer_table_schema
 from src.ingestion.table_loader import load_table
 from src.retrieval.structured_retriever import (
     TableSchema,
-    get_structured_retriever,
     register_structured_dataset,
     _REGISTRY,
 )
@@ -43,15 +41,6 @@ def table_dataset_id(doc_id: str, user_id: str | None = None) -> str:
     if user_id:
         return f"table_{user_id}_{doc_id}"
     return f"table_{doc_id}"
-
-
-def save_table_file(data: bytes, suffix: str, doc_id: str, kb_id: str) -> str:
-    """落盘为 uploads/{kb_id}/{doc_id}/table{suffix}，返回路径。"""
-    work_dir = UPLOADS_DIR / kb_id / doc_id
-    work_dir.mkdir(parents=True, exist_ok=True)
-    path = work_dir / f"table{suffix}"
-    path.write_bytes(data)
-    return str(path)
 
 
 # ------------------------------------------------------------------ #

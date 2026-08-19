@@ -21,12 +21,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from src.data import db
+
 _DB_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "memory"
 _DB_PATH = _DB_DIR / "agent_memory.db"
 
 # RLock：add_memory 持有锁时还会调用 _audit（内部再次加锁）
 _lock = threading.RLock()
-_conn: sqlite3.Connection | None = None
+_db_ready = False
 
 DEFAULT_MEMORY_USER = "default_user"
 _active_user_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -56,11 +58,10 @@ def clear_active_user_id() -> None:
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _DB_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.execute(
+    global _db_ready
+    conn = db.get_conn(_DB_PATH)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS memory_items (
                 id            TEXT PRIMARY KEY,
@@ -83,12 +84,12 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        cols = {r[1] for r in _conn.execute("PRAGMA table_info(memory_items)").fetchall()}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(memory_items)").fetchall()}
         if "expected_valid_days" not in cols:
-            _conn.execute("ALTER TABLE memory_items ADD COLUMN expected_valid_days INTEGER")
+            conn.execute("ALTER TABLE memory_items ADD COLUMN expected_valid_days INTEGER")
         if "last_reviewed_at" not in cols:
-            _conn.execute("ALTER TABLE memory_items ADD COLUMN last_reviewed_at TEXT")
-        _conn.execute(
+            conn.execute("ALTER TABLE memory_items ADD COLUMN last_reviewed_at TEXT")
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS memory_events (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,14 +101,15 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        _conn.execute(
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memory_user ON memory_items(user_id, scope)"
         )
-        _conn.execute(
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memory_entity ON memory_items(user_id, entity)"
         )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def _now() -> str:
@@ -729,8 +731,9 @@ def clear_user_memories(user_id: str) -> int:
 
 def _reset_for_tests(path: Path | None = None) -> None:
     """测试专用：重置到指定数据库文件。"""
-    global _conn, _DB_PATH
-    _conn = None
+    global _db_ready, _DB_PATH
+    db.close_all()
+    _db_ready = False
     _DB_PATH = path or Path("./data/memory/_test_memory_items.db")
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:

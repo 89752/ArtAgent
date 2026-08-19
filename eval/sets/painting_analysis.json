@@ -11,7 +11,6 @@
     { "id": "realistic_07", "framework": "realistic", "image_path": "", "note": "素描习作，线条生硬、轮廓反复涂改" },
     { "id": "realistic_08", "framework": "realistic", "image_path": "", "note": "水彩风景，低饱和灰调、构图偏满" },
     { "id": "realistic_09", "framework": "realistic", "image_path": "", "note": "油画人物，互补色点缀、笔触厚涂" },
-    { "id": "realistic_10", "framework": "realistic", "image_path": "", "note": "线稿，比例失衡、左右不对称" },
     { "id": "abstract_01", "framework": "abstract", "image_path": "", "note": "抽象表现，色块构成，无透视" },
     { "id": "abstract_02", "framework": "abstract", "image_path": "", "note": "几何抽象，对称与节奏感强" },
     { "id": "abstract_03", "framework": "abstract", "image_path": "", "note": "泼溅抽象，低饱和、肌理丰富" },

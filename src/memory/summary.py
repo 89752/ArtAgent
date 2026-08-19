@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from src.data import db
+
 _DB_DIR = Path(os.getenv(
     "ARTAGENT_MEMORY_DIR",
     str(Path(__file__).resolve().parent.parent.parent / "data" / "memory"),
@@ -28,7 +30,7 @@ _LEGACY_DB_PATH = (
 ) if not os.getenv("ARTAGENT_MEMORY_DIR") else None
 
 _lock = threading.Lock()
-_conn: Optional[sqlite3.Connection] = None
+_db_ready = False
 
 SUMMARY_TRIGGER_TURNS = 8   # 达到该轮数才触发摘要
 SUMMARY_WINDOW_TURNS = 6    # 每次并入最近 6 轮
@@ -37,12 +39,11 @@ VOLUME_TRIGGER_CHARS = 15000  # 上下文体积超限也触发（v2 阈值触发
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn, _DB_PATH
-    if _conn is None:
-        _DB_PATH = _migrate_legacy_db()
-        _DB_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.execute(
+    global _DB_PATH, _db_ready
+    _DB_PATH = _migrate_legacy_db()
+    conn = db.get_conn(_DB_PATH)
+    if not _db_ready:
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_summary (
                 conversation_id TEXT PRIMARY KEY,
@@ -53,8 +54,9 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _db_ready = True
+    return conn
 
 
 def _migrate_legacy_db() -> Path:

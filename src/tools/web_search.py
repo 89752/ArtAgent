@@ -104,8 +104,3 @@ def web_search(query: str, max_results: int = MAX_RESULTS) -> list[dict]:
         搜索结果列表，每项含 title / snippet / url / source
     """
     return _search_impl(query, max_results)
-
-
-def web_search_available() -> bool:
-    """供 UI/诊断使用：判断联网搜索是否已配置。"""
-    return _get_tavily_client() is not None

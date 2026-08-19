@@ -21,22 +21,6 @@ def _extract_key(
     return None
 
 
-def require_api_key(
-    authorization: str | None = Header(default=None),
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-    cookie: str | None = Cookie(default=None, alias="artagent_token"),
-) -> str:
-    """校验 API Key 并返回 user_id；失败抛 401。"""
-    key = _extract_key(authorization, x_api_key, cookie)
-    user = users.get_user_by_api_key(key) if key else None
-    if user is None:
-        raise HTTPException(
-            status_code=401,
-            detail={"ok": False, "error": "无效或缺失 API Key（Authorization: Bearer <key>）"},
-        )
-    return user["user_id"]
-
-
 def current_user(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),

@@ -26,12 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from src.ingestion.blocks import Block
-from src.ingestion.chunker import (
-    EQUATION_CTX,
-    MERGE_MIN,
-    SPLIT_MAX,
-    chunk_blocks,
-)
+from src.ingestion.chunker import EQUATION_CTX, SPLIT_MAX, chunk_blocks
 from src.ingestion.mineru_parser import blocks_from_content_list, mineru_available
 from src.ingestion.page_classifier import (
     FORMULA_DENSITY_THRESHOLD,

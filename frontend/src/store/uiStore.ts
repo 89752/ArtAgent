@@ -12,6 +12,7 @@ export interface ConfirmState {
   text: string;
   okText: string;
   danger: boolean;
+  returnModal: ModalName | null;
   resolve: (v: boolean) => void;
 }
 
@@ -186,13 +187,17 @@ export const useUiStore = create<UiState>()((set, get) => ({
 
   confirmAsk: ({ title, text, okText = "确认", danger = false }) =>
     new Promise<boolean>((resolve) => {
+      const returnModal = get().modal;
       get().rememberFocus();
-      set({ confirm: { title, text, okText, danger, resolve }, modal: "confirm" });
+      set({
+        confirm: { title, text, okText, danger, returnModal, resolve },
+        modal: "confirm",
+      });
     }),
 
   resolveConfirm: (v) => {
     const c = get().confirm;
-    set({ confirm: null, modal: null });
+    set({ confirm: null, modal: c?.returnModal || null });
     c?.resolve(v);
     get().restoreFocus();
   },

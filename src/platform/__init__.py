@@ -1,8 +1,6 @@
-"""ArtAgent 平台层（规划中）。
+"""ArtAgent 平台层：用户/密钥/设置（账号体系与 API Key 鉴权）。
 
-平台层与领域内核分离：用户/密钥/设置、Agent Manifest 注册表、
-OpenAI 兼容 API、MCP 消费侧适配器。领域内核（src/agent、src/retrieval）
-不依赖本包；本包只做编排与接入。
+领域内核（src/agent、src/retrieval）不依赖本包；本包只做用户侧编排接入。
 """
 
 PLATFORM_VERSION = "0.1.0"

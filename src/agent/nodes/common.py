@@ -7,41 +7,48 @@ from langchain_core.messages import AIMessage
 
 from src.agent.prompts import REFLECTION_PROMPT
 from src.agent.state import AgentState
-from src.utils.json_utils import parse_json  # noqa: F401 —— 保持导出供既有调用方使用
 from src.utils.llm import get_deterministic_llm
 from src.utils.logging_config import get_logger, log_event
 
 logger = get_logger("nodes")
 
 
-def collect_artworks(docs_by_group: dict[str, list[dict]], limit: int = 8) -> list[dict]:
-    """把分组检索结果扁平化、去重，供 UI 卡片展示。
+# ── 意图识别（轻量规则版，替代已删除的 classify 节点） ──────────
+_COMPARISON_KWS = (
+    "对比", "比较", "区别", "差异", "异同", "差别", "谁更", "哪个更", "compare",
+    "有什么不同", "有何不同", "有哪些不同", "不同之处",
+)
+_TIMELINE_KWS = (
+    "演变", "时间线", "脉络", "历程", "分期", "发展轨迹",
+    "变化", "转变", "发展", "兴起", "之后", "晚年", "被承认",
+    "develop", "evolution",
+)
+_RECOMMENDATION_KWS = (
+    "推荐", "喜欢", "偏爱", "类似", "适合", "还有哪些",
+    "帮我找", "帮我挑", "想找",
+)
 
-    只收画作（SemArt 结果无 source 键）；用户 PDF 片段带 source 键，
-    不进配图卡片（没有 SemArt 本地图可配），但仍保留在 retrieved_docs
-    里作为 LLM 证据。
+
+def classify_intent(question: str) -> str:
+    """规则化意图识别：comparison / timeline / recommendation / general。
+
+    只服务两处消费方：ask_user 的信息缺口追问、web 层回答配图开关。
+    ReAct 主循环仍由 LLM 自行决定调用哪些工具，不受本结果约束。
     """
-    seen = set()
-    flat = []
-    for group in docs_by_group.values():
-        for d in group:
-            if d.get("source"):  # 用户文档片段 → 跳过配图卡片
-                continue
-            title = d.get("title", "")
-            if not title or title in seen:
-                continue
-            seen.add(title)
-            flat.append(
-                {
-                    "title": title,
-                    "author": d.get("author", ""),
-                    "date": d.get("date", ""),
-                    "image_file": d.get("image_file", ""),
-                }
-            )
-            if len(flat) >= limit:
-                return flat
-    return flat
+    q = (question or "").strip().lower()
+    for kw in _COMPARISON_KWS:
+        if kw in q:
+            return "comparison"
+    for kw in _TIMELINE_KWS:
+        if kw in q:
+            return "timeline"
+    # 书目/资料推荐不是艺术推荐：不触发偏好澄清，也不当作 recommendation
+    if "推荐" in q and any(x in q for x in ("一本", "本书", "几本书")):
+        return "general"
+    for kw in _RECOMMENDATION_KWS:
+        if kw in q:
+            return "recommendation"
+    return "general"
 
 
 # ── 信息缺口澄清 ───────────────────────────────────────────────
@@ -52,6 +59,12 @@ _STYLE_SIGNALS = (
     "浓烈", "奔放", "宁静", "优雅", "华丽", "简约", "古典", "现代",
     "抽象", "写实", "印象", "巴洛克", "洛可可", "浪漫", "深沉", "明亮",
     "柔和", "风景", "静物", "肖像", "宗教", "神话",
+)
+
+# ── 不安全请求信号：这类请求不能先走澄清，必须交给主流程处理/拒绝 ──
+_UNSAFE_SIGNALS = (
+    "冒充", "伪造", "欺骗", "虚假信息", "泄露系统提示",
+    "忽略之前的系统提示", "越狱",
 )
 
 
@@ -67,25 +80,32 @@ def _info_gap(question: str, intent: str) -> tuple[bool, str]:
 
 def ask_user(state: AgentState) -> dict:
     """信息缺口澄清节点：不足则追问并短路，否则放行继续主流程。"""
-    if state.rewrite_ambiguous:
-        gap, message = True, (
-            "你的意思我不太确定，能说得更具体一点吗？"
-            "例如想了解哪位画家、哪幅画或哪种风格。"
-        )
-    else:
-        # 用改写前的原始问题判断信息缺口：改写可能压缩掉疑问词（如"莫奈晚年"），
-        # 长度启发式不应作用在内部压缩句上（mt-002 回归）
-        raw_question = state.original_user_query or state.user_query or ""
-        gap, message = _info_gap(raw_question, state.intent)
+    # 用改写前的原始问题判断信息缺口：改写可能压缩掉疑问词（如"莫奈晚年"），
+    # 长度启发式不应作用在内部压缩句上（mt-002 回归）
+    raw_question = state.original_user_query or state.user_query or ""
+    # 安全优先：冒充/伪造/提示词泄露等请求直接放行给主流程（应由 LLM 拒绝），
+    # 不能因为含"推荐"等词被澄清节点短路（c-059 回归）
+    if any(s in raw_question for s in _UNSAFE_SIGNALS):
+        intent = classify_intent(raw_question)
+        return {
+            "ask_user": "continue",
+            "intent": intent,
+            "pending_clarification": "",
+            "current_step": "ask_user",
+        }
+    intent = classify_intent(raw_question)
+    gap, message = _info_gap(raw_question, intent)
     if not gap:
         return {
             "ask_user": "continue",
+            "intent": intent,
             "pending_clarification": "",
             "current_step": "ask_user",
         }
     log_event(logger, "ask_user", query=state.user_query, question=message)
     return {
         "ask_user": "ask",
+        "intent": intent,
         "pending_clarification": message,
         "final_answer": message,
         "messages": [AIMessage(content=message)],

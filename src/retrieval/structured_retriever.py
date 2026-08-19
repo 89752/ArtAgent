@@ -86,15 +86,6 @@ def _metadata_hit_filters(meta: dict, filters: dict) -> bool:
     return hit_filters_match(meta, filters, _FILTER_KEY_ALIASES)
 
 
-def _entity_tokens(names: list[str]) -> list[str]:
-    """实体排除名单的分词：长度 > 2 的词转小写（与早期 recommendation
-    节点内联的排除逻辑完全一致，"Van Gogh" → ["van", "gogh"]）。"""
-    tokens: list[str] = []
-    for name in names:
-        tokens.extend(t.lower() for t in str(name).split() if len(t) > 2)
-    return tokens
-
-
 # ------------------------------------------------------------------ #
 # StructuredTableRetriever                                            #
 # ------------------------------------------------------------------ #
@@ -103,7 +94,6 @@ def _entity_tokens(names: list[str]) -> list[str]:
 class StructuredTableRetriever:
     """一张结构化表的统一访问入口：结构化操作 + 可选向量语义检索。
 
-    - group_by_axis / exclude_by_entity：给确定性管线（timeline/recommendation）用
     - search：BaseRetriever 协议实现，接入 HybridRetriever。
       挂了向量集合（SemArt）时走 BGE 向量检索；否则退化走 access.fuzzy_match
       （无索引表格的兜底路径）。
@@ -148,63 +138,6 @@ class StructuredTableRetriever:
         if self._embed_fn is None and self._embed_fn_loader is not None:
             self._embed_fn = self._embed_fn_loader()
         return self._embed_fn
-
-    # ── 结构化操作：timeline ──────────────────────────────────────
-    def group_by_axis(self, entity: str) -> dict[str, pd.DataFrame]:
-        """按分组轴列对某个实体的记录分组（给 timeline 用）。
-
-        返回 {分组值: 子 DataFrame}，分组值按字符串升序（SemArt 的
-        "1851-1900" 形式天然可按时间排序）。分组轴为空的记录归入 "Unknown"：
-        存在真实分组时 Unknown 组被丢弃；完全没有真实分组时返回
-        {"Unknown": 全部}。行为与早期 timeline 节点内联逻辑一致。
-        """
-        if not self.schema.group_axis_col:
-            return {}
-        works = fuzzy_match(self.df, self.schema.entity_col, entity)
-        if works.empty:
-            return {}
-
-        works = works.copy()
-        axis = self.schema.group_axis_col
-        works["_AXIS"] = works[axis].fillna("").map(lambda v: v if v else "Unknown")
-        keys = sorted(k for k in works["_AXIS"].unique() if k and k != "Unknown")
-        if not keys:
-            keys = ["Unknown"]
-        return {k: works[works["_AXIS"] == k] for k in keys}
-
-    # ── 结构化操作：recommendation ────────────────────────────────
-    def entity_matches(self, value: str, names: list[str]) -> bool:
-        """判断某实体字段值是否命中排除名单（分词包含，忽略大小写）。"""
-        value_lower = (value or "").lower()
-        return any(tok in value_lower for tok in _entity_tokens(names))
-
-    def exclude_by_entity(self, names: list[str]) -> pd.DataFrame:
-        """返回排除命中实体后的 DataFrame（实体列分词包含匹配）。"""
-        tokens = _entity_tokens(names)
-        if not tokens or not self.schema.entity_col:
-            return self.df
-        col = self.schema.entity_col
-        mask = self.df[col].astype(str).str.lower().map(
-            lambda v: not any(tok in v for tok in tokens)
-        )
-        return self.df[mask]
-
-    def exclude_from_results(
-        self, results: list[dict], names: list[str]
-    ) -> list[dict]:
-        """从检索结果字典列表中排除命中实体的条目（recommendation 实际使用）。
-
-        结果字典来自 row_to_artwork_dict 归一化形状（小写 key），实体字段
-        按 schema.entity_col 小写定位（SemArt：AUTHOR → author）。
-        """
-        if not names:
-            return list(results)
-        key = self.schema.entity_col.lower()
-        # 兼容：core 结果经 _format_result 输出为 author 键（而非 artist）
-        return [
-            r for r in results
-            if not self.entity_matches(r.get(key) or r.get("author") or "", names)
-        ]
 
     # ── BaseRetriever 协议：HybridRetriever 融合入口 ───────────────
     def search(
