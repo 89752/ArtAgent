@@ -157,7 +157,13 @@ def test_get_vision_llm_falls_back_model_to_chat(monkeypatch):
 
 def test_deterministic_llm_is_zero_temperature(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "sk-test")
-    assert llm_mod.get_deterministic_llm().temperature == 0.0
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example.test/v1")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    llm_mod.get_llm.cache_clear()
+    try:
+        assert llm_mod.get_deterministic_llm().temperature == 0.0
+    finally:
+        llm_mod.get_llm.cache_clear()
 
 
 def test_judge_llm_falls_back_to_chat_model(monkeypatch):

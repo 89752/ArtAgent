@@ -529,13 +529,13 @@ def test_delete_table_unregisters_and_resets_active():
                 "supports_recommendation": False,
             },
         )
-        tp.register_structured_dataset(
+        retriever = tp.register_structured_dataset(
             dataset_id,
             tp.TableSchema(entity_col="书名", description_col=""),
             source="user_table",
             df=pd.DataFrame(columns=["书名"]),
         )
-        hybrid.register(dataset_id, hybrid.retrievers["core"])
+        hybrid.register(dataset_id, retriever)
         hybrid.active_dataset = dataset_id
         result = svc.delete_document(doc_id)
         assert result["doc_id"] == doc_id

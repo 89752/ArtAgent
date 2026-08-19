@@ -12,18 +12,8 @@ SemArt/
 # design docs: keep local only (user 2026-08-04)
 /docs/
 
-# 数据构建管线参与单元测试，需纳入版本管理；其余本地运维脚本继续忽略
-/scripts/*
-!/scripts/01_harvest_wikidata.py
-!/scripts/02_build_extended_dataset.py
-!/scripts/03_normalize_core.py
-!/scripts/04_assemble_descriptions.py
-!/scripts/05_audit_core.py
-!/scripts/06_index_core.py
-!/scripts/core_utils.py
-!/scripts/doctor.py
-!/scripts/export_feedback.py
-!/scripts/manage_users.py
+# 本地数据构建与运维脚本不入库；相关测试仅在本地运行
+/scripts/
 
 # test fixture data files: keep local only (user 2026-08-04)
 /tests/fixtures/
