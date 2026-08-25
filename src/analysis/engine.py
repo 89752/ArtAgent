@@ -25,7 +25,13 @@ from src.utils.logging_config import get_logger, log_event
 
 logger = get_logger("analysis.engine")
 
-USER_IMAGE_ROOT = Path(os.getenv("USER_IMAGES_DIR", "./data/uploads/user_images"))
+# Keep user images alongside the configured upload root by default.  This is
+# essential in non-root containers where /app is read-only but UPLOADS_DIR is a
+# mounted writable volume; deployments can still override USER_IMAGES_DIR.
+USER_IMAGE_ROOT = Path(
+    os.getenv("USER_IMAGES_DIR")
+    or (Path(os.getenv("UPLOADS_DIR", "./data/uploads")) / "user_images")
+)
 MAX_ANALYSIS_SIDE = 1600
 ALLOWED_FOCUS = {"all", "perspective", "composition", "color", "brushwork", "style"}
 ALLOWED_OVERRIDE = {"realistic", "abstract", "childlike", "decorative"}

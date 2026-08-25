@@ -54,7 +54,7 @@ from src.data import documents_store
 from src.memory import feedback as feedback_store
 from src.tasks import store as tasks_store
 from src.observability import runs as runs_store
-from src.platform.auth import current_user, optional_user, require_admin
+from src.platform.auth import current_user, require_authenticated_user, require_admin
 from src.platform import users as users_store
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -103,6 +103,11 @@ class FeedbackIn(BaseModel):
     comment: str = Field(default="", max_length=500)
 
 
+class AgentJobIn(BaseModel):
+    objective: str = Field(min_length=1, max_length=4000)
+    plan: list[str] = Field(default_factory=list, max_length=20)
+
+
 class LoginIn(BaseModel):
     username: str = Field(default="", max_length=40)
     password: str = Field(default="", max_length=128)
@@ -140,7 +145,12 @@ async def _lifespan(_app: FastAPI):
     """启动时初始化各存储并恢复：documents/任务表（processing→interrupted）/表格数据源。"""
     users_store.init_db()
     documents_store.init_db()
-    tasks_store.mark_interrupted_on_startup()  # 进程崩溃恢复：中断任务可重试
+    tasks_store.mark_interrupted_on_startup()
+    # AgentJob 的步骤和产物已落库；恢复时从 step_index 自动续跑，非 Agent
+    # 的文件解析任务保持 interrupted，避免不透明地重复重型导入。
+    for job in tasks_store.recover_interrupted_agent_jobs():
+        if job.get("task_id") and job.get("user_id"):
+            asyncio.create_task(asyncio.to_thread(service.run_agent_job, job["task_id"], job["user_id"]))
     service.restore_tables()
     from src.analysis import store as analysis_store
 
@@ -167,6 +177,26 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="西方艺术智能助手", docs_url=None, redoc_url=None, lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/health")
+def health():
+    """Liveness probe: the HTTP process is serving requests."""
+    return {"ok": True, "status": "live"}
+
+
+@app.get("/ready")
+def ready():
+    """Readiness probe: verify local persistence layers can be opened."""
+    try:
+        users_store.get_user_by_username("__readiness_probe__")
+        runs_store.metrics(limit=1)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {"ok": False, "status": "not_ready", "error": type(exc).__name__},
+            status_code=503,
+        )
+    return {"ok": True, "status": "ready"}
 
 
 # ── 请求治理中间件：request_id 贯穿 + 令牌桶限流 ──
@@ -387,7 +417,7 @@ def artwork_image(file_name: str):
 
 
 @app.get("/api/bootstrap")
-def bootstrap(user_id: str = Depends(optional_user)):
+def bootstrap(user_id: str = Depends(require_authenticated_user)):
     """首屏数据：场景卡 + 记忆条数 + 上传大小上限（前端预检用，唯一权威值）。"""
     cards = [
         {"query": c["query"], "text": c["text"],
@@ -405,7 +435,7 @@ def bootstrap(user_id: str = Depends(optional_user)):
 def get_sessions(
     offset: int = 0,
     limit: int = 50,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """会话列表：分页返回 {items, total, has_more}。"""
     offset = max(0, offset)
@@ -423,7 +453,7 @@ def get_sessions(
 async def rename_session(
     sid: str,
     payload: RenameIn,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """重命名会话。"""
     ok = service.rename_conversation(sid, payload.title, user_id)
@@ -433,12 +463,12 @@ async def rename_session(
 
 
 @app.get("/api/sessions/{sid}")
-def get_session(sid: str, user_id: str = Depends(optional_user)):
+def get_session(sid: str, user_id: str = Depends(require_authenticated_user)):
     return JSONResponse({"messages": service.conversation(sid, user_id)})
 
 
 @app.delete("/api/sessions/{sid}")
-def del_session(sid: str, user_id: str = Depends(optional_user)):
+def del_session(sid: str, user_id: str = Depends(require_authenticated_user)):
     service.remove_conversation(sid, user_id)
     return JSONResponse({"ok": True})
 
@@ -447,7 +477,7 @@ def del_session(sid: str, user_id: str = Depends(optional_user)):
 async def attach_session_document(
     sid: str,
     payload: AttachmentIn,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """把已上传文档记录进会话历史（前端刷新/切换会话后仍可见）。"""
     doc = service.document_status(payload.doc_id, user_id)
@@ -460,13 +490,13 @@ async def attach_session_document(
 
 
 @app.get("/api/memory")
-def get_memory_items(user_id: str = Depends(optional_user)):
+def get_memory_items(user_id: str = Depends(require_authenticated_user)):
     """记忆面板 v2：全部记忆条目（含自动抽取/来源/时间，按 id 删除）。"""
     return JSONResponse({"items": service.memory_items_list(user_id)})
 
 
 @app.delete("/api/memory")
-def clear_memory_items(user_id: str = Depends(optional_user)):
+def clear_memory_items(user_id: str = Depends(require_authenticated_user)):
     """记忆面板 v2：清空全部记忆条目（含旧偏好表兼容）。"""
     service.clear_all_memories(user_id)
     return JSONResponse({"ok": True, "memory": service.memory_count(user_id)})
@@ -475,7 +505,7 @@ def clear_memory_items(user_id: str = Depends(optional_user)):
 @app.post("/api/memory/import")
 def import_memory_items(
     payload: MemoryImportIn,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """批量导入记忆：支持 items(JSON) 或 text（每行一条）。"""
     from src.memory.memory_items import import_memories
@@ -498,7 +528,7 @@ def import_memory_items(
 @app.post("/api/memory/import-file")
 async def import_memory_file(
     file: UploadFile,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """记忆导入（文件版）：上传 .txt/.md/.json/.csv，解析后批量写入。"""
     from src.memory.memory_items import import_memories, parse_import_file
@@ -520,7 +550,7 @@ async def import_memory_file(
 
 
 @app.delete("/api/memory/{item_id}")
-def del_memory_item(item_id: str, user_id: str = Depends(optional_user)):
+def del_memory_item(item_id: str, user_id: str = Depends(require_authenticated_user)):
     """记忆面板 v2：按条目 id 单项删除。"""
     ok = service.delete_memory_item(item_id, user_id)
     if not ok:
@@ -532,7 +562,7 @@ def del_memory_item(item_id: str, user_id: str = Depends(optional_user)):
 def get_feedback(
     limit: int = 100,
     offset: int = 0,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """反馈列表（导出/人工审核用）。"""
     items, total = feedback_store.list_feedback(
@@ -542,7 +572,7 @@ def get_feedback(
 
 
 @app.post("/api/feedback")
-def add_feedback(payload: FeedbackIn, user_id: str = Depends(optional_user)):
+def add_feedback(payload: FeedbackIn, user_id: str = Depends(require_authenticated_user)):
     """用户反馈闭环：{session_id, rating(1/-1), reason?, comment?}。"""
     fid = feedback_store.add_feedback(
         payload.session_id, payload.rating, payload.reason, payload.comment, user_id
@@ -551,13 +581,28 @@ def add_feedback(payload: FeedbackIn, user_id: str = Depends(optional_user)):
 
 
 @app.get("/api/metrics")
-def get_metrics(limit: int = 500):
+def get_metrics(limit: int = 500, user_id: str = Depends(require_authenticated_user)):
     """可观测汇总：延迟/成本/工具分布/反思与兜底率。"""
-    return JSONResponse(runs_store.metrics(limit=limit))
+    return JSONResponse(runs_store.metrics(limit=limit, user_id=user_id))
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: int, user_id: str = Depends(require_authenticated_user)):
+    """Return a redacted, owner-scoped execution trace."""
+    trace = runs_store.get_run_detail(run_id, user_id)
+    if trace is None:
+        return JSONResponse({"ok": False, "error": "运行记录不存在"}, status_code=404)
+    return JSONResponse({"ok": True, "run": trace})
+
+
+@app.get("/api/runs")
+def get_runs(limit: int = 50, user_id: str = Depends(require_authenticated_user)):
+    """Owner-scoped run list for the operations UI."""
+    return JSONResponse({"items": runs_store.list_runs(limit=limit, user_id=user_id)})
 
 
 @app.get("/api/metrics/memory")
-def get_memory_metrics(limit: int = 50):
+def get_memory_metrics(limit: int = 50, user_id: str = Depends(require_authenticated_user)):
     """记忆抽取质量：提取数/放行数/各门控拒绝数/拒绝率。"""
     from src.memory.metrics import recent_extraction_metrics
 
@@ -568,7 +613,7 @@ def get_memory_metrics(limit: int = 50):
 async def chat(
     payload: ChatIn,
     request: Request,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """SSE 流式对话。请求体：{message, session_id, regenerate}。
 
@@ -634,7 +679,7 @@ async def upload_document(
     file: UploadFile,
     background: BackgroundTasks,
     oversize: str = Form(""),
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """上传 PDF/表格：保存 → BackgroundTasks 后台处理 → 前端轮询进度。
 
@@ -765,17 +810,88 @@ async def upload_document(
 
 
 @app.get("/api/tasks")
-def get_tasks(status: str = ""):
+def get_tasks(status: str = "", user_id: str = Depends(require_authenticated_user)):
     """任务列表：可按状态过滤 pending/processing/done/failed/interrupted。"""
     return JSONResponse({
-        "items": tasks_store.list_tasks(status=status.strip() or None)
+        "items": [
+            task for task in tasks_store.list_tasks(status=status.strip() or None)
+            if (task.get("payload") or {}).get("user_id") == user_id
+        ]
     })
 
 
+@app.post("/api/jobs")
+async def create_agent_job(
+    payload: AgentJobIn,
+    background: BackgroundTasks,
+    user_id: str = Depends(require_authenticated_user),
+):
+    """Queue a durable long-horizon job; each completed step is checkpointed."""
+    plan = payload.plan or ["执行任务并生成可恢复结果"]
+    task_id = tasks_store.create_agent_job(payload.objective, user_id, plan)
+    background.add_task(service.run_agent_job, task_id, user_id)
+    return JSONResponse({"ok": True, "job_id": task_id})
+
+
+@app.get("/api/jobs/{task_id}")
+def get_agent_job(task_id: str, user_id: str = Depends(require_authenticated_user)):
+    job = tasks_store.get_task(task_id)
+    if not job or job.get("type") != "agent_job" or (job.get("payload") or {}).get("user_id") != user_id:
+        return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    return JSONResponse({"ok": True, "job": job})
+
+
+@app.post("/api/jobs/{task_id}/cancel")
+def cancel_agent_job(task_id: str, user_id: str = Depends(require_authenticated_user)):
+    job = tasks_store.get_task(task_id)
+    if not job or (job.get("payload") or {}).get("user_id") != user_id:
+        return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    return JSONResponse({"ok": tasks_store.cancel_agent_job(task_id)})
+
+
+@app.post("/api/jobs/{task_id}/pause")
+def pause_agent_job(task_id: str, user_id: str = Depends(require_authenticated_user)):
+    job = tasks_store.get_task(task_id)
+    if not job or job.get("type") != "agent_job" or (job.get("payload") or {}).get("user_id") != user_id:
+        return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    return JSONResponse({"ok": tasks_store.pause_agent_job(task_id)})
+
+
+@app.post("/api/jobs/{task_id}/resume")
+async def resume_agent_job(
+    task_id: str,
+    background: BackgroundTasks,
+    user_id: str = Depends(require_authenticated_user),
+):
+    job = tasks_store.get_task(task_id)
+    if not job or job.get("type") != "agent_job" or (job.get("payload") or {}).get("user_id") != user_id:
+        return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    if not tasks_store.resume_agent_job(task_id):
+        return JSONResponse({"ok": False, "error": "只有 paused 任务可继续"}, status_code=400)
+    background.add_task(service.run_agent_job, task_id, user_id)
+    return JSONResponse({"ok": True, "job": tasks_store.get_task(task_id)})
+
+
+@app.post("/api/jobs/{task_id}/retry")
+async def retry_agent_job(
+    task_id: str,
+    background: BackgroundTasks,
+    user_id: str = Depends(require_authenticated_user),
+):
+    """Resume a failed/interrupted AgentJob at its durable current step."""
+    job = tasks_store.get_task(task_id)
+    if not job or job.get("type") != "agent_job" or (job.get("payload") or {}).get("user_id") != user_id:
+        return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    if not tasks_store.reset_task(task_id):
+        return JSONResponse({"ok": False, "error": "只有 failed/interrupted 任务可重试"}, status_code=400)
+    background.add_task(service.run_agent_job, task_id, user_id)
+    return JSONResponse({"ok": True, "job": tasks_store.get_task(task_id)})
+
+
 @app.get("/api/tasks/{task_id}")
-def get_task(task_id: str):
+def get_task(task_id: str, user_id: str = Depends(require_authenticated_user)):
     task = tasks_store.get_task(task_id)
-    if not task:
+    if not task or (task.get("payload") or {}).get("user_id") != user_id:
         return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
     return JSONResponse({"ok": True, "task": task})
 
@@ -784,11 +900,11 @@ def get_task(task_id: str):
 async def retry_task(
     task_id: str,
     background: BackgroundTasks,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """重试 failed/interrupted 的解析任务（进程崩溃/解析失败后的恢复入口）。"""
     task = tasks_store.get_task(task_id)
-    if not task:
+    if not task or (task.get("payload") or {}).get("user_id") != user_id:
         return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
     if not tasks_store.reset_task(task_id):
         return JSONResponse(
@@ -826,7 +942,7 @@ async def retry_task(
 async def confirm_schema(
     doc_id: str,
     payload: SchemaIn,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """确认/纠正表格 schema：用户确认后注册数据源生效。
 
@@ -845,17 +961,17 @@ async def confirm_schema(
 
 
 @app.get("/api/documents")
-def get_documents(user_id: str = Depends(optional_user)):
+def get_documents(user_id: str = Depends(require_authenticated_user)):
     return JSONResponse(service.documents(user_id))
 
 
 @app.get("/api/documents/{doc_id}")
-def get_document(doc_id: str, user_id: str = Depends(optional_user)):
+def get_document(doc_id: str, user_id: str = Depends(require_authenticated_user)):
     return JSONResponse(service.document_status(doc_id, user_id))
 
 
 @app.delete("/api/documents/{doc_id}")
-def delete_document(doc_id: str, user_id: str = Depends(optional_user)):
+def delete_document(doc_id: str, user_id: str = Depends(require_authenticated_user)):
     """删除文档并级联清理向量/文件/状态。"""
     try:
         result = service.delete_document(doc_id, user_id)
@@ -872,7 +988,7 @@ def delete_document(doc_id: str, user_id: str = Depends(optional_user)):
 async def upload_user_image(
     file: UploadFile,
     session_id: str = Form(""),
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """上传用户图片（jpg/png/webp）：解码校验、EXIF 归一化、重编码去隐私元数据。"""
     from src.analysis.engine import USER_IMAGE_ROOT
@@ -958,7 +1074,7 @@ async def upload_user_image(
 
 
 @app.get("/api/user-images/{image_id}")
-def get_user_image(image_id: str, user_id: str = Depends(optional_user)):
+def get_user_image(image_id: str, user_id: str = Depends(require_authenticated_user)):
     from src.analysis.store import get_image
 
     rec = get_image(image_id, user_id)
@@ -969,7 +1085,7 @@ def get_user_image(image_id: str, user_id: str = Depends(optional_user)):
 
 
 @app.get("/api/user-images/{image_id}/file")
-def user_image_file(image_id: str, user_id: str = Depends(optional_user)):
+def user_image_file(image_id: str, user_id: str = Depends(require_authenticated_user)):
     from src.analysis.store import get_image
 
     rec = get_image(image_id, user_id)
@@ -983,7 +1099,7 @@ def user_image_file(image_id: str, user_id: str = Depends(optional_user)):
 
 
 @app.delete("/api/user-images/{image_id}")
-def delete_user_image(image_id: str, user_id: str = Depends(optional_user)):
+def delete_user_image(image_id: str, user_id: str = Depends(require_authenticated_user)):
     from src.analysis.engine import USER_IMAGE_ROOT
     from src.analysis.store import delete_image, get_image
 
@@ -999,7 +1115,7 @@ def delete_user_image(image_id: str, user_id: str = Depends(optional_user)):
 async def attach_user_image(
     image_id: str,
     payload: UserImageAttachIn,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """把已上传图片写入会话历史（kind=image），刷新/切会话后仍可见。"""
     from src.analysis.store import get_image
@@ -1080,7 +1196,7 @@ async def painting_analysis(
     focus: str = "all",
     framework_override: str = "",
     rerun: bool = False,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """SSE：stage 进度 + done/rejected/error；rerun=true 强制重新分析。"""
     from src.analysis.store import get_image
@@ -1094,7 +1210,7 @@ async def painting_analysis(
 async def persist_analysis_message(
     image_id: str,
     payload: AnalysisMessageIn,
-    user_id: str = Depends(optional_user),
+    user_id: str = Depends(require_authenticated_user),
 ):
     """把分析结果作为 assistant 回合写入会话历史（前端完成后调用一次）。"""
     from src.analysis.store import get_image

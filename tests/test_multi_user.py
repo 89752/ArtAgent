@@ -11,6 +11,8 @@ import pytest
 
 import src.memory.conversations as conv
 import src.memory.memory_items as mi
+from src.utils.governance import run_with_timeout
+from src.platform import auth
 from src.analysis import store as an
 from src.data import db
 from src.data import documents_store as docs
@@ -55,6 +57,29 @@ def test_conversations_isolated_by_user():
     assert conv.load_conversation("s1", "u_a") != []
 
 
+def test_same_session_id_isolated_between_users():
+    """The database key must not allow one user's SID to overwrite another's."""
+    conv.save_conversation("shared", "A", [{"role": "user", "content": "A"}], "u_a")
+    conv.save_conversation("shared", "B", [{"role": "user", "content": "B"}], "u_b")
+    assert conv.load_conversation("shared", "u_a")[0]["content"] == "A"
+    assert conv.load_conversation("shared", "u_b")[0]["content"] == "B"
+    conv.delete_conversation("shared", "u_a")
+    assert conv.load_conversation("shared", "u_b")[0]["content"] == "B"
+
+
+def test_x_user_id_header_rejected_without_auth(monkeypatch):
+    """A forged header is never an identity in the default production mode."""
+    monkeypatch.delenv("ARTAGENT_ALLOW_HEADER_IDENTITY", raising=False)
+    with pytest.raises(Exception) as exc:
+        auth.optional_user(None, None, "victim", None)
+    assert getattr(exc.value, "status_code", None) == 401
+
+
+def test_dev_header_identity_requires_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("ARTAGENT_ALLOW_HEADER_IDENTITY", "1")
+    assert auth.optional_user(None, None, "local_demo", None) == "local_demo"
+
+
 def test_memory_items_isolated_by_user():
     from web import service
 
@@ -72,6 +97,22 @@ def test_active_user_contextvar():
     assert mi.get_memory_user_id() == "u_x"
     mi.set_active_user_id("u_y")
     assert mi.get_memory_user_id() == "u_y"
+
+
+def test_active_user_contextvar_reaches_governed_worker_thread():
+    mi.set_active_user_id("u_worker")
+    assert run_with_timeout(mi.get_memory_user_id, 1) == "u_worker"
+
+
+def test_governed_tool_can_receive_explicit_user_identity():
+    from src.tools.collections import list_collections as list_tool
+    from src.memory.collections import save_collection
+    from src.utils.governance import governed_invoke
+
+    save_collection("u_explicit", "印象派", ["睡莲"])
+    mi.set_active_user_id("another-user")
+    out = governed_invoke(list_tool, {}, user_id="u_explicit")
+    assert "印象派" in out
 
 
 def test_default_account_login_and_token():
@@ -130,6 +171,16 @@ def test_image_isolated_by_user():
 def test_table_dataset_id_user_scoped():
     assert tp.table_dataset_id("abc", "u_x") == "table_u_x_abc"
     assert tp.table_dataset_id("abc") == "table_abc"
+
+
+def test_user_scoped_table_status_updates_do_not_fall_back_to_default_user():
+    docs.add_document("table-1", "table", user_id="u_table")
+    docs.upsert_document(
+        "table-1", kind="table", user_id="u_table", status="pending_confirm",
+        metadata={"columns": ["title"]},
+    )
+    assert docs.get_document("table-1", "u_table")["status"] == "pending_confirm"
+    assert docs.get_document("table-1", "web_user") is None
 
 
 def test_default_account_is_admin_and_reset_password():

@@ -3,13 +3,17 @@
   START
     └─► load_memory              读取用户长期偏好
           └─► ask_user           信息缺口澄清（不足→追问短路；否则放行）
-                └─► general_agent ⇄ tools（ReAct；技能也是工具）
+                └─► general_agent ⇄ tools（ReAct；技能和推荐检索均是工具）
                       └─► reflection（质量自查；RETRY 最多重试一轮）
                             └─► save_memory → END
 
 管线已删除：rewrite_split / classify / rag_gate / direct_answer /
 multi_retrieve / tool_upgrade。领域流程（对比/时间线/推荐）改为技能。
 """
+
+import os
+import sqlite3
+from pathlib import Path
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -19,6 +23,28 @@ from src.agent.state import AgentState
 from src.utils.logging_config import get_logger, traced
 
 logger = get_logger("graph")
+
+
+def _build_checkpointer():
+    """Use a durable SQLite saver when installed; retain an explicit fallback.
+
+    ``langgraph-checkpoint-sqlite`` is an optional LangGraph distribution, so
+    an older developer environment can still start while clearly signalling
+    that restart recovery is unavailable until dependencies are updated.
+    """
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        default = Path(__file__).resolve().parents[2] / "data" / "memory" / "checkpoints.db"
+        path = Path(os.getenv("ARTAGENT_CHECKPOINT_DB_PATH", str(default)))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return SqliteSaver(sqlite3.connect(str(path), check_same_thread=False))
+    except ImportError:
+        logger.warning(
+            "langgraph-checkpoint-sqlite 未安装，暂回退 MemorySaver；"
+            "生产部署必须安装该依赖以启用重启恢复"
+        )
+        return MemorySaver()
 
 
 def _route_after_reflection(state: AgentState) -> str:
@@ -43,7 +69,8 @@ def build_graph():
 
     builder.add_edge(START, "load_memory")
     builder.add_edge("load_memory", "ask_user")
-    # 信息不足 → 追问并短路；否则进入 ReAct 主循环
+    # 信息不足 → 追问并短路；其余全部交给 ReAct。意图只用于澄清和 UI
+    # 展示，不能把包含“推荐”的复合请求强制截断为单一固定工作流。
     builder.add_conditional_edges(
         "ask_user",
         lambda s: s.ask_user,
@@ -64,7 +91,7 @@ def build_graph():
     )
     builder.add_edge("save_memory", END)
 
-    checkpointer = MemorySaver()
+    checkpointer = _build_checkpointer()
     return builder.compile(checkpointer=checkpointer)
 
 

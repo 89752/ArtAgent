@@ -5,9 +5,8 @@ ArtAgent 所有节点的 Prompt 定义（混合架构版）。
   1. SYSTEM_PROMPT           —— general 分支的 ReAct system prompt
   2. 对比场景 (comparison)
   3. 时间线场景 (timeline)
-  4. 推荐场景 (recommendation)
-  5. 反思 (reflection) + web 兜底
-  6. 共享工具：画家中英名翻译提示
+  4. 反思 (reflection) + web 兜底
+  5. 共享工具：画家中英名翻译提示
 """
 
 # 中文→英文画家/画作译名，多处复用
@@ -41,6 +40,7 @@ You have access to the following tools:
 13. **read_user_image**: Read the actual content of a user-uploaded image (paid vision model). Call when the user asks about THEIR uploaded image (content / style / technique / composition / color). image_id comes from the 【session】 block's "用户图片" list; pass the 会话ID shown in the same block.
 14. **analyze_user_artwork**: Run the structured painting-analysis engine on a user-uploaded image: full 3-layer report (focus=all) or a focused dimension (focus=perspective/composition/color/brushwork/style), with optional framework_override for the user's correction. Use when the user asks for technique/aesthetic analysis of their own uploaded artwork.
 15. **delegate_task**: 把多个**相互独立**的调研子任务并行派发给子智能体（如分别深挖多位画家、多个流派、多个馆藏）。一次传入 tasks 列表；子智能体只读检索工具，结果会一次性返回。适合"对比/分别研究/多角度调研"的重任务；简单对比优先用技能 skill_art_comparison。
+16. **agentic_retrieve**: 对多概念或首轮资料稀疏的问题，进行一次覆盖度检查；只有证据不足时才改写一次查询并合并证据。它不会无限循环。
 
 ## Tool Selection Rules
 - Answer directly WITHOUT any tool ONLY for: greetings / chit-chat, simple definitions
@@ -54,14 +54,17 @@ You have access to the following tools:
   * comparisons of artists / artworks / styles ("巴洛克和洛可可的装饰风格有什么不同")
     → use the art_comparison skill (`skill_art_comparison`) or gather evidence
     per subject with retrieval tools, then compare;
-  * timeline / recommendation requests → use `skill_art_timeline` /
-    `skill_art_recommendation`：风格演变或推荐请求（包括一次性风格请求，
-    如"推荐几幅浓烈奔放的画"）都优先用对应技能，而不是直接列作品；
+  * timeline requests → use `skill_art_timeline`;
+  * preference-based requests (including asking for suggestions) → use the
+    memory context first, then retrieve ordinary evidence with
+    `semantic_search` or `agentic_retrieve` as the question requires. Combine
+    it with any other needed tools in the same ReAct loop.
   * collection / memory requests → must call the matching tool.
 - 信息不足或意图不明时：先向用户澄清，不要硬答。
 - 回答前自查：确认回答有检索证据或工具结果支撑，避免编造。
 - Works by a specific artist → `exact_lookup` with the English name.
 - Thematic/open-ended question → `semantic_search`.
+- 多概念、需要同时覆盖多个主题的检索问题 → 优先 `agentic_retrieve`；它返回的 evidence 是可引用证据，coverage 仅用于决定是否还需其他来源。
 - Question about a user-uploaded document (手稿/画册/传记细节，如"莫奈在葛列尔画室的同学""布丹怎么发现莫奈") → **must use `semantic_search`**: only this tool can see user-document content; `query_painter_knowledge` / `exact_lookup` contain dataset stats only and will NOT find document details. If a hit is source=user_pdf_image (整页图) and you need its content, call `read_page_image` with the provided image_path. Cite the document as 《doc名》第N页 in your answer.
 - Question about a user-uploaded image → use `read_user_image` (simple read) or `analyze_user_artwork` (structured analysis). image_id must come from the 【session】 block; never guess an id.
 - 多个独立对象需要并行深挖（对比多位画家/分别查多个流派/多馆藏）→ 调用 `delegate_task`，一次传入多个子任务。
@@ -98,7 +101,7 @@ You have access to the following tools:
 - Always ground answers in real data from the tools; don't fabricate.
 - If a painting/artist isn't in the database, say so, then optionally use web_search or general knowledge.
 - Identity check: artist names can be ambiguous (e.g., "Turner" may match multiple different painters). When the retrieved evidence contains works by a different artist of the same name, disclose the confusion and exclude the mismatched works instead of silently mixing them into your answer.
-- Recommendation granularity follows the user's wording: if the user asks for painters ("画家/谁"), recommend painters with style reasons; if they ask for paintings/works ("画/作品/几幅"), recommend 3-5 specific works (deduplicated across artists), each with a one-line reason; if both are mentioned, give painters plus their representative works.
+- Recommendation granularity follows the user's wording: if the user asks for painters ("画家/谁"), recommend painters with style reasons; if they ask for paintings/works ("画/作品/几幅"), recommend 3-5 specific works (deduplicated across artists), each with a one-line reason; if both are mentioned, give painters plus their representative works. For every recommended work, preserve the exact evidence title in English (a Chinese translation may precede it). Never mention a work that is absent from retrieved evidence.
 - When reading page images of an uploaded document (read_page_image), read only the pages needed to answer the question — at most ~5-6 pages per question. Stop reading once you have enough content; scanning every page of a long document is costly.
 - Cost rule: image_lookup(analyze=True) calls a paid vision model and is slow (20-30s per image). Use it only when the user explicitly asks to "look at" / visually analyze a specific painting (e.g. 分析构图/色彩/笔触). All other questions use analyze=False.
 - `read_user_image` / `analyze_user_artwork` are also paid vision calls (20-60s). Use them only for the user's own uploaded images; prefer the focused `focus` parameter for single-dimension questions.
@@ -109,24 +112,7 @@ You have access to the following tools:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 5. 推荐场景 (recommendation) —— 项目核心亮点
-# ══════════════════════════════════════════════════════════════════
-RECOMMENDATION_FEATURE_PROMPT = """你是艺术风格分析专家。用户表达了某种审美偏好。请完成两件事。
-
-用户的话：
-{user_query}
-{preference_context}
-
-1. liked_artists: 抽取用户明确提到自己喜欢的画家（译成英文；没有则空数组）。
-2. features: 推理这种偏好背后**具体的视觉/风格特征**，写成一段英文描述（30-60词），
-   用于向量检索匹配其他画家。不要在 features 里提画家名字。
-
-严格按 JSON 输出（不要 markdown 代码块，不要多余文字）：
-{{"liked_artists": ["Vincent van Gogh"], "features": "Bold vivid color contrasts, thick expressive impasto brushwork, high emotional intensity, dynamic swirling movement, expressive post-impressionist landscapes and portraits."}}"""
-
-
-# ══════════════════════════════════════════════════════════════════
-# 5b. 检索结果相关性过滤（comparison / general 复用）
+# 5. 检索结果相关性过滤（comparison / general 复用）
 # ══════════════════════════════════════════════════════════════════
 RELEVANCE_FILTER_PROMPT = """你在做检索结果的相关性过滤。
 

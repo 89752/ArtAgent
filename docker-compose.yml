@@ -1,0 +1,18 @@
+services:
+  artagent:
+    build: .
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      INDEX_DIR: /app/data/index
+      ARTAGENT_MEMORY_DIR: /app/data/memory
+      ARTAGENT_CHECKPOINT_DB_PATH: /app/data/memory/checkpoints.db
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

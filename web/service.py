@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import quote
@@ -124,12 +125,9 @@ def _chain_detail(node: str, out: dict) -> str:
         )
     if node == "general_tools":
         shown = out.get("shown_artworks") or []
-        rec = out.get("recommended_artists") or []
         parts = []
         if shown:
             parts.append(f"已展示 <span class='hl'>{len(shown)}</span> 幅")
-        if rec:
-            parts.append(f"已推荐 <span class='hl'>{len(rec)}</span> 位")
         return "；".join(parts) if parts else ""
     if node == "general_agent":
         msgs = out.get("messages") or []
@@ -223,43 +221,106 @@ def _assistant_bubble(steps, answer, artworks, with_thumbs, done) -> str:
 
 
 def _parse_artworks_from_messages(messages: list) -> list[dict]:
-    artworks = []
+    """Extract displayable artwork records from the ReAct tool evidence."""
+    artworks: list[dict] = []
+
+    def add_artwork(item: dict, fallback_author: str = "") -> None:
+        title = str(item.get("title") or "")
+        if not title or item.get("source"):
+            return
+        artworks.append({
+            "title": title,
+            "author": str(item.get("author") or item.get("artist") or fallback_author),
+            "date": str(item.get("date") or ""),
+            "image_file": str(item.get("image_file") or ""),
+        })
+
+    def walk(item, fallback_author: str = "") -> None:
+        if isinstance(item, list):
+            for value in item:
+                walk(value, fallback_author)
+            return
+        if not isinstance(item, dict):
+            return
+        author = str(item.get("matched_author") or item.get("author") or fallback_author)
+        for aw in item.get("sample_work_images") or []:
+            if isinstance(aw, dict) and aw.get("title"):
+                artworks.append({
+                    "title": str(aw.get("title") or ""),
+                    "author": author,
+                    "date": "",
+                    "image_file": str(aw.get("image_file") or ""),
+                })
+        add_artwork(item, fallback_author)
+        # Only traverse explicit evidence containers.  Traversing every field
+        # would mistake arbitrary nested diagnostics for user-facing cards.
+        for key in ("_artworks", "selected_artworks", "candidates", "by_artist"):
+            if key in item:
+                walk(item[key], author)
+
     for msg in messages:
         if isinstance(msg, ToolMessage):
             try:
                 data = json.loads(msg.content)
             except (json.JSONDecodeError, TypeError):
                 continue
-            for item in (data if isinstance(data, list) else [data]):
-                # 用户 PDF 片段带 source 键：不进配图卡片（无 SemArt 本地图）
-                if isinstance(item, dict):
-                    # 画家知识工具的代表作图片（query_painter_knowledge）
-                    for aw in item.get("sample_work_images") or []:
-                        if isinstance(aw, dict) and aw.get("title"):
-                            artworks.append(
-                                {
-                                    "title": aw.get("title", ""),
-                                    "author": item.get("matched_author", ""),
-                                    "date": "",
-                                    "image_file": aw.get("image_file", ""),
-                                }
-                            )
-                    if item.get("title") and not item.get("source"):
-                        artworks.append(
-                            {
-                                "title": item.get("title", ""),
-                                "author": item.get("author", ""),
-                                "date": item.get("date", ""),
-                                "image_file": item.get("image_file", ""),
-                            }
-                        )
+            walk(data)
     return artworks
+
+
+def _artwork_identity(item: dict) -> tuple[str, str]:
+    return (
+        " ".join(str(item.get("title") or "").split()).casefold(),
+        " ".join(str(item.get("author") or item.get("artist") or "").split()).casefold(),
+    )
+
+
+def _dedupe_artworks(items: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    positions: dict[tuple[str, str], int] = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        key = _artwork_identity(item)
+        if not key[0]:
+            continue
+        if key in positions:
+            # `selected_artworks` may only retain a title while `_artworks`
+            # contains the same evidence record with its image. Prefer the
+            # more complete record without changing display order.
+            old = out[positions[key]]
+            if not old.get("image_file") and item.get("image_file"):
+                out[positions[key]] = item
+            continue
+        positions[key] = len(out)
+        out.append(item)
+    return out
+
+
+def _normalized_for_match(value: object) -> str:
+    return "".join(ch for ch in str(value or "").casefold() if ch.isalnum())
+
+
+def _artworks_named_in_answer(artworks: list[dict], answer: str) -> list[dict]:
+    """Return only cards whose exact evidence title is present in the prose.
+
+    Omitting an uncertain card is preferable to showing a plausible but
+    different work, regardless of why the work was retrieved.
+    """
+    answer_key = _normalized_for_match(answer)
+    selected: list[dict] = []
+    for artwork in _dedupe_artworks(artworks):
+        title = _normalized_for_match(artwork.get("title"))
+        if len(title) >= 4 and title in answer_key:
+            selected.append(artwork)
+    return selected[:4]
 
 
 def _collect_sources(
     tool_messages: list,
     struct_artworks: list[dict],
     evidence: list[dict] | None = None,
+    allowed_artworks: set[tuple[str, str]] | None = None,
 ) -> list[dict]:
     """从工具消息、结构化输出与检索证据收集参考来源（去重、限量）。"""
     sources: list[dict] = []
@@ -292,12 +353,16 @@ def _collect_sources(
                 name = item.get("doc_name") or item.get("dataset_id") or "用户表格"
                 add("table", f"表格《{name}》")
             elif item.get("title") and not src:
+                if allowed_artworks is not None and _artwork_identity(item) not in allowed_artworks:
+                    continue
                 author = item.get("author") or ""
                 label = f"《{item['title']}》" + (f" · {author}" if author else "")
                 add("artwork", label)
 
     for aw in struct_artworks or []:
         if isinstance(aw, dict) and aw.get("title") and not aw.get("source"):
+            if allowed_artworks is not None and _artwork_identity(aw) not in allowed_artworks:
+                continue
             author = aw.get("author") or ""
             label = f"《{aw['title']}》" + (f" · {author}" if author else "")
             add("artwork", label)
@@ -314,6 +379,8 @@ def _collect_sources(
             name = item.get("doc_name") or item.get("dataset_id") or "用户表格"
             add("table", f"表格《{name}》")
         elif item.get("title") and not src:
+            if allowed_artworks is not None and _artwork_identity(item) not in allowed_artworks:
+                continue
             author = item.get("author") or ""
             label = f"《{item['title']}》" + (f" · {author}" if author else "")
             add("artwork", label)
@@ -346,6 +413,11 @@ def _clear_thread_checkpoint(thread_id: str) -> None:
             return
         except Exception:  # noqa: BLE001
             continue
+
+
+def checkpoint_thread_id(user_id: str, session_id: str) -> str:
+    """Stable checkpoint namespace matching the database isolation key."""
+    return f"{user_id}:{session_id}"
 
 
 def memory_count(user_id: str = WEB_USER_ID) -> int:
@@ -481,6 +553,12 @@ def stream_answer(
     context_chars = 0
     tool_rounds = 0
     tool_names: list[str] = []
+    node_events: list[dict] = []
+    model_calls: list[dict] = []
+    tool_calls: list[dict] = []
+    model_role = "main"
+    tool_args_by_id: dict[str, dict] = {}
+    previous_event_ts = start_ts
     reflection_triggered = False
     error_msg = ""
     cancelled = False
@@ -508,7 +586,7 @@ def stream_answer(
                 "retry_count": 0,
                 "final_answer": "",
             },
-            config={"configurable": {"thread_id": sid}},
+            config={"configurable": {"thread_id": checkpoint_thread_id(user_id, sid)}},
             stream_mode="updates",
         ):
             if stop_event is not None and stop_event.is_set():
@@ -518,6 +596,16 @@ def stream_answer(
                 if node == "__interrupt__":
                     continue
                 steps.append({"node": node, "detail": _chain_detail(node, out)})
+                event_ts = time.time()
+                node_events.append({
+                    "node_name": node,
+                    "started_at": datetime.fromtimestamp(previous_event_ts, timezone.utc).isoformat(),
+                    "ended_at": datetime.fromtimestamp(event_ts, timezone.utc).isoformat(),
+                    "latency_ms": (event_ts - previous_event_ts) * 1000,
+                    "status": "error" if node == "error" else "ok",
+                    "state_keys": sorted(out.keys()) if isinstance(out, dict) else [],
+                })
+                previous_event_ts = event_ts
                 if isinstance(out, dict):
                     if out.get("context_chars"):
                         context_chars = out["context_chars"]
@@ -527,6 +615,8 @@ def stream_answer(
                         reflection_triggered = True
                     if out.get("intent"):
                         intent = out["intent"]
+                    if out.get("model_role"):
+                        model_role = str(out["model_role"])
                     if out.get("final_answer"):
                         final_answer = out["final_answer"]
                     if out.get("messages"):
@@ -534,7 +624,32 @@ def stream_answer(
                         tool_artworks.extend(_parse_artworks_from_messages(msgs))
                         tool_msgs.extend(m for m in msgs if isinstance(m, ToolMessage))
                         for m in msgs:
+                            if getattr(m, "type", "") == "ai":
+                                model_calls.append(runs_store.usage_from_message(m, role=model_role))
+                            if isinstance(m, ToolMessage):
+                                content = str(getattr(m, "content", "") or "")
+                                status = "ok"
+                                error_type = ""
+                                try:
+                                    parsed = json.loads(content)
+                                    if isinstance(parsed, dict):
+                                        status = str(parsed.get("status") or status)
+                                        if status not in ("ok", "SUCCESS"):
+                                            error_type = status
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                                tool_calls.append({
+                                    "tool_name": str(getattr(m, "name", "") or ""),
+                                    "status": status,
+                                    "result_size": len(content),
+                                    "error_type": error_type,
+                                    "args": tool_args_by_id.get(str(getattr(m, "tool_call_id", "") or ""), {}),
+                                })
                             if getattr(m, "tool_calls", None):
+                                tool_args_by_id.update({
+                                    str(tc.get("id") or ""): tc.get("args") or {}
+                                    for tc in m.tool_calls
+                                })
                                 tool_names.extend(
                                     str(tc.get("name"))
                                     for tc in m.tool_calls
@@ -545,8 +660,8 @@ def stream_answer(
                 )
                 yield {"type": "delta", "html": history[-1]["content"]}
 
-        artworks = tool_artworks
-        with_thumbs = intent in ("timeline", "recommendation", "general")
+        artworks = _dedupe_artworks(tool_artworks)
+        with_thumbs = True
         reply = (
             (final_answer or "（未能生成回答，请重试）")
             if not cancelled
@@ -554,12 +669,23 @@ def stream_answer(
         )
         if cancelled:
             with_thumbs = False
+        # Cards and source chips must be evidence the answer explicitly adopts.
+        # Do not render a broad retrieval pool as if every work were mentioned.
+        source_allowlist = None
+        if not cancelled:
+            artworks = _artworks_named_in_answer(artworks, reply)
+            source_allowlist = {_artwork_identity(aw) for aw in artworks}
         history[-1]["content"] = _assistant_bubble(
             steps, reply, artworks, with_thumbs, done=True
         )
-        history[-1]["sources"] = _collect_sources(tool_msgs, tool_artworks, evidence)
+        history[-1]["sources"] = _collect_sources(
+            tool_msgs,
+            artworks,
+            evidence,
+            allowed_artworks=source_allowlist,
+        )
         if cancelled:
-            _clear_thread_checkpoint(sid)
+            _clear_thread_checkpoint(checkpoint_thread_id(user_id, sid))
     except Exception as e:  # noqa: BLE001 — 面向用户兜底，避免整页崩溃
         logger.exception("graph.stream failed: %s", e)
         error_msg = f"{type(e).__name__}: {e}"[:300]
@@ -579,6 +705,7 @@ def stream_answer(
     save_conversation(sid, title, history, user_id)
     runs_store.record_run(
         request_id=request_id,
+        user_id=user_id,
         session_id=sid,
         intent=intent,
         steps=steps,
@@ -591,6 +718,9 @@ def stream_answer(
         web_fallback=False,
         cancelled=cancelled,
         error=error_msg,
+        node_events=node_events,
+        model_calls=model_calls,
+        tool_calls=tool_calls,
     )
     yield {
         "type": "done",
@@ -626,6 +756,73 @@ def conversation(sid: str, user_id: str = WEB_USER_ID) -> list[dict]:
 
 def remove_conversation(sid: str, user_id: str = WEB_USER_ID) -> None:
     delete_conversation(sid, user_id)
+    _clear_thread_checkpoint(checkpoint_thread_id(user_id, sid))
+
+
+def run_agent_job(task_id: str, user_id: str) -> None:
+    """Execute an AgentJob plan, checkpointing after every useful step.
+
+    A process crash leaves the currently running job in ``processing`` for the
+    startup recovery path; all earlier steps and artifacts are already durable.
+    Cancellation is checked between invocations, so it cannot start a later
+    step after a user has cancelled the job.
+    """
+    while True:
+        job = tasks_store.get_task(task_id)
+        if (
+            not job
+            or job.get("type") != "agent_job"
+            or (job.get("payload") or {}).get("user_id") != user_id
+            or job.get("status") not in {"pending", "processing"}
+        ):
+            return
+        if job.get("pause_requested"):
+            tasks_store.update_task(task_id, status="paused", error="用户暂停")
+            return
+        if job.get("cancel_requested"):
+            tasks_store.advance_agent_job(task_id)
+            return
+
+        plan = list(job.get("plan") or [])
+        step_index = int(job.get("step_index") or 0)
+        if step_index >= len(plan):
+            # Defensive completion for legacy jobs with an empty/corrupt plan.
+            tasks_store.advance_agent_job(
+                task_id,
+                artifact={"kind": "notice", "content": "任务计划为空，未执行模型调用。"},
+            )
+            return
+
+        tasks_store.update_task(task_id, status="processing")
+        objective = str((job.get("payload") or {}).get("objective") or "")
+        step = str(plan[step_index])
+        prompt = (
+            f"长期任务目标：{objective}\n"
+            f"当前第 {step_index + 1}/{len(plan)} 步：{step}\n"
+            "请只完成当前步骤，并给出可供后续步骤使用的事实、结论或草稿。"
+        )
+        try:
+            result = graph.invoke(
+                {
+                    "messages": [HumanMessage(content=prompt)], "user_query": prompt,
+                    "user_id": user_id, "conversation_id": f"job:{task_id}", "final_answer": "",
+                    "tool_rounds": 0, "executed_tool_signatures": [], "retry_count": 0,
+                },
+                config={"configurable": {"thread_id": checkpoint_thread_id(user_id, f"job:{task_id}")}},
+            )
+            tasks_store.advance_agent_job(
+                task_id,
+                artifact={
+                    "kind": "step_answer",
+                    "step_index": step_index,
+                    "step": step,
+                    "content": str(result.get("final_answer") or "")[:8000],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("agent job %s failed at step %s", task_id, step_index)
+            tasks_store.advance_agent_job(task_id, error=f"{type(exc).__name__}: {exc}")
+            return
 
 
 def record_attachment(

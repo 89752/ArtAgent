@@ -29,7 +29,6 @@ load_dotenv()
 
 DEFAULT_TOP_K = 5
 
-
 def _format_result(result: RetrievalResult) -> dict:
     """格式化单条检索结果，供 Agent 消费（按数据源分形状）。"""
     if result.source == "semart":
@@ -56,9 +55,8 @@ def _format_result(result: RetrievalResult) -> dict:
         }
     meta = result.metadata
     if result.source == "user_table":
-        # 用户表格：原始列全带上（小写键，recommendation 的
-        # exclude_from_results 按 schema.entity_col.lower() 定位要靠它）；
-        # 通用 title/description_snippet 供证据模板与相关性过滤拼候选；
+        # 用户表格：原始列全带上（小写键），通用
+        # title/description_snippet 供证据模板与相关性过滤拼候选；
         # 带 source 键 → 不进 UI 配图卡片（陷阱 #13）
         dataset_id = str(meta.get("dataset_id") or "")
         entity, desc, axis = "", "", ""
@@ -198,6 +196,23 @@ def semantic_search(
     else:
         out = out[:top_k]
     return out
+
+
+@tool
+def agentic_retrieve(query: str, top_k: int = DEFAULT_TOP_K) -> dict:
+    """Evidence-first retrieval with one coverage-gated query rewrite.
+
+    Use when a question has several concepts or the first normal retrieval was
+    sparse. The tool performs at most one rewrite/retrieval pass and returns
+    both merged evidence and a coverage audit, avoiding unbounded loops.
+    """
+    from src.retrieval.agentic import adaptive_retrieve
+
+    def retrieve(q: str) -> list[dict]:
+        return semantic_search.invoke({"query": q, "top_k": top_k})
+
+    evidence, audit = adaptive_retrieve(query, retrieve)
+    return {"evidence": evidence[:top_k], "coverage": audit}
 
 
 def _result_hit_filters(d: dict, filters: dict) -> bool:

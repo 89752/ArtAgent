@@ -267,6 +267,35 @@ def test_rrf_head_of_second_source_can_outrank_tail_of_first():
     assert [h.content for h in _rrf_fuse([a, b])][1] == "b0"
 
 
+def test_rrf_accumulates_distinct_objects_for_same_core_artwork():
+    semantic = [
+        _hit("semantic noise", source="core", dedup_key="other|work|1900"),
+        _hit("semantic match", source="core", dedup_key="monet|water lilies|1916"),
+    ]
+    lexical = [
+        _hit("lexical match", source="core", dedup_key="monet|water lilies|1916"),
+        _hit("lexical noise", source="core", dedup_key="third|work|1880"),
+    ]
+
+    fused = _rrf_fuse([semantic, lexical])
+
+    assert fused[0].metadata["dedup_key"] == "monet|water lilies|1916"
+    assert sum(
+        h.metadata.get("dedup_key") == "monet|water lilies|1916" for h in fused
+    ) == 1
+
+
+def test_rrf_accumulates_vector_and_lexical_hits_for_same_pdf_chunk():
+    vector_hit = _hit(
+        "same chunk", source="user_pdf_text", doc_id="doc-1", page_id="doc-1-p0"
+    )
+    lexical_hit = _hit(
+        "same   chunk", source="user_pdf_text", doc_id="doc-1", page_id="doc-1-p0"
+    )
+
+    assert _rrf_fuse([[vector_hit], [lexical_hit]]) == [vector_hit]
+
+
 # ══════════════ hybrid 去重 / 搜索 ══════════════
 def test_dedup_image_dropped_when_text_same_page():
     hits = [
@@ -644,7 +673,7 @@ def test_general_tools_filters_semantic_search_message():
     items = _items(4)
     state = _make_state_with_search_call()
 
-    def _fake_governed(tool, args):
+    def _fake_governed(tool, args, **_kwargs):
         if tool.name == "semantic_search":
             return json.dumps(items, ensure_ascii=False)
         return json.dumps([{"title": "Monet"}], ensure_ascii=False)
@@ -677,7 +706,7 @@ def test_general_tools_untouched_when_no_search_call():
     )
     state = AgentState(user_query="莫奈的画", messages=[HumanMessage(content="莫奈的画"), ai])
 
-    def _fake_governed(tool, args):
+    def _fake_governed(tool, args, **_kwargs):
         return "[]"
 
     def _boom(*a, **kw):
@@ -993,13 +1022,19 @@ def _sr_retriever(**kwargs) -> StructuredTableRetriever:
 
 def test_core_schema_capabilities_full():
     assert CORE_SCHEMA.supports_timeline is True
-    assert CORE_SCHEMA.supports_recommendation is True
+
+
+def test_core_chroma_dir_can_be_separated_from_writable_index(monkeypatch):
+    from src.retrieval.hybrid import _core_chroma_dir
+
+    monkeypatch.setenv("INDEX_DIR", "sandbox-index")
+    monkeypatch.setenv("CORE_INDEX_DIR", "core-index")
+    assert _core_chroma_dir().as_posix() == "core-index/chroma"
 
 
 def test_schema_no_axis_no_timeline():
     schema = TableSchema(entity_col="NAME", description_col="BIO")
     assert schema.supports_timeline is False
-    assert schema.supports_recommendation is True
 
 
 def test_fuzzy_search_by_entity():
@@ -1235,14 +1270,13 @@ def test_status_dict_shape():
         doc_id="shape", kind="table",
         metadata={
             "dataset_id": "table_shape", "rows": 7,
-            "supports_timeline": True, "supports_recommendation": False,
+            "supports_timeline": True,
         },
     )
     doc = documents_store.get_document("shape")
     assert doc["dataset_id"] == "table_shape"
     assert doc["rows"] == 7
     assert doc["supports_timeline"] is True
-    assert doc["supports_recommendation"] is False
 
 
 # ══════════════ 多模态嵌入提供商选择 ══════════════
@@ -1330,3 +1364,12 @@ def test_openai_embed_fn_transforms_input(monkeypatch):
     assert fake_client.embeddings.create.call_args.kwargs["input"] == [
         "data:image/png;base64,AAA"
     ]
+def test_userdoc_offline_fallback_embedding_is_stable_and_normalized():
+    from src.retrieval.userdoc_text_retriever import _FALLBACK_DIM, _fallback_embed
+
+    first = _fallback_embed("Claude Monet Water Lilies")
+    second = _fallback_embed("Claude Monet Water Lilies")
+
+    assert first == second
+    assert len(first) == _FALLBACK_DIM
+    assert 0.99 < sum(value * value for value in first) < 1.01

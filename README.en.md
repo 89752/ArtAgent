@@ -38,7 +38,7 @@ python api.py
 | Style comparison & evolution | Compare styles of artists or artworks; trace an artist's or movement's evolution |
 | Preference-based recommendation | Recommend artists and works based on your stated aesthetic preferences |
 | Visual analysis | Analyze composition, color, and brushwork |
-| Expert skills | Style comparison, timeline tracing, preference-based recommendation, deep artwork analysis, document summarization, exhibition research |
+| Expert skills | Style comparison, timeline tracing, deep artwork analysis, document summarization, exhibition research |
 | Document & spreadsheet Q&A | Upload PDF / Excel files and ask questions with page-level citations |
 | Data statistics | Aggregate statistics on movements, dates, and techniques across the library |
 | Memory & collections | Remember preferences across sessions; manage saved collections |
@@ -46,8 +46,8 @@ python api.py
 ## Highlights
 
 - **Local library first**: answers are grounded in the merged core library (Wikidata + SemArt + AIC), with web fallback (Tavily / Wikipedia / Met Museum API) only when local data is insufficient — no fabrication.
-- **ReAct + clarification**: asks clarifying questions when information is missing; comparisons / timelines / recommendations use expert skills; falls back to the web when retrieval comes up empty.
-- **23 base tools + 6 expert skills**: base tools cover semantic search, exact lookup, painter knowledge, image lookup & visual analysis, PDF page reading, color analysis, aggregate statistics, museum search, Wikipedia lookup, web search, memory read/write/delete, collection CRUD, and parallel research; expert skills cover style comparison, timeline tracing, preference-based recommendation, deep artwork analysis, document summarization, and pre-exhibition research.
+- **ReAct + clarification**: asks clarifying questions when information is missing; comparisons and timelines may use structured skills, while preference-based suggestions are ordinary retrieval Q&A enriched by memory; falls back to the web when retrieval comes up empty.
+- **Base tools + 5 expert skills**: base tools cover semantic search, exact lookup, painter knowledge, image lookup & visual analysis, PDF page reading, color analysis, aggregate statistics, museum search, Wikipedia lookup, web search, memory read/write/delete, collection CRUD, and parallel research; expert skills cover style comparison, timeline tracing, deep artwork analysis, document summarization, and pre-exhibition research.
 - **Long-term memory (optional enhancements)**: explicit "remember / forget" works out of the box; optional auto-extraction (`MEMORY_AUTO_EXTRACT=1`), semantic conflict resolution (`MEMORY_SMART_MERGE=1`), and cross-session user profiles (`MEMORY_PROFILE_REFRESH=1`); everything is stored in local SQLite and can be viewed or deleted per item in the memory panel.
 - **Documents & spreadsheets**: upload PDF / Excel, optional MinerU precise parsing and visual reading of scanned pages; answers can cite a specific page of a document.
 - **Web UI**: SSE streaming with visible reasoning steps, background generation across chats (start a new conversation before the answer finishes), stop generation, collapsible / resizable sidebar, dark mode, source citation cards, memory panel, and feedback.
@@ -107,7 +107,7 @@ Latest baseline (2026-08):
 **Completed**
 
 - **Hybrid retrieval & reranking**: dual-channel recall (BGE-M3 semantic + FTS5/BM25 lexical) over the core library and user documents, with on-demand cross-language query translation, RRF fusion, and Jina Reranker v3.5 API reranking;
-- **Mature tool belt**: ReAct tool belt + 23 base tools and 6 expert skills covering lookup, comparison, timelines, recommendations, visual analysis, statistics, memory, and collections;
+- **Mature tool belt**: ReAct tool belt + 5 expert skills covering lookup, comparison, timelines, visual analysis, statistics, memory, and collections;
 - **Long-term memory**: explicit memory, auto-extraction, semantic conflict resolution, and cross-session profiles, visible and controllable;
 - **Document understanding**: dual-channel PDF parsing (text layer + page images), spreadsheet Q&A, with page-level citations;
 - **Evaluation system**: multi-dimensional test sets covering answer quality, facts, tools, multi-turn dialogue, adversarial cases, intent, routing, and retrieval;

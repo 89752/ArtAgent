@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -14,7 +15,10 @@ from pathlib import Path
 
 from src.data import db
 
-_DB_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "memory"
+_DB_DIR = Path(os.getenv(
+    "ARTAGENT_MEMORY_DIR",
+    str(Path(__file__).resolve().parent.parent.parent / "data" / "memory"),
+))
 _DB_PATH = _DB_DIR / "agent_memory.db"
 
 _lock = threading.Lock()

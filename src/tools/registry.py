@@ -20,13 +20,18 @@ from src.tools.knowledge import query_painter_knowledge
 from src.tools.memory import forget, recall, remember
 from src.tools.museum_search import museum_search
 from src.tools.page_reader import read_page_image
-from src.tools.retrieval import exact_lookup, semantic_search
+from src.tools.retrieval import (
+    agentic_retrieve,
+    exact_lookup,
+    semantic_search,
+)
 from src.tools.web_search import web_search
 from src.tools.wiki_lookup import wiki_lookup
 from src.tools.user_image import analyze_user_artwork, read_user_image
 
 GENERAL_TOOLS = [
     semantic_search,
+    agentic_retrieve,
     exact_lookup,
     query_painter_knowledge,
     image_lookup,

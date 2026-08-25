@@ -49,11 +49,12 @@ def _get_conn() -> sqlite3.Connection:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversations (
-                session_id    TEXT PRIMARY KEY,
+                session_id    TEXT NOT NULL,
                 user_id       TEXT NOT NULL DEFAULT 'web_user',
                 title         TEXT NOT NULL,
                 messages_json TEXT NOT NULL,
-                updated_at    TEXT NOT NULL
+                updated_at    TEXT NOT NULL,
+                PRIMARY KEY (user_id, session_id)
             )
             """
         )
@@ -62,6 +63,26 @@ def _get_conn() -> sqlite3.Connection:
             conn.execute(
                 "ALTER TABLE conversations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'web_user'"
             )
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='conversations'"
+        ).fetchone()[0] or ""
+        # SQLite cannot alter a primary key in place.  Rebuild legacy tables
+        # so same-named sessions remain isolated by user.
+        if "PRIMARY KEY (user_id, session_id)" not in table_sql.replace("\n", " "):
+            conn.execute("ALTER TABLE conversations RENAME TO conversations_legacy")
+            conn.execute(
+                """CREATE TABLE conversations (
+                    session_id TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT 'web_user',
+                    title TEXT NOT NULL, messages_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, session_id))"""
+            )
+            conn.execute(
+                """INSERT OR REPLACE INTO conversations
+                    (session_id, user_id, title, messages_json, updated_at)
+                    SELECT session_id, COALESCE(user_id, 'web_user'), title, messages_json, updated_at
+                    FROM conversations_legacy"""
+            )
+            conn.execute("DROP TABLE conversations_legacy")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversations_user "
             "ON conversations(user_id, updated_at)"
@@ -103,7 +124,7 @@ def save_conversation(
             """
             INSERT INTO conversations (session_id, user_id, title, messages_json, updated_at)
             VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(session_id)
+            ON CONFLICT(user_id, session_id)
             DO UPDATE SET title = excluded.title,
                           messages_json = excluded.messages_json,
                           updated_at = excluded.updated_at
@@ -239,13 +260,14 @@ def remove_attachment_from_all(
                     """
                     UPDATE conversations
                     SET title = ?, messages_json = ?, updated_at = ?
-                    WHERE session_id = ?
+                    WHERE session_id = ? AND user_id = ?
                     """,
-                    (title[:60], json.dumps(new_msgs, ensure_ascii=False), now, session_id),
+                    (title[:60], json.dumps(new_msgs, ensure_ascii=False), now, session_id, user_id),
                 )
             else:
                 conn.execute(
-                    "DELETE FROM conversations WHERE session_id = ?", (session_id,)
+                    "DELETE FROM conversations WHERE session_id = ? AND user_id = ?",
+                    (session_id, user_id),
                 )
             changed += 1
         conn.commit()

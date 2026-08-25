@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -36,6 +37,7 @@ from src.agent.nodes.general import MAX_TOOL_ROUNDS, _guarded_tool_calls, _ledge
 from src.agent.state import AgentState
 from src.observability import runs as runs_mod
 from src.retrieval import structured_retriever as sr
+from src.retrieval.agentic import adaptive_retrieve, coverage_check
 from src.retrieval.base import RetrievalResult
 from src.tools.guard import (
     ToolDecision,
@@ -100,6 +102,13 @@ def test_linear_flow_load_memory_to_ask_user_to_react():
     assert not any(start.startswith(("comp_", "tl_", "rec_")) for start, _ in edges)
 
 
+def test_general_react_has_no_special_recommendation_tool():
+    from src.tools.registry import TOOL_BY_NAME
+
+    assert "recommendation_search" not in TOOL_BY_NAME
+    assert "semantic_search" in TOOL_BY_NAME
+
+
 def test_general_react_loop_present():
     edges = _edges_of(get_graph().get_graph())
     assert ("general_tools", "general_agent") in edges
@@ -121,24 +130,11 @@ def test_ledger_records_shown_artworks_deduped():
     assert updates["shown_artworks"] == ["A", "B", "C"]
 
 
-def test_ledger_records_recommended_artists():
-    state = AgentState(user_query="q")
-    merged = [
-        _msg("skill_art_recommendation",
-             {"features": "f", "liked_artists": [], "candidates": [
-                 {"author": "Rubens"}, {"author": "Caravaggio"}, {"author": "Rubens"},
-             ]}),
-    ]
-    updates = _ledger_updates(merged, state)
-    assert updates["recommended_artists"] == ["Rubens", "Caravaggio"]
-
-
 def test_ledger_ignores_unrelated_tools():
     state = AgentState(user_query="q")
     merged = [_msg("web_search", [{"title": "web hit", "url": "x"}])]
     updates = _ledger_updates(merged, state)
     assert updates["shown_artworks"] == []
-    assert updates["recommended_artists"] == []
 
 
 def test_tool_round_cap_blocks_execution():
@@ -176,69 +172,184 @@ def test_repeat_tool_call_blocked_by_guard():
     assert new_sigs == []
 
 
+def test_tool_call_cap_blocks_parameter_churn():
+    ai = AIMessage(content="", tool_calls=[
+        {"name": "semantic_search", "args": {"query": "莫奈晚年"}, "id": "c1"},
+    ])
+    state = AgentState(
+        user_query="q",
+        executed_tool_signatures=[
+            'semantic_search:{"query": "莫奈视力"}',
+            'semantic_search:{"query": "莫奈白内障"}',
+        ],
+        messages=[ai],
+    )
+    merged, new_sigs = _guarded_tool_calls(state, None)
+    assert "TOOL_LIMIT" in str(merged[0].content)
+    assert new_sigs == []
+
+
+def test_memory_recall_call_cap_blocks_parameter_churn():
+    ai = AIMessage(content="", tool_calls=[
+        {"name": "recall", "args": {"query": "巴洛克"}, "id": "c1"},
+    ])
+    state = AgentState(
+        user_query="q",
+        executed_tool_signatures=[
+            'recall:{"query": "喜欢巴洛克"}',
+            'recall:{"query": "巴洛克风格"}',
+        ],
+        messages=[ai],
+    )
+    merged, new_sigs = _guarded_tool_calls(state, None)
+    assert "TOOL_LIMIT" in str(merged[0].content)
+    assert new_sigs == []
+
+
+def test_explicit_forget_request_is_confirmed_for_governance(monkeypatch):
+    ai = AIMessage(content="", tool_calls=[
+        {"name": "forget", "args": {"entity": "巴洛克"}, "id": "c1"},
+    ])
+    state = AgentState(user_query="忘掉我喜欢巴洛克风格", messages=[ai])
+    seen = {}
+
+    def invoke(_tool, _args, *, context="main", user_id=""):
+        seen["context"] = context
+        seen["user_id"] = user_id
+        return "已删除 1 条"
+
+    monkeypatch.setattr("src.utils.governance.governed_invoke", invoke)
+    out = general_tools(state)
+    assert seen["context"] == "confirmed"
+    assert seen["user_id"] == ""
+    assert "已删除" in str(out["messages"][0].content)
+
+
+@pytest.mark.parametrize("query_text", ["忘掉我喜欢巴洛克风格这件事", "遗忘我喜欢巴洛克风格这件事"])
+def test_explicit_forget_is_forced_before_a_recall_loop(query_text):
+    from src.agent.nodes.general import _enforce_memory_forget
+
+    response = AIMessage(content="", tool_calls=[
+        {"name": "recall", "args": {"query": "巴洛克"}, "id": "c1"},
+    ])
+    state = AgentState(
+        user_query=query_text,
+        memory_items=[{"entity": "巴洛克", "content": "我喜欢巴洛克风格"}],
+    )
+    forced = _enforce_memory_forget(response, state)
+    assert forced.tool_calls[0]["name"] == "forget"
+    assert forced.tool_calls[0]["args"] == {"entity": "巴洛克"}
+
+
+def test_forget_all_related_information_overrides_a_single_item_id():
+    from src.agent.nodes.general import _enforce_memory_forget
+
+    response = AIMessage(content="", tool_calls=[
+        {"name": "forget", "args": {"item_id": "mem_profile"}, "id": "c1"},
+    ])
+    state = AgentState(user_query="请遗忘我关于巴洛克的一切偏好和相关信息")
+
+    forced = _enforce_memory_forget(response, state)
+
+    assert forced.tool_calls == [
+        {"name": "forget", "args": {"entity": "巴洛克"}, "id": forced.tool_calls[0]["id"], "type": "tool_call"}
+    ]
+
+
+def test_a_previous_turn_forget_does_not_suppress_a_new_forget_request():
+    from src.agent.nodes.general import _enforce_memory_forget
+
+    response = AIMessage(content="")
+    state = AgentState(
+        user_query="请遗忘我关于巴洛克的一切信息",
+        messages=[ToolMessage(content="已删除", name="forget", tool_call_id="old")],
+    )
+
+    forced = _enforce_memory_forget(response, state)
+
+    assert forced.tool_calls[0]["args"] == {"entity": "巴洛克"}
+
+
+def test_explicit_uploaded_pdf_only_query_scopes_semantic_search():
+    from src.agent.nodes.general import _scope_uploaded_pdf_search
+
+    scoped = _scope_uploaded_pdf_search(
+        {"name": "semantic_search", "args": {"query": "莫奈"}, "id": "c1"},
+        "请仅根据我上传的 PDF 回答",
+    )
+
+    assert scoped["args"]["filters"] == {"source": "user_pdf_text"}
+
+
+def test_existing_semantic_source_filter_is_not_overridden():
+    from src.agent.nodes.general import _scope_uploaded_pdf_search
+
+    original = {"name": "semantic_search", "args": {"filters": {"source": "core"}}}
+    assert _scope_uploaded_pdf_search(original, "请仅根据我上传的 PDF 回答") is original
+
+
 # ══════════════ 信息澄清 ══════════════
 def test_short_query_is_gap():
-    gap, msg = _info_gap("推荐", "recommendation")
+    gap, msg = _info_gap("推荐")
     assert gap is True
     assert "具体" in msg
 
 
-def test_recommendation_without_preference_signal_is_gap():
-    gap, msg = _info_gap("给我推荐几幅画", "recommendation")
-    assert gap is True
-    assert "偏好" in msg
-
-
-def test_recommendation_with_preference_passes():
-    gap, _ = _info_gap("我喜欢浓烈奔放的风格，推荐几位画家", "recommendation")
+def test_open_ended_preference_query_passes_without_special_clarification():
+    gap, _ = _info_gap("给我推荐几幅画")
     assert gap is False
-
-
-def test_recommendation_with_style_word_not_gap():
-    gap, _ = _info_gap("推荐几幅浓烈奔放的画", "recommendation")
+    gap, _ = _info_gap("推荐几幅浓烈奔放的画")
     assert gap is False
 
 
 def test_normal_queries_pass():
-    assert _info_gap("对比莫奈和梵高的色彩", "comparison")[0] is False
-    assert _info_gap("梳理伦勃朗的风格演变", "timeline")[0] is False
-    assert _info_gap("梵高有哪些作品", "general")[0] is False
+    assert _info_gap("对比莫奈和梵高的色彩")[0] is False
+    assert _info_gap("梳理伦勃朗的风格演变")[0] is False
+    assert _info_gap("梵高有哪些作品")[0] is False
 
 
 def test_classify_intent_keywords():
     assert classify_intent("对比莫奈和梵高的色彩") == "comparison"
     assert classify_intent("莫奈和梵高谁更擅长光影") == "comparison"
     assert classify_intent("梳理透纳的风格演变") == "timeline"
-    assert classify_intent("我喜欢浓烈奔放的风格，推荐几位画家") == "recommendation"
-    assert classify_intent("还有哪些作品采用了类似的光影处理") == "recommendation"
+    assert classify_intent("我喜欢浓烈奔放的风格，推荐几位画家") == "general"
+    assert classify_intent("还有哪些作品采用了类似的光影处理") == "general"
     assert classify_intent("梵高有哪些作品") == "general"
 
 
-def test_ask_user_asks_and_short_circuits():
-    state = AgentState(user_query="给我推荐几幅画", intent="recommendation")
+def test_ask_user_passes_open_ended_preference_request():
+    state = AgentState(user_query="给我推荐几幅画")
     out = ask_user(state)
-    assert out["ask_user"] == "ask"
-    assert out["pending_clarification"]
-    assert out["final_answer"] == out["pending_clarification"]
-    assert out["intent"] == "recommendation"
+    assert out["ask_user"] == "continue"
+    assert out["pending_clarification"] == ""
+    assert out["intent"] == "general"
+
+
+def test_ask_user_passes_preference_request_with_loaded_memory():
+    state = AgentState(
+        user_query="给我推荐一幅画",
+        user_preferences={"preferences": ["用户偏好巴洛克的强烈明暗对照"]},
+        memory_items=[{"kind": "preference", "content": "用户偏好巴洛克的强烈明暗对照"}],
+    )
+    out = ask_user(state)
+    assert out["ask_user"] == "continue"
 
 
 def test_ask_user_continues_when_info_sufficient():
     state = AgentState(
         user_query="我喜欢浓烈奔放的风格，推荐几位画家",
-        intent="recommendation",
         pending_clarification="旧问题",
     )
     out = ask_user(state)
     assert out["ask_user"] == "continue"
     assert out["pending_clarification"] == ""
-    assert out["intent"] == "recommendation"
+    assert out["intent"] == "general"
 
 
 def test_ask_user_writes_derived_intent():
     state = AgentState(user_query="我喜欢莫奈，推荐几幅类似的画")
     out = ask_user(state)
-    assert out["intent"] == "recommendation"
+    assert out["intent"] == "general"
     assert out["ask_user"] == "continue"
 
 
@@ -285,6 +396,7 @@ def test_run_with_timeout_raises():
 def test_governed_invoke_retries_then_succeeds(monkeypatch):
     monkeypatch.setenv("TOOL_RETRIES", "2")
     tool = _FakeTool(result="done", fail_times=2)
+    tool.name = "semantic_search"
     assert governance.governed_invoke(tool, {}) == "done"
     assert tool.calls == 3
 
@@ -301,7 +413,7 @@ def test_governed_invoke_timeout_returns_error(monkeypatch):
     monkeypatch.setenv("TOOL_TIMEOUT_SEC", "0.2")
     monkeypatch.setenv("TOOL_RETRIES", "0")
     tool = _FakeTool(sleep=5)
-    assert json.loads(governance.governed_invoke(tool, {}))["status"] == "TOOL_ERROR"
+    assert json.loads(governance.governed_invoke(tool, {}))["status"] == "UNKNOWN_EXECUTION_STATE"
 
 
 def test_truncate_payload_preserves_shape():
@@ -489,7 +601,7 @@ def test_evidence_block_respects_budget():
 
 def test_profile_and_session_and_summary_blocks():
     assert "喜欢画家：Monet" in build_profile_block({"artists": ["Monet"]})
-    assert "已推荐画家：Rubens" in build_session_block({"recommended_artists": ["Rubens"]})
+    assert "已展示画作：Water Lilies" in build_session_block({"shown_artworks": ["Water Lilies"]})
     assert "summary" in build_summary_block("summary text")
     assert build_profile_block({}) == ""
     assert build_session_block({}) == ""
@@ -629,6 +741,26 @@ def test_metrics_summary(monkeypatch):
     assert m["est_cost_total"] > 0
 
 
+def test_trace_uses_provider_usage_and_redacts_tool_arguments():
+    run_id = runs_mod.record_run(
+        user_id="trace-owner",
+        session_id="s1",
+        model_calls=[{
+            "model": "test-model", "input_tokens": 12, "output_tokens": 8,
+            "total_tokens": 20, "token_source": "provider",
+        }],
+        tool_calls=[{
+            "tool_name": "web_search", "args": {"api_key": "secret", "query": "Monet"},
+        }],
+    )
+    detail = runs_mod.get_run_detail(run_id, "trace-owner")
+    assert detail is not None
+    assert detail["token_source"] == "provider"
+    assert detail["input_tokens"] == 12
+    assert detail["tool_calls"][0]["args"]["api_key"] == "[REDACTED]"
+    assert runs_mod.get_run_detail(run_id, "another-user") is None
+
+
 # ══════════════ core 数据源集成 ══════════════
 def test_retrieval_source_accepts_core():
     r = RetrievalResult(content="x", source="core", metadata={"title": "t"})
@@ -704,8 +836,55 @@ def test_get_structured_retriever_core_registers_from_csv():
             retriever = sr.get_structured_retriever("core")
             assert retriever.dataset_id == "core"
             assert retriever.schema.supports_timeline is True
-            assert retriever.schema.supports_recommendation is True
             assert retriever.source == "core"
         finally:
             sr.CORE_DATA_PATH = old
             sr._REGISTRY.pop("core", None)
+
+
+# ══════════════ P2: 多模型路由 / Agentic RAG ══════════════
+def test_complex_query_routes_to_reasoning_model():
+    class FakeModel:
+        def bind_tools(self, tools):
+            return self
+
+    with patch("src.agent.nodes.general.get_reasoning_llm", return_value=FakeModel()) as reasoning, patch(
+        "src.agent.nodes.general.get_deterministic_llm", return_value=FakeModel()
+    ) as main:
+        from src.agent.nodes.general import _get_llm_with_tools
+
+        _get_llm_with_tools("请对比莫奈和透纳的风格演变，并给出作品证据")
+        _get_llm_with_tools("你好")
+    reasoning.assert_called_once()
+    main.assert_called_once()
+
+
+def test_simple_recommendation_uses_main_but_compound_request_uses_reasoning():
+    from src.agent.nodes.general import _model_role_for_query
+
+    assert _model_role_for_query("我喜欢宁静的印象派风景，推荐三幅作品") == "main"
+    assert _model_role_for_query("推荐三幅作品，并比较它们与莫奈的色彩差异") == "reasoning"
+
+
+def test_agentic_retrieval_rewrites_once_and_merges_evidence():
+    calls = []
+
+    def retrieve(query):
+        calls.append(query)
+        if len(calls) == 1:
+            return [{"source": "core", "title": "莫奈", "description_snippet": "色彩"}]
+        return [
+            {"source": "core", "title": "莫奈", "description_snippet": "色彩"},
+            {"source": "core", "title": "睡莲", "description_snippet": "莫奈的光影色彩技巧"},
+            {"source": "core", "title": "日出", "description_snippet": "印象派光影"},
+        ]
+
+    class FakeLLM:
+        def invoke(self, prompt):
+            return SimpleNamespace(content="莫奈 光影 色彩 技巧")
+
+    evidence, audit = adaptive_retrieve("莫奈的色彩与光影技巧", retrieve, llm=FakeLLM())
+    assert len(calls) == 2
+    assert audit["rewritten"] is True
+    assert len(evidence) == 3  # duplicate Monet evidence is preserved only once
+    assert coverage_check("莫奈的色彩与光影技巧", evidence)["evidence_count"] == 3

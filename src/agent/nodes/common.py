@@ -23,16 +23,10 @@ _TIMELINE_KWS = (
     "变化", "转变", "发展", "兴起", "之后", "晚年", "被承认",
     "develop", "evolution",
 )
-_RECOMMENDATION_KWS = (
-    "推荐", "喜欢", "偏爱", "类似", "适合", "还有哪些",
-    "帮我找", "帮我挑", "想找",
-)
-
-
 def classify_intent(question: str) -> str:
-    """规则化意图识别：comparison / timeline / recommendation / general。
+    """规则化意图识别：comparison / timeline / general。
 
-    只服务两处消费方：ask_user 的信息缺口追问、web 层回答配图开关。
+    只服务澄清与 UI 运行轨迹展示。
     ReAct 主循环仍由 LLM 自行决定调用哪些工具，不受本结果约束。
     """
     q = (question or "").strip().lower()
@@ -42,25 +36,10 @@ def classify_intent(question: str) -> str:
     for kw in _TIMELINE_KWS:
         if kw in q:
             return "timeline"
-    # 书目/资料推荐不是艺术推荐：不触发偏好澄清，也不当作 recommendation
-    if "推荐" in q and any(x in q for x in ("一本", "本书", "几本书")):
-        return "general"
-    for kw in _RECOMMENDATION_KWS:
-        if kw in q:
-            return "recommendation"
     return "general"
 
 
 # ── 信息缺口澄清 ───────────────────────────────────────────────
-_STYLE_SIGNALS = (
-    "喜欢", "偏爱", "风格", "色彩", "笔触", "画家", "作品",
-    "类似", "像", "主题", "氛围", "光影", "色调", "构图",
-    # 常见审美/风格词（避免"浓烈奔放"这类被误判为信息不足）
-    "浓烈", "奔放", "宁静", "优雅", "华丽", "简约", "古典", "现代",
-    "抽象", "写实", "印象", "巴洛克", "洛可可", "浪漫", "深沉", "明亮",
-    "柔和", "风景", "静物", "肖像", "宗教", "神话",
-)
-
 # ── 不安全请求信号：这类请求不能先走澄清，必须交给主流程处理/拒绝 ──
 _UNSAFE_SIGNALS = (
     "冒充", "伪造", "欺骗", "虚假信息", "泄露系统提示",
@@ -68,13 +47,13 @@ _UNSAFE_SIGNALS = (
 )
 
 
-def _info_gap(question: str, intent: str) -> tuple[bool, str]:
-    """判定是否存在"信息不足"（仅明确缺口才追问，一般歧义放行）。"""
+def _info_gap(
+    question: str,
+) -> tuple[bool, str]:
+    """判定是否存在信息不足（仅明确缺口才追问，一般歧义放行）。"""
     q = (question or "").strip()
     if len(q) < 6:
         return True, "能再具体说说想了解什么吗？例如某位画家、某幅画或某种艺术风格。"
-    if intent == "recommendation" and not any(s in q for s in _STYLE_SIGNALS):
-        return True, "你更偏好哪种风格？或者有没有喜欢的画家/作品作为参考？"
     return False, ""
 
 
@@ -83,8 +62,7 @@ def ask_user(state: AgentState) -> dict:
     # 用改写前的原始问题判断信息缺口：改写可能压缩掉疑问词（如"莫奈晚年"），
     # 长度启发式不应作用在内部压缩句上（mt-002 回归）
     raw_question = state.original_user_query or state.user_query or ""
-    # 安全优先：冒充/伪造/提示词泄露等请求直接放行给主流程（应由 LLM 拒绝），
-    # 不能因为含"推荐"等词被澄清节点短路（c-059 回归）
+    # 安全优先：冒充/伪造/提示词泄露等请求直接放行给主流程（应由 LLM 拒绝）。
     if any(s in raw_question for s in _UNSAFE_SIGNALS):
         intent = classify_intent(raw_question)
         return {
@@ -94,7 +72,7 @@ def ask_user(state: AgentState) -> dict:
             "current_step": "ask_user",
         }
     intent = classify_intent(raw_question)
-    gap, message = _info_gap(raw_question, intent)
+    gap, message = _info_gap(raw_question)
     if not gap:
         return {
             "ask_user": "continue",
@@ -133,7 +111,7 @@ def load_memory(state: AgentState) -> dict:
         "artists": pref_contents,
         "styles": [],
     }
-    summary = load_summary(state.conversation_id)
+    summary = load_summary(state.conversation_id, uid)
     items = search_memories(
         uid,
         state.user_query or "",

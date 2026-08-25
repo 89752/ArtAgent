@@ -1,8 +1,8 @@
 """
 结构化表检索器：TableSchema + StructuredTableRetriever。
 
-核心思想：timeline / recommendation 依赖的不是某个具体数据集名字，
-而是"当前数据源的 schema 声明了它有实体列 / 分组轴列 / 描述列"这个抽象。
+核心思想：结构化查询依赖的不是某个具体数据集名字，而是
+"当前数据源的 schema 声明了它有实体列 / 分组轴列 / 描述列"这个抽象。
 内置核心库（dataset_id="core"）与用户上传的 CSV/Excel
 都以同样方式注册复用同一套能力。
 
@@ -51,12 +51,6 @@ class TableSchema(BaseModel):
     def supports_timeline(self) -> bool:
         """是否有分组轴可支撑 timeline 管线（由 group_axis_col 是否存在推出）。"""
         return bool(self.group_axis_col)
-
-    @property
-    def supports_recommendation(self) -> bool:
-        """是否有实体列+描述列可支撑 recommendation 管线。"""
-        return bool(self.entity_col and self.description_col)
-
 
 # 核心库（从零构建）schema：列名自由，角色对齐 TableSchema
 CORE_SCHEMA = TableSchema(
@@ -197,9 +191,8 @@ class StructuredTableRetriever:
 
         1. 实体列 fuzzy_match（短查询/指名查询主路径）
         2. 描述列整串包含（短语级查询）
-        3. 词重叠打分（长查询兜底——实测 recommendation 的
-           extracted_features 是 30–60 词特征描述，整串包含必空：
-           按内容词在"实体列+描述列"中的命中数打分排序，确定性、无模型）
+        3. 词重叠打分（长查询兜底：整串包含通常为空时，按内容词在
+           "实体列+描述列"中的命中数打分排序，确定性、无模型）
 
         filters（可选）：{列名: 值} 等值过滤，作用于命中的 DataFrame。
         用户表的 entity_col/description_col 可能为空（负样本表），
@@ -307,9 +300,9 @@ def register_structured_dataset(
     retriever = StructuredTableRetriever(dataset_id, schema, **kwargs)
     _REGISTRY[dataset_id] = retriever
     logger.info(
-        "[register] dataset_id=%s source=%s timeline=%s recommendation=%s",
+        "[register] dataset_id=%s source=%s timeline=%s",
         dataset_id, retriever.source,
-        schema.supports_timeline, schema.supports_recommendation,
+        schema.supports_timeline,
     )
     return retriever
 
@@ -356,14 +349,14 @@ def _register_core() -> None:
             df["author"] = df["artist"]
         return df
 
-    from src.retrieval.hybrid import get_bge_m3_embed_fn, get_or_create_chroma_collection
+    from src.retrieval.hybrid import get_bge_m3_embed_fn, get_core_chroma_collection
 
     register_structured_dataset(
         "core",
         CORE_SCHEMA,
         source="core",
         df_loader=df_loader,
-        collection_loader=lambda: get_or_create_chroma_collection("core"),
+        collection_loader=get_core_chroma_collection,
         embed_fn_loader=get_bge_m3_embed_fn,  # 核心库中文查询 → 多语言向量空间
     )
 

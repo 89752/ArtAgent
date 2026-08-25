@@ -148,7 +148,7 @@ def _insert_from_legacy(doc_id: str, info: dict) -> None:
         for key in (
             "dataset_id", "table_path", "rows", "cols", "sheet_name", "columns",
             "proposed_schema", "confirmed_schema", "display_name",
-            "supports_timeline", "supports_recommendation",
+            "supports_timeline",
         ):
             if key in info:
                 metadata[key] = info[key]
@@ -291,6 +291,13 @@ def list_documents(user_id: str = "web_user") -> list[dict]:
             "SELECT * FROM documents WHERE user_id = ? ORDER BY started_at DESC",
             (user_id,),
         ).fetchall()
+    return [_to_status_dict(r) for r in rows]
+
+
+def list_all_documents() -> list[dict]:
+    """管理员恢复路径：读取所有用户文档，不用于面向用户的 API 列表。"""
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM documents ORDER BY started_at DESC").fetchall()
     return [_to_status_dict(r) for r in rows]
 
 

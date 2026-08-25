@@ -3,6 +3,9 @@ name: tests
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
 
 jobs:
   frontend:
@@ -40,3 +43,58 @@ jobs:
       - name: Run backend test suite
         # test_ingestion.py 依赖不入库的本地数据构建脚本，仅在本地运行。
         run: pytest -q --ignore=tests/test_ingestion.py
+
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Deterministic evaluation gate
+        run: python eval/agent_eval_v2.py --pr
+      - name: Memory reliability gate
+        run: python eval/memory_reliability_eval.py
+
+  nightly-full-eval:
+    # Full agent cases require a private provider configuration. The scheduled
+    # workflow runs them when repository secrets are supplied; PRs stay fast
+    # and deterministic through eval-gate above.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Full online evaluation
+        if: ${{ secrets.LLM_API_KEY != '' && secrets.LLM_BASE_URL != '' && secrets.LLM_MODEL != '' }}
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          JUDGE_MODEL: ${{ secrets.JUDGE_MODEL }}
+        run: python eval/agent_eval_v2.py --capture-regressions
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build image
+        run: docker build -t artagent:ci .
+      - name: Start and check probes
+        run: |
+          docker run -d --name artagent-ci -p 7860:7860 artagent:ci
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:7860/ready; then exit 0; fi
+            sleep 2
+          done
+          docker logs artagent-ci
+          exit 1
+      - name: Stop container
+        if: always()
+        run: docker rm -f artagent-ci || true

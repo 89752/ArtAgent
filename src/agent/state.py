@@ -16,7 +16,7 @@ class AgentState(BaseModel):
     original_user_query: str = ""
 
     # ── 路由 ───────────────────────────────────────────────────
-    # 意图类型：general / comparison / timeline / recommendation
+    # 意图类型：general / comparison / timeline（仅用于澄清与 UI 轨迹展示）
     intent: str = ""
     # 会话滚动摘要（由增量摘要器写入，注入 context.summary 块）
     conversation_summary: str = ""
@@ -46,10 +46,12 @@ class AgentState(BaseModel):
     context_chars: int = 0
     # 当前执行到的节点（便于 UI 展示 Agent 决策链）
     current_step: str = ""
+    # 本次 general 节点实际选用的模型角色，供运行轨迹与路由评测使用。
+    model_role: str = "main"
 
     # ── 数据源 ─────────────────────────────────────────────────
     # 当前生效的结构化数据源（对应 StructuredTableRetriever 注册表 key）。
-    # timeline / recommendation 据此访问数据，路由层据此做能力开关判断；
+    # 时间线等结构化查询据此访问数据；
     # 用户上传表格接入后可切换，默认核心库。
     dataset_id: str = "core"
 
@@ -67,9 +69,8 @@ class AgentState(BaseModel):
     conversation_id: str = "default"
     # 从持久化存储读出的用户偏好：{"artists": [...], "styles": [...]}
     user_preferences: dict[str, list[str]] = Field(default_factory=dict)
-    # 会话台账（P1）：本轮已展示画作 / 已推荐画家 / 待澄清项
+    # 会话台账（P1）：本轮已展示画作 / 待澄清项
     shown_artworks: list[str] = Field(default_factory=list)
-    recommended_artists: list[str] = Field(default_factory=list)
     pending_clarification: str = ""
 
     # ── 最终输出 ───────────────────────────────────────────────

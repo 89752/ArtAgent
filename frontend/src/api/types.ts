@@ -88,6 +88,44 @@ export interface MemoryListData {
   items: MemoryItem[];
 }
 
+export interface AgentTask {
+  task_id: string;
+  type: string;
+  status: "pending" | "processing" | "paused" | "done" | "failed" | "interrupted";
+  progress?: number;
+  error?: string;
+  created_at?: string;
+  step_index?: number;
+  plan?: string[];
+  steps?: Array<{ title?: string; status?: string; error?: string }>;
+  artifacts?: Array<{ step?: string; content?: string; step_index?: number }>;
+}
+
+export interface RunSummary {
+  id: number;
+  created_at: string;
+  intent?: string;
+  latency_ms: number;
+  est_cost: number;
+  tools?: string[];
+  error?: string;
+}
+
+export interface RunDetail extends RunSummary {
+  node_events: Array<{ node_name: string; latency_ms: number; status: string }>;
+  model_calls: Array<{ model: string; role?: string; input_tokens: number; output_tokens: number }>;
+  tool_calls: Array<{ tool_name: string; status: string; latency_ms: number; error_type?: string }>;
+}
+
+export interface OperationsMetrics {
+  count: number;
+  latency_ms?: { avg: number; p50: number; p95: number };
+  est_cost_total?: number;
+  tokens?: { input_total: number; output_total: number; provider_usage_rate: number };
+  model_roles?: Record<string, number>;
+  error_rate?: number;
+}
+
 export interface DocProposedSchema {
   entity_col?: string;
   group_axis_col?: string;
@@ -111,7 +149,6 @@ export interface Doc {
   image_pages?: number;
   pages?: number;
   supports_timeline?: boolean;
-  supports_recommendation?: boolean;
   route_distribution?: unknown;
   split_group_id?: string;
   split_source_name?: string;

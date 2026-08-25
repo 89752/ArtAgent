@@ -69,6 +69,16 @@ export function Composer() {
         {chipList.map((c) => {
           const doc = c.doc_id ? docsById[c.doc_id] : undefined;
           const label = FILE_STATUS_LABEL[c.status] || c.status || "";
+          const canConfirmSchema = c.status === "pending_confirm" && !!doc;
+          const statusClass =
+            "chip-status" +
+            (c.status === "done" || c.status === "active"
+              ? " ok"
+              : c.status === "failed"
+                ? " err"
+                : c.status === "pending_confirm"
+                  ? " warn action"
+                  : " warn");
           return (
             <div key={c.id} className="chip" data-tip={c.error || undefined}>
               {c.kind === "image" ? (
@@ -86,28 +96,23 @@ export function Composer() {
               <span className="chip-name" data-tip={c.name}>
                 {c.name}
               </span>
-              <span
-                className={
-                  "chip-status" +
-                  (c.status === "done" || c.status === "active"
-                    ? " ok"
-                    : c.status === "failed"
-                      ? " err"
-                      : c.status === "pending_confirm"
-                        ? " warn action"
-                        : " warn")
-                }
-                data-tip={
-                  c.status === "pending_confirm" ? "点击确认列角色" : undefined
-                }
-                onClick={() => {
-                  if (c.status === "pending_confirm" && doc) openSchema(doc);
-                }}
-              >
-                {c.status === "uploading" && typeof c.progress === "number"
-                  ? `${c.progress}%`
-                  : label}
-              </span>
+              {canConfirmSchema ? (
+                <button
+                  type="button"
+                  className={statusClass}
+                  aria-label={`确认 ${c.name} 的列角色`}
+                  data-tip="点击确认列角色"
+                  onClick={() => openSchema(doc!)}
+                >
+                  {label}
+                </button>
+              ) : (
+                <span className={statusClass}>
+                  {c.status === "uploading" && typeof c.progress === "number"
+                    ? `${c.progress}%`
+                    : label}
+                </span>
+              )}
               {c.kind === "image" && c.status === "done" && c.doc_id && (
                 <button
                   type="button"
@@ -167,16 +172,23 @@ export function Composer() {
           onFiles(e.dataTransfer?.files ?? null);
         }}
       >
-        <button
+        <label
           id="btn-attach"
           className="btn-attach"
-          type="button"
+          htmlFor="file-input"
+          role="button"
+          tabIndex={0}
           aria-label="上传文档"
           data-tip="上传 PDF / CSV / Excel 文档或绘画图片"
-          onClick={() => document.getElementById("file-input")?.click()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              document.getElementById("file-input")?.click();
+            }
+          }}
         >
           <IconAttach />
-        </button>
+        </label>
         <textarea
           id="msg"
           ref={taRef}

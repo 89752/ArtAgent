@@ -1,0 +1,44 @@
+# 本地真实场景验收沙盒：不挂载生产 data/ 的可写根目录。
+# 核心艺术数据只读复用；索引、记忆、会话、上传、任务和追踪全部写入 .sandbox/。
+services:
+  artagent-sandbox:
+    image: artagent:latest
+    build: .
+    ports:
+      - "7861:7860"
+    env_file:
+      - .env
+    environment:
+      INDEX_DIR: /sandbox/index
+      ARTAGENT_MEMORY_DIR: /sandbox/memory
+      ARTAGENT_PLATFORM_DIR: /sandbox/platform
+      UPLOADS_DIR: /sandbox/uploads
+      USER_IMAGES_DIR: /sandbox/uploads/user_images
+      ARTAGENT_CHECKPOINT_DB_PATH: /sandbox/memory/checkpoints.db
+      CORE_DATA_PATH: /app/data/core/artworks_core.csv
+      CORE_INDEX_DIR: /sandbox/core-index
+      # BGE-M3 只允许从本地缓存加载，避免容器首次检索时联网下载或降级。
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      # 宿主机回环代理在 Linux 容器内不可达；如需代理，请显式把
+      # RERANK_PROXY 配为 host.docker.internal 上的可达地址。
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+    volumes:
+      # 基础沙盒仅运行镜像内源码，用于验证镜像交付物本身。
+      - ./.sandbox:/sandbox
+      - ./data/core:/app/data/core:ro
+      # 宿主机已验证完整的 BGE-M3 模型缓存；只读挂载，容器绝不修改权重。
+      - type: bind
+        source: ${USERPROFILE}/.cache/huggingface
+        target: /home/artagent/.cache/huggingface
+        read_only: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

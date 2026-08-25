@@ -21,7 +21,8 @@ from src.skills.loader import register_skills
 from src.tools.registry import GENERAL_TOOLS as CORE_TOOLS
 from src.tools.registry import TOOL_BY_NAME as CORE_TOOL_BY_NAME
 from src.retrieval.relevance import llm_relevance_filter
-from src.utils.llm import get_deterministic_llm
+from src.utils.config import get_bool
+from src.utils.llm import get_deterministic_llm, get_reasoning_llm
 from src.utils.logging_config import get_logger, log_event
 
 logger = get_logger("general")
@@ -30,9 +31,29 @@ logger = get_logger("general")
 _MEMORY_INTENT_RE = re.compile(
     r"(记住|记下|记得|以后.*(说|提)|收藏到记忆|别忘)", re.IGNORECASE
 )
+# “遗忘”是面向长期记忆的自然说法；将它视为用户本轮的明确删除授权，
+# 否则工具治理会拒绝执行而模型仍可能口头声称已完成。
+_DESTRUCTIVE_INTENT_RE = re.compile(r"(忘掉|遗忘|删除|删掉|清除|移除)", re.IGNORECASE)
+_FORGET_ALL_ENTITY_RE = re.compile(
+    r"(?:关于|对)\s*[“\"']?([^，。！？、\s“\"']{2,30}?)[”\"']?"
+    r"(?=(?:的)?(?:一切|所有|全部|相关|偏好|记忆|信息)|[，。！？]|$)"
+)
 
 # ReAct 工具轮次上限（实测出现过 29 次调用不收敛的循环）
 MAX_TOOL_ROUNDS = 5
+
+# 单工具的不同参数调用上限。精确重复由签名守卫阻止；这里处理模型不断
+# 换措辞/换参数但没有新增证据的情况。未列出的工具不设单工具硬上限。
+_TOOL_CALL_CAPS = {
+    "aggregate_stats": 1,
+    "wiki_lookup": 1,
+    "recall": 1,
+    "semantic_search": 2,
+    "exact_lookup": 2,
+    "query_painter_knowledge": 2,
+    "museum_search": 2,
+    "web_search": 2,
+}
 
 # general 分支可用的全部工具：
 # compare_artwork_styles 已删除——外层 Agent 拿到两幅画的元数据后可自行组织对比；
@@ -91,6 +112,59 @@ def _enforce_memory_write(response, state) -> object:
     )
 
 
+def _enforce_memory_forget(response, state) -> object:
+    """Force an entity-level forget request when the user names its scope.
+
+    A model may select one recalled ``item_id`` even where the user asked to
+    remove *all* information about an entity.  That leaves related preference
+    records and derived profiles behind, so explicit “关于 X 的一切/相关信息”
+    requests are normalized to ``forget(entity=X)`` here.
+    """
+    q = state.user_query or ""
+    if not _DESTRUCTIVE_INTENT_RE.search(q):
+        return response
+    all_match = _FORGET_ALL_ENTITY_RE.search(q)
+    entity = (all_match.group(1).strip().removesuffix("的") if all_match else "")
+    entity = entity or next(
+        (
+            str(item.get("entity") or "").strip()
+            for item in (state.memory_items or [])
+            if str(item.get("entity") or "").strip()
+            and str(item.get("entity") or "").strip().lower() in q.lower()
+        ),
+        "",
+    )
+    if not entity:
+        return response
+    # ``messages`` includes the whole conversation, so a past forget must not
+    # suppress an independent request in a later user turn.  The signature
+    # ledger is intentionally scoped to the current ReAct turn and prevents
+    # only an actual duplicate in the ongoing loop.
+    forced_signature = f"forget:{json.dumps({'entity': entity}, sort_keys=True, ensure_ascii=False)}"
+    if forced_signature in set(state.executed_tool_signatures or []):
+        return response
+    # A model-produced entity call is already scoped correctly.  An item-id
+    # call is deliberately replaced for the “all related information” form.
+    calls = getattr(response, "tool_calls", None) or []
+    if any(
+        tc.get("name") == "forget" and str((tc.get("args") or {}).get("entity") or "").strip()
+        for tc in calls
+    ):
+        return response
+    log_event(logger, "memory_guard", note="forced_forget", entity=entity)
+    return AIMessage(
+        content=str(getattr(response, "content", "") or ""),
+        tool_calls=[
+            {
+                "name": "forget",
+                "args": {"entity": entity},
+                "id": f"force-forget-{uuid.uuid4().hex[:8]}",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
 def _tool_schema(tool: object) -> dict:
     """取工具的 JSON Schema（兼容 pydantic v1/v2 的 args_schema，兜底 tool.args）。"""
     args_schema = getattr(tool, "args_schema", None)
@@ -135,6 +209,25 @@ def _repeat_guard_message(tc: dict, name: str) -> ToolMessage:
     )
 
 
+def _tool_limit_guard_message(tc: dict, name: str, limit: int) -> ToolMessage:
+    """Stop parameter-churn after enough calls to a bounded evidence source."""
+    return ToolMessage(
+        content=json.dumps(
+            {
+                "status": "TOOL_LIMIT",
+                "message": (
+                    f"工具 {name} 本轮最多调用 {limit} 次，已达到上限。"
+                    "请基于已有工具结果综合回答；若证据不足，请明确说明范围或向用户澄清。"
+                ),
+            },
+            ensure_ascii=False,
+        ),
+        name=name,
+        tool_call_id=tc.get("id"),
+        id=f"guard:{tc.get('id')}",
+    )
+
+
 def _guarded_tool_calls(state: AgentState, tool_node) -> tuple[list, list]:
     """Tool invocation guard: 3-state validation before execution.
 
@@ -151,8 +244,13 @@ def _guarded_tool_calls(state: AgentState, tool_node) -> tuple[list, list]:
     valid_calls: list[dict] = []
     guard_by_id: dict[str, ToolMessage] = {}
     executed_sigs: set[str] = set(state.executed_tool_signatures or [])
+    used_by_tool: dict[str, int] = {}
+    for prior in executed_sigs:
+        prior_name = prior.split(":", 1)[0]
+        used_by_tool[prior_name] = used_by_tool.get(prior_name, 0) + 1
     new_sigs: list[str] = []
     for tc in calls:
+        tc = _scope_uploaded_pdf_search(tc, state.user_query or "")
         name = tc.get("name")
         tool = TOOL_BY_NAME.get(name)
         if tool is None:
@@ -166,10 +264,16 @@ def _guarded_tool_calls(state: AgentState, tool_node) -> tuple[list, list]:
         if sig in executed_sigs:
             guard_by_id[tc.get("id")] = _repeat_guard_message(tc, name)
             continue
+        limit = _TOOL_CALL_CAPS.get(name)
+        if limit is not None and used_by_tool.get(name, 0) >= limit:
+            guard_by_id[tc.get("id")] = _tool_limit_guard_message(tc, name, limit)
+            log_event(logger, "tool_guard", tool=name, status="TOOL_LIMIT", limit=limit)
+            continue
         decision = validate_args(_tool_schema(tool), tc.get("args") or {})
         if decision.status == "SUCCESS":
             valid_calls.append(tc)
             new_sigs.append(sig)
+            used_by_tool[name] = used_by_tool.get(name, 0) + 1
         else:
             guard_by_id[tc.get("id")] = guard_tool_message(tc.get("id"), name, decision)
             log_event(
@@ -186,7 +290,19 @@ def _guarded_tool_calls(state: AgentState, tool_node) -> tuple[list, list]:
             name = tc.get("name")
             tool = TOOL_BY_NAME.get(name)
             t0 = time.time()
-            output = governed_invoke(tool, tc.get("args") or {})
+            # The user explicitly requested this destructive action in the
+            # current turn, which is the confirmation.  Keep the central
+            # governance gate for model-initiated mutations without such text.
+            confirmed = (
+                name in {"forget", "delete_collection"}
+                and _DESTRUCTIVE_INTENT_RE.search(state.user_query or "")
+            )
+            output = governed_invoke(
+                tool,
+                tc.get("args") or {},
+                context="confirmed" if confirmed else "main",
+                user_id=state.user_id or "",
+            )
             log_event(
                 logger, "tool_exec", tool=name,
                 ms=round((time.time() - t0) * 1000, 1),
@@ -217,8 +333,48 @@ def _guarded_tool_calls(state: AgentState, tool_node) -> tuple[list, list]:
     return merged, new_sigs
 
 
-def _get_llm_with_tools():
-    return get_deterministic_llm().bind_tools(GENERAL_TOOLS)
+_COMPLEX_QUERY_RE = re.compile(
+    r"(对比|比较|演变|时间线|分别|多角度|综合|论文|研究|compare|timeline)",
+    re.IGNORECASE,
+)
+_UPLOAD_PDF_ONLY_RE = re.compile(
+    r"(?:仅|只)(?:根据|依据).{0,18}(?:上传|文档|pdf)|"
+    r"(?:上传的|我的)\s*(?:pdf|文档).{0,18}(?:仅|只)(?:根据|依据)",
+    re.IGNORECASE,
+)
+
+
+def _scope_uploaded_pdf_search(tool_call: dict, query: str) -> dict:
+    """Honor an explicit “only use my uploaded PDF” evidence boundary."""
+    if tool_call.get("name") != "semantic_search" or not _UPLOAD_PDF_ONLY_RE.search(query or ""):
+        return tool_call
+    args = dict(tool_call.get("args") or {})
+    filters = args.get("filters")
+    filters = dict(filters) if isinstance(filters, dict) else {}
+    if filters.get("source"):
+        return tool_call
+    args["filters"] = {**filters, "source": "user_pdf_text"}
+    return {**tool_call, "args": args}
+
+
+def _model_role_for_query(query: str = "") -> str:
+    """Return the selected role without invoking a model (also used by eval)."""
+    complex_query = len(query) > 320 or bool(_COMPLEX_QUERY_RE.search(query))
+    if complex_query and get_bool("models.routing_enabled", True):
+        return "reasoning"
+    return "main"
+
+
+def _get_llm_with_tools(query: str = ""):
+    """Use the reasoning role only for clearly multi-part planning requests.
+
+    Role configuration is optional: ``get_reasoning_llm`` safely falls back to
+    the main model, so this routing does not make single-model deployments fail.
+    """
+    role = _model_role_for_query(query)
+    llm = get_reasoning_llm() if role == "reasoning" else get_deterministic_llm()
+    log_event(logger, "model_route", role=role)
+    return llm.bind_tools(GENERAL_TOOLS)
 
 
 def general_agent(state: AgentState) -> dict:
@@ -256,7 +412,6 @@ def general_agent(state: AgentState) -> dict:
         session=build_session_block(
             {
                 "shown_artworks": state.shown_artworks,
-                "recommended_artists": state.recommended_artists,
                 "pending_clarification": state.pending_clarification,
                 "uploaded_docs": state.uploaded_docs,
                 "uploaded_images": state.uploaded_images,
@@ -276,7 +431,9 @@ def general_agent(state: AgentState) -> dict:
     log_event(logger, "context_volume", chars=context_chars,
               history_turns=len([m for m in blocks.history if getattr(m, "type", "") == "human"]))
 
-    response = _get_llm_with_tools().invoke(messages)
+    model_role = _model_role_for_query(state.user_query or "")
+    response = _get_llm_with_tools(state.user_query or "").invoke(messages)
+    response = _enforce_memory_forget(response, state)
     response = _enforce_memory_write(response, state)
     tool_calls = [tc.get("name") for tc in getattr(response, "tool_calls", []) or []]
     if tool_calls:
@@ -287,6 +444,7 @@ def general_agent(state: AgentState) -> dict:
         "messages": [response],
         "current_step": "general_agent",
         "context_chars": context_chars,
+        "model_role": model_role,
     }
 
 
@@ -327,9 +485,8 @@ def _filter_search_message(msg: ToolMessage, query: str) -> ToolMessage:
 
 
 def _ledger_updates(merged, state: AgentState) -> dict:
-    """会话台账自动登记：已展示画作 / 已推荐画家（去重保序）。"""
+    """会话台账自动登记已展示画作（去重保序）。"""
     shown = list(state.shown_artworks or [])
-    recommended = list(state.recommended_artists or [])
     for msg in merged:
         name = getattr(msg, "name", "") or ""
         try:
@@ -342,11 +499,6 @@ def _ledger_updates(merged, state: AgentState) -> dict:
             for d in data:
                 if isinstance(d, dict) and d.get("title"):
                     shown.append(str(d["title"]))
-        elif name == "skill_art_recommendation" and isinstance(data, dict):
-            for c in data.get("candidates") or []:
-                if isinstance(c, dict) and c.get("author"):
-                    recommended.append(str(c["author"]))
-
     def _uniq(xs: list[str]) -> list[str]:
         seen: set[str] = set()
         out: list[str] = []
@@ -356,7 +508,7 @@ def _ledger_updates(merged, state: AgentState) -> dict:
                 out.append(x)
         return out
 
-    return {"shown_artworks": _uniq(shown), "recommended_artists": _uniq(recommended)}
+    return {"shown_artworks": _uniq(shown)}
 
 
 def general_tools(state: AgentState) -> dict:
@@ -365,7 +517,7 @@ def general_tools(state: AgentState) -> dict:
     过滤放在图节点层而非工具内部：semantic_search 工具保持确定性可测
     （eval Recall@5 与 test_tools 直接消费它，不含 LLM 波动），LLM 判断
     留在编排层且每次过滤日志可观测。过滤失败的降级在模块内部完成。
-    执行后自动更新会话台账（shown_artworks / recommended_artists）。
+    执行后自动更新会话台账（shown_artworks）。
     """
     # 轮次上限——停止执行并让模型基于已有信息直接回答
     if state.tool_rounds >= MAX_TOOL_ROUNDS:

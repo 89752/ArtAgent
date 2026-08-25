@@ -46,14 +46,33 @@ def _get_conn() -> sqlite3.Connection:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_summary (
-                conversation_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
                 user_id         TEXT NOT NULL,
                 content         TEXT NOT NULL,
                 summarized_turns INTEGER NOT NULL DEFAULT 0,
-                updated_at      TEXT NOT NULL
+                updated_at      TEXT NOT NULL,
+                PRIMARY KEY (user_id, conversation_id)
             )
             """
         )
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='conversation_summary'"
+        ).fetchone()[0] or ""
+        if "PRIMARY KEY (user_id, conversation_id)" not in table_sql.replace("\n", " "):
+            conn.execute("ALTER TABLE conversation_summary RENAME TO conversation_summary_legacy")
+            conn.execute(
+                """CREATE TABLE conversation_summary (
+                    conversation_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                    content TEXT NOT NULL, summarized_turns INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL, PRIMARY KEY (user_id, conversation_id))"""
+            )
+            conn.execute(
+                """INSERT OR REPLACE INTO conversation_summary
+                    (conversation_id, user_id, content, summarized_turns, updated_at)
+                    SELECT conversation_id, user_id, content, summarized_turns, updated_at
+                    FROM conversation_summary_legacy"""
+            )
+            conn.execute("DROP TABLE conversation_summary_legacy")
         conn.commit()
         _db_ready = True
     return conn
@@ -71,13 +90,13 @@ def _migrate_legacy_db() -> Path:
         return _LEGACY_DB_PATH
 
 
-def load_summary(conversation_id: str) -> str:
+def load_summary(conversation_id: str, user_id: str = "web_user") -> str:
     if not conversation_id:
         return ""
     try:
         row = _get_conn().execute(
-            "SELECT content FROM conversation_summary WHERE conversation_id = ?",
-            (conversation_id,),
+            "SELECT content FROM conversation_summary WHERE conversation_id = ? AND user_id = ?",
+            (conversation_id, user_id),
         ).fetchone()
     except sqlite3.OperationalError:
         return ""
@@ -92,13 +111,13 @@ def load_summary_item(conversation_id: str, user_id: str) -> Optional[dict]:
         row = _get_conn().execute(
             """
             SELECT user_id, content, summarized_turns, updated_at
-            FROM conversation_summary WHERE conversation_id = ?
+            FROM conversation_summary WHERE conversation_id = ? AND user_id = ?
             """,
-            (conversation_id,),
+            (conversation_id, user_id),
         ).fetchone()
     except sqlite3.OperationalError:
         return None
-    if not row or row[0] != user_id:
+    if not row:
         return None
     return {
         "user_id": row[0],
@@ -130,7 +149,7 @@ def _save_summary(conversation_id: str, user_id: str, content: str,
             INSERT INTO conversation_summary
                 (conversation_id, user_id, content, summarized_turns, updated_at)
             VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(conversation_id) DO UPDATE SET
+            ON CONFLICT(user_id, conversation_id) DO UPDATE SET
                 content = excluded.content,
                 summarized_turns = excluded.summarized_turns,
                 updated_at = excluded.updated_at
@@ -195,8 +214,8 @@ def maybe_summarize(
     triggered_by_volume = volume_chars > VOLUME_TRIGGER_CHARS
     if not triggered_by_turns and not triggered_by_volume:
         return ""
-    existing = load_summary(conversation_id)
-    summarized_turns = _summarized_turns_of(conversation_id)
+    existing = load_summary(conversation_id, user_id)
+    summarized_turns = _summarized_turns_of(conversation_id, user_id)
     delta = turns - summarized_turns
     if delta < 1:
         return existing  # 增量不足，复用旧摘要
@@ -208,11 +227,11 @@ def maybe_summarize(
     return new_summary
 
 
-def _summarized_turns_of(conversation_id: str) -> int:
+def _summarized_turns_of(conversation_id: str, user_id: str = "web_user") -> int:
     try:
         row = _get_conn().execute(
-            "SELECT summarized_turns FROM conversation_summary WHERE conversation_id = ?",
-            (conversation_id,),
+            "SELECT summarized_turns FROM conversation_summary WHERE conversation_id = ? AND user_id = ?",
+            (conversation_id, user_id),
         ).fetchone()
     except sqlite3.OperationalError:
         return 0

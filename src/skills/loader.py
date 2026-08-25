@@ -206,12 +206,16 @@ def _skill_runner(skill: Skill) -> Callable[[str], str]:
                     try:
                         if tool is None:
                             raise KeyError(f"未注册工具 {tc.get('name')}")
-                        output = tool.invoke(tc.get("args") or {})
+                        from src.utils.governance import governed_invoke
+
+                        output = governed_invoke(
+                            tool, tc.get("args") or {}, context="skill"
+                        )
                     except Exception as e:  # noqa: BLE001 — 工具失败回灌给模型
                         output = f"工具执行失败：{e}"
                     messages.append(
                         ToolMessage(
-                            content=str(output)[:2000],
+                            content=str(output),
                             name=tc.get("name"),
                             tool_call_id=tc.get("id"),
                         )
@@ -230,7 +234,7 @@ def _skill_runner(skill: Skill) -> Callable[[str], str]:
                     )
                 )
                 continue
-            return text
+            return attach_evidence(text)
         last = str(messages[-1].content)[:2000]
         return last + "\n\n（已达技能步数上限）"
 

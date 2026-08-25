@@ -1,0 +1,6 @@
+# 开发期快速验收覆盖层：仅在需要直接运行当前工作区源码时叠加。
+# 不用于验证镜像交付物；镜像验收请只使用 docker-compose.sandbox.yml。
+services:
+  artagent-sandbox:
+    volumes:
+      - ./:/app:ro

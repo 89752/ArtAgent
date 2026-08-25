@@ -225,15 +225,12 @@ def build_session_block(
     ledger: dict,
     budget: int = SESSION_CHAR_BUDGET,
 ) -> str:
-    """会话台账块：本轮已展示画作 / 已推荐画家 / 待澄清项。"""
+    """会话台账块：本轮已展示画作 / 待澄清项。"""
     parts: list[str] = []
     shown = ledger.get("shown_artworks") or []
-    recommended = ledger.get("recommended_artists") or []
     pending = ledger.get("pending_clarification") or ""
     if shown:
         parts.append(f"已展示画作：{', '.join(str(x) for x in shown[:6])}")
-    if recommended:
-        parts.append(f"已推荐画家：{', '.join(str(x) for x in recommended[:6])}")
     if pending:
         parts.append(f"待澄清：{str(pending)[:80]}")
     docs = ledger.get("uploaded_docs") or []

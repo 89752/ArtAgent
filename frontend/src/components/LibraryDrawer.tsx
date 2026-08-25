@@ -14,7 +14,6 @@ function badgeForDoc(d: Doc): ReactNode {
     if (d.status === "active") {
       const caps = [
         d.supports_timeline ? "时间线" : null,
-        d.supports_recommendation ? "推荐" : null,
       ]
         .filter(Boolean)
         .join("/");

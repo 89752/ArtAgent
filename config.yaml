@@ -33,10 +33,23 @@ models:
   judge_api_key: $JUDGE_API_KEY # 缺省回落 LLM_API_KEY
   judge_base_url: $JUDGE_BASE_URL # 缺省回落 LLM_BASE_URL
 
+  # P2 角色注册表：均可省略并安全回落 main，避免未配置时改变线上行为。
+  cheap_model: $CHEAP_MODEL
+  cheap_api_key: $CHEAP_API_KEY
+  cheap_base_url: $CHEAP_BASE_URL
+  reasoning_model: $REASONING_MODEL
+  reasoning_api_key: $REASONING_API_KEY
+  reasoning_base_url: $REASONING_BASE_URL
+  # 复杂问题使用 reasoning；设为 false 可一键回退至 main，便于成本/质量 A/B。
+  routing_enabled: true
+
   request_timeout_sec: 180
   max_retries: 2
 
 retrieval:
+  # Agentic RAG：覆盖不足时至多改写一次并二次检索；可关闭以做回归/A-B 对照。
+  agentic_enabled: true
+  agentic_min_evidence: 3
   # 用户 PDF 整页图检索的嵌入模型（文搜图）
   # provider: dashscope（默认）或 openai（OpenAI 兼容 /embeddings 端点）
   # 切换嵌入模型会改变向量空间，旧向量不可比，需重建 user_pdf_images collection

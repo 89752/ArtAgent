@@ -313,14 +313,22 @@ class PdfBm25Retriever:
 
     def _load_chunks(self) -> dict[str, list[tuple[str, dict]]]:
         from src.retrieval.hybrid import get_or_create_chroma_collection
-        from src.retrieval.userdoc_text_retriever import COLLECTION_NAME
+        from src.retrieval.userdoc_text_retriever import (
+            COLLECTION_NAME,
+            FALLBACK_COLLECTION_NAME,
+        )
 
-        collection = get_or_create_chroma_collection(COLLECTION_NAME)
-        count = collection.count()
+        collections = [
+            get_or_create_chroma_collection(COLLECTION_NAME),
+            get_or_create_chroma_collection(FALLBACK_COLLECTION_NAME),
+        ]
+        count = sum(collection.count() for collection in collections)
         if self._cache and self._cache.get("count") == count and count:
             return self._cache["groups"]
         groups: dict[str, list[tuple[str, dict]]] = {"zh": [], "en": []}
-        if count:
+        for collection in collections:
+            if not collection.count():
+                continue
             data = collection.get(include=["documents", "metadatas"])
             for doc, meta in zip(data.get("documents") or [], data.get("metadatas") or []):
                 lang = "zh" if _cjk_ratio(doc or "") > 0.2 else "en"

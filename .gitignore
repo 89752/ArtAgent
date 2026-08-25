@@ -18,13 +18,13 @@ SemArt/
 # test fixture data files: keep local only (user 2026-08-04)
 /tests/fixtures/
 
-# deployment / generated / personal artifacts: keep local only (user 2026-08-04)
-/Dockerfile
-/docker-compose.yml
-.dockerignore
+# generated / personal artifacts: keep local only
 eval/agent_eval_report.md
+eval/memory_reliability_report.json
 eval/results.md
 eval/case_cache/
+eval/sandbox_pytest.xml
+.sandbox/
 
 # ── Python ──
 __pycache__/

@@ -28,6 +28,7 @@ from src.memory import feedback as fb_mod
 from src.memory import summary as summary_mod
 from src.observability import runs as runs_mod
 from src.tasks import store as tasks_mod
+from src.platform import users as users_store
 
 os.environ["RATE_LIMIT_RPM"] = "0"
 
@@ -50,7 +51,7 @@ db.close_all()
 
 
 @pytest.fixture(autouse=True)
-def clean_tables():
+def clean_tables(client):
     # 重新断言各存储路径：pytest 命令行顺序可能让其他文件的 fixture
     # 改写本文件的模块全局 _DB_PATH，导致跨文件数据串扰
     documents_store.DB_PATH = _TMP / "documents.db"
@@ -66,6 +67,9 @@ def clean_tables():
     tasks_mod._DB_PATH = _TMP / "tasks.db"
     tasks_mod._db_ready = False
     db.close_all()
+    users_store._reset_for_tests(_TMP / "platform.db")
+    users_store.ensure_default_user()
+    client.headers.update({"Authorization": f"Bearer {users_store.issue_session_token('web_user')}"})
     store.DB_PATH = _TMP / "user_images.db"
     engine.USER_IMAGE_ROOT = _TMP / "uploads" / "user_images"
     store.init_db()

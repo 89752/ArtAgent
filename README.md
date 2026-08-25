@@ -37,6 +37,24 @@ npm run dev
 npm run build
 ```
 
+### 容器部署与运维
+
+```bash
+docker compose up --build
+curl http://127.0.0.1:7860/health  # 进程存活
+curl http://127.0.0.1:7860/ready   # SQLite 等本地依赖已就绪
+```
+
+本地隔离验收使用 `docker-compose.sandbox.yml`，它只运行镜像内的源码；需要不重建镜像、直接验收当前工作区改动时，再叠加开发覆盖层：
+
+```bash
+docker compose -f docker-compose.sandbox.yml -f docker-compose.sandbox.dev.yml up
+```
+
+`.sandbox/` 是本地运行数据和索引缓存，不应提交。
+
+`docker-compose.yml` 会将本地 `data/` 挂载为持久化目录；密钥仍只从 `.env` 读取。运行轨迹默认仅保存脱敏元数据 30 天，可通过 `TRACE_RETENTION_DAYS` 调整。模型提供商返回 `usage_metadata` 时会优先采用真实 token 用量，否则回退字符估算。
+
 > 仓库不包含数据资产。运行前需要本地 `data/`（核心库 CSV、Chroma 向量索引、SQLite 记忆库、`data/core/images/` 图片）；只有 CSV 时可执行 `python scripts/06_index_core.py --csv data/core/artworks_core.csv` 重建索引。
 
 ## 应用场景
@@ -47,7 +65,7 @@ npm run build
 | 风格对比与演变 | 对比多位画家或画作的风格差异，梳理某位画家、某个流派的风格演变 |
 | 偏好推荐 | 根据你表达的审美偏好，推荐合适的画家与作品 |
 | 图像视觉分析 | 从构图、色彩、笔触等角度分析画作 |
-| 专家技能 | 风格对比、时间线梳理、偏好推荐、画作深度分析、文档总结、展览前期研究 |
+| 专家技能 | 风格对比、时间线梳理、画作深度分析、文档总结、展览前期研究 |
 | 文档与表格解读 | 上传 PDF / Excel 后解读内容，可定位到具体页 |
 | 数据统计 | 统计库内作品的流派、年代、技法分布 |
 | 记忆与收藏 | 记住你的偏好并跨会话调用，维护收藏清单 |
@@ -55,8 +73,8 @@ npm run build
 ## 核心能力
 
 - **本地艺术库优先**：知识来自合并后的核心库（Wikidata + SemArt + AIC），查不到时再联网（Tavily / Wikipedia / Met 馆藏 API），不硬编。
-- **ReAct + 澄清**：信息不足先反问；对比 / 时间线 / 推荐走专家技能；检索不到时联网兜底。
-- **23 个基础工具 + 6 个专家技能**：基础工具覆盖语义检索、精确查询、画家知识、图像定位与视觉分析、PDF 整页图读取、色彩分析、聚合统计、馆藏检索、维基百科、联网搜索、记忆读写删、收藏清单 CRUD、并行调研；专家技能为风格对比、时间线梳理、偏好推荐、画作深度分析、文档总结、展览前期研究。
+- **ReAct + 澄清**：信息不足先反问；对比 / 时间线可调用结构化技能；偏好与推荐作为记忆增强的普通检索问答处理；检索不到时联网兜底。
+- **基础工具 + 5 个专家技能**：基础工具覆盖语义检索、精确查询、画家知识、图像定位与视觉分析、PDF 整页图读取、色彩分析、聚合统计、馆藏检索、维基百科、联网搜索、记忆读写删、收藏清单 CRUD、并行调研；专家技能为风格对比、时间线梳理、画作深度分析、文档总结、展览前期研究。
 - **长期记忆（可选增强）**：显式“记住 / 忘记”开箱即用；可开启自动抽取（`MEMORY_AUTO_EXTRACT=1`）、语义冲突合并（`MEMORY_SMART_MERGE=1`）、跨会话用户画像（`MEMORY_PROFILE_REFRESH=1`）；全部存本地 SQLite，记忆面板按条查看 / 删除。
 - **文档与表格**：上传 PDF / Excel，MinerU 精准解析（可选）、扫描页视觉读取，回答可引用《文档》第 N 页。
 - **Web 界面**：SSE 流式展示思考链、多会话后台生成（回答未结束也能开新对话）、停止生成、侧栏折叠 / 拖拽调宽、深色模式、参考来源卡片、记忆面板、对话反馈。
@@ -92,9 +110,22 @@ npm run build
 
 ```bash
 python eval/agent_eval_v2.py --retrieval-n 100   # 离线检索 Recall@5
-python eval/agent_eval_v2.py                     # 全量（在线评估）
+python eval/agent_eval_v2.py --agentic-ab-n 100  # 普通检索 / Agentic RAG 的质量、覆盖、延迟、调用次数对照
+python eval/memory_reliability_eval.py            # 50 写入 / 50 召回 / 20 冲突、过时、遗忘可靠性门禁
+python eval/agent_eval_v2.py                     # 核心在线评估（不含实时联网/上传夹具/Multi-Agent）
+python eval/agent_eval_v2.py --limit 10 --offset 0  # 只跑 10 条核心单轮；已完成缓存会自动复用
+python eval/agent_eval_v2.py --limit 10 --offset 10 # 接着跑第 11–20 条；加 --refresh 才会强制重跑
+python eval/agent_eval_v2.py --case-ids c-034,c-042,c-043,c-044,c-046,c-047 --refresh  # 仅复测状态用例
+python eval/agent_eval_v2.py --full --include-live --include-artifact-fixtures  # 扩展能力验收
 pytest                                           # 快档离线测试
 ```
+
+单轮核心集以每条用例可独立复现为原则：带前置记忆或收藏的用例会自行初始化状态，
+因此不会因分批执行而误报失败。实时联网、真实文件/图片夹具和 Multi-Agent 则单列为
+可选能力集，避免外部服务或夹具缺失污染核心基线。
+
+模型路由与 Agentic RAG 均可安全回退，便于灰度或 A/B：`MODEL_ROUTING_ENABLED=0`
+会让复杂问题使用主模型；`AGENTIC_RAG_ENABLED=0` 则停用二次改写检索。登录后可在侧栏的“运行中心”查看本账号的任务状态、模型角色分布、近期轨迹与每步产物；任务支持暂停、继续、取消、失败重试及服务重启后的自动续跑。
 
 最近基线（2026-08）：
 

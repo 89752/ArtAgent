@@ -55,7 +55,6 @@ def test_load_skills_finds_all_skills():
         "exhibition_research",
         "art_comparison",
         "art_timeline",
-        "art_recommendation",
     } <= ids
     by_id = {s.id: s for s in skills}
     assert "exact_lookup" in by_id["artwork_deep_analysis"].tools
@@ -69,16 +68,13 @@ def test_load_skills_finds_all_skills():
     assert {"subjects", "dimensions", "comparison", "conclusion"} <= set(comp.output_schema)
     tl = by_id["art_timeline"]
     assert {"subject", "periods", "conclusion"} <= set(tl.output_schema)
-    rec = by_id["art_recommendation"]
-    assert {"candidates", "by_artist"} <= set(rec.output_schema)
-
-
 def test_register_skills_returns_guard_valid_tools():
     tools = register_skills()
     names = {t.name for t in tools}
     assert {"skill_artwork_deep_analysis", "skill_document_summary",
             "skill_exhibition_research", "skill_art_comparison",
-            "skill_art_timeline", "skill_art_recommendation"} <= names
+            "skill_art_timeline"} <= names
+    assert "skill_art_recommendation" not in names
     skill_tool = [t for t in tools if t.name == "skill_document_summary"][0]
     schema = skill_tool.args_schema.model_json_schema() if hasattr(
         skill_tool.args_schema, "model_json_schema"

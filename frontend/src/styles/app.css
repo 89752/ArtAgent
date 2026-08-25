@@ -171,6 +171,7 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tb-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.tb-menu { display: none; flex-shrink: 0; }
 .tb-btn {
   display: flex; align-items: center; gap: 7px;
   border: 1px solid var(--line); background: #ffffff55; cursor: pointer;
@@ -381,6 +382,8 @@ body {
 .chip .chip-status.warn { color: var(--gold-deep); }
 .chip .chip-status.action { cursor: pointer; text-decoration: underline dashed;
   text-underline-offset: 2px; }
+button.chip-status.action { border: 0; padding: 0; background: transparent; font: inherit; }
+.chip-status.action:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 .chip-x {
   flex-shrink: 0; width: 20px; height: 20px; border: none; border-radius: 50%;
   background: transparent; color: var(--ink-faint); font-size: 1rem; line-height: 1;
@@ -409,6 +412,11 @@ body {
 }
 .btn-attach svg { width: 19px; height: 19px; }
 .btn-attach:hover { background: var(--paper-3); color: var(--gold-deep); }
+.btn-attach:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.file-input-visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 #msg {
   flex: 1; min-width: 0; border: none; outline: none; resize: none; background: transparent;
   font-family: var(--serif-cn); font-size: 1.02rem; color: var(--ink); line-height: 1.6;
@@ -847,6 +855,7 @@ body {
 
 /* ══════════════ 响应式 ══════════════ */
 @media (max-width: 900px) {
+  .tb-menu { display: inline-flex; }
   .side-resizer { display: none; }
   #btn-side-collapse { display: none; }
   #app.side-collapsed #sidebar { width: 280px !important; padding: 22px 16px 16px; overflow: visible; }
@@ -1106,4 +1115,3 @@ body {
   padding-top: 8px;
 }
 .ar-empty { color: var(--ink-faint); font-size: 0.76rem; margin: 0; }
-

@@ -28,8 +28,12 @@ from src.ingestion.mineru_parser import parse_pages as mineru_parse_pages
 from src.ingestion.multimodal_indexer import index_page_images
 from src.ingestion.page_classifier import DocRoutePlan, classify_document
 from src.ingestion.pdfplumber_fallback import parse_pages as pdfplumber_parse_pages
-from src.retrieval.hybrid import get_bge_m3_embed_batch, get_or_create_chroma_collection
-from src.retrieval.userdoc_text_retriever import COLLECTION_NAME as TEXT_COLLECTION
+from src.retrieval.hybrid import get_or_create_chroma_collection
+from src.retrieval.userdoc_text_retriever import (
+    COLLECTION_NAME as TEXT_COLLECTION,
+    FALLBACK_COLLECTION_NAME as TEXT_FALLBACK_COLLECTION,
+    get_userdoc_text_indexer,
+)
 from src.utils.logging_config import get_logger, log_event
 
 load_dotenv()
@@ -45,11 +49,15 @@ UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", "./data/uploads"))
 
 
 def delete_pdf_vectors(doc_id: str) -> dict:
-    """删除该 doc_id 在 user_pdf_text / user_pdf_images 中的全部向量。"""
+    """删除该 doc_id 的 BGE/离线文字向量及多模态页面向量。"""
     from src.retrieval.userdoc_image_retriever import COLLECTION_NAME as IMAGE_COLLECTION
 
     deleted = {"text": 0, "images": 0}
-    for name, col_name in (("text", TEXT_COLLECTION), ("images", IMAGE_COLLECTION)):
+    for name, col_name in (
+        ("text", TEXT_COLLECTION),
+        ("text", TEXT_FALLBACK_COLLECTION),
+        ("images", IMAGE_COLLECTION),
+    ):
         collection = get_or_create_chroma_collection(col_name)
         if collection.count() == 0:
             continue
@@ -57,7 +65,7 @@ def delete_pdf_vectors(doc_id: str) -> dict:
             hits = collection.get(where={"doc_id": doc_id}, include=["metadatas"])
             if hits["ids"]:
                 collection.delete(where={"doc_id": doc_id})
-                deleted[name] = len(hits["ids"])
+                deleted[name] += len(hits["ids"])
         except Exception as e:  # noqa: BLE001
             logger.warning("[pipeline] 清理 %s collection 失败 doc_id=%s: %s", col_name, doc_id, e)
     return deleted
@@ -146,7 +154,7 @@ def _context_header(doc_name: str, section: str) -> str:
 
 
 def index_text_chunks(chunks, doc_name: str = "") -> int:
-    """BGE 批量编码 chunk 并写入 user_pdf_text collection。
+    """编码文字 chunk 并写入与编码器兼容的用户文档 collection。
 
     上下文头：向量化时拼接 [文档 | 章节] 头（只影响向量与展示，
     不改存储——documents 仍是原始 content，header 落 metadata 供展示复用；
@@ -154,8 +162,8 @@ def index_text_chunks(chunks, doc_name: str = "") -> int:
     """
     if not chunks:
         return 0
-    collection = get_or_create_chroma_collection(TEXT_COLLECTION)
-    embed_batch = get_bge_m3_embed_batch()
+    collection_name, embed_batch = get_userdoc_text_indexer()
+    collection = get_or_create_chroma_collection(collection_name)
     headers = [_context_header(doc_name, c.section) for c in chunks]
     embed_inputs = [
         f"{h}\n{c.content}" if h else c.content for h, c in zip(headers, chunks)
@@ -170,7 +178,10 @@ def index_text_chunks(chunks, doc_name: str = "") -> int:
             for c, h in zip(chunks, headers)
         ],
     )
-    logger.info("[text_index] doc_id=%s 文字 chunk 入库 %d 条", chunks[0].doc_id, len(chunks))
+    logger.info(
+        "[text_index] doc_id=%s 文字 chunk 入库 %d 条（collection=%s）",
+        chunks[0].doc_id, len(chunks), collection_name,
+    )
     return len(chunks)
 
 

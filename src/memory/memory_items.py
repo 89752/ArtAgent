@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -23,7 +24,10 @@ from typing import Optional
 
 from src.data import db
 
-_DB_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "memory"
+_DB_DIR = Path(os.getenv(
+    "ARTAGENT_MEMORY_DIR",
+    str(Path(__file__).resolve().parent.parent.parent / "data" / "memory"),
+))
 _DB_PATH = _DB_DIR / "agent_memory.db"
 
 # RLock：add_memory 持有锁时还会调用 _audit（内部再次加锁）
@@ -59,7 +63,10 @@ def clear_active_user_id() -> None:
 
 def _get_conn() -> sqlite3.Connection:
     global _db_ready
-    conn = db.get_conn(_DB_PATH)
+    # SQLite migrations may append columns in a different physical order than
+    # a fresh schema. Named rows keep old installations from being decoded with
+    # the fresh-table tuple layout.
+    conn = db.get_conn(_DB_PATH, row_factory=sqlite3.Row)
     if not _db_ready:
         conn.execute(
             """
@@ -185,6 +192,20 @@ def _days_since(iso: str) -> float:
         return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def is_stale(item: dict) -> bool:
+    """Whether an item has passed its explicit validity window.
+
+    Stale memories remain auditable and visible in management views, but are
+    withheld from agent recall so an old temporary preference cannot silently
+    steer a current answer.
+    """
+    try:
+        valid_days = int(item.get("expected_valid_days"))
+    except (TypeError, ValueError):
+        return False
+    return valid_days > 0 and _days_since(str(item.get("updated_at") or "")) > valid_days
 
 
 def _capacity_limits() -> tuple[int, int]:
@@ -583,6 +604,10 @@ def search_memories(
         sql += " AND (thread_id IS NULL OR thread_id = '')"
     rows = conn.execute(sql + " ORDER BY updated_at DESC", params).fetchall()
     items = [_row_to_dict(r) for r in rows]
+    stale_items = [item for item in items if is_stale(item)]
+    items = [item for item in items if not is_stale(item)]
+    for item in stale_items:
+        _audit(user_id, item.get("id"), "stale_skip", query[:200])
     if not items:
         return []
 
@@ -691,27 +716,87 @@ def delete_memory(user_id: str, item_id: str) -> bool:
     return False
 
 
-def delete_by_entity(user_id: str, entity: str, kind: Optional[str] = None) -> int:
-    """按实体软删除（forget(entity) 用）；返回删除条数。"""
-    sql = (
-        "UPDATE memory_items SET deleted_at = ? "
-        "WHERE user_id = ? AND entity = ? COLLATE NOCASE AND deleted_at IS NULL"
+def _entity_match_key(entity: str) -> str:
+    """把同一概念的常见实体后缀归一，供用户的遗忘请求使用。"""
+    text = re.sub(r"\s+", "", (entity or "")).casefold()
+    for suffix in ("时期", "风格", "流派", "艺术", "作品", "系列"):
+        if text.endswith(suffix) and len(text) > len(suffix):
+            return text[:-len(suffix)]
+    return text
+
+
+def _entity_match_keys(entity: str) -> set[str]:
+    """从工具参数中提取可用于匹配的实体核心词。"""
+    raw = _entity_match_key(entity)
+    if not raw:
+        return set()
+    keys = {raw}
+    # LLM 有时会把完整偏好句作为 forget.entity，例如“喜欢巴洛克时期…”。
+    # 去掉主语/态度词并保留流派、时期等实体核心，防止派生画像漏删。
+    trimmed = re.sub(
+        r"^(?:用户|我)?(?:特别)?(?:喜欢|喜爱|偏好|希望|想要|请|忘掉|忘记|删除)+",
+        "",
+        raw,
     )
-    params: list = [_now(), user_id, entity]
+    if trimmed:
+        keys.add(trimmed)
+        match = re.match(r"^(.+?)(?:时期|风格|流派|艺术|作品|系列)", trimmed)
+        if match and len(match.group(1)) >= 2:
+            keys.add(match.group(1))
+    return {key for key in keys if len(key) >= 2}
+
+
+def delete_by_entity(user_id: str, entity: str, kind: Optional[str] = None) -> int:
+    """按实体软删除（forget(entity) 用）。
+
+    自动抽取可能为同一偏好生成“巴洛克”与“巴洛克时期”这类近似实体；
+    用户明确遗忘时应一并删除，避免界面确认成功而记忆仍被注入。
+    """
+    targets = _entity_match_keys(entity)
+    if not targets:
+        return 0
+    sql = (
+        "SELECT id, entity, kind, content FROM memory_items "
+        "WHERE user_id = ? AND deleted_at IS NULL"
+    )
+    params: list = [user_id]
     if kind:
         sql += " AND kind = ?"
         params.append(kind)
+    rows = _get_conn().execute(sql, params).fetchall()
+    item_ids = []
+    for row in rows:
+        candidate = _entity_match_key(str(row["entity"] or ""))
+        entity_matches = bool(candidate) and any(
+            candidate == target or candidate in target or target in candidate
+            for target in targets
+        )
+        # 用户画像由原始记忆聚合而来；若保留包含已遗忘实体的旧画像，
+        # 它会绕过原始条目的软删除再次注入模型上下文。
+        profile_matches = (
+            kind is None
+            and row["kind"] == "profile"
+            and any(
+                target in _entity_match_key(str(row["content"] or ""))
+                for target in targets
+            )
+        )
+        if entity_matches or profile_matches:
+            item_ids.append(row["id"])
+    if not item_ids:
+        return 0
+    placeholders = ", ".join("?" for _ in item_ids)
     with _lock:
-        cur = _get_conn().execute(sql, params)
+        cur = _get_conn().execute(
+            f"UPDATE memory_items SET deleted_at = ? WHERE id IN ({placeholders}) "
+            "AND user_id = ? AND deleted_at IS NULL",
+            [_now(), *item_ids, user_id],
+        )
         _get_conn().commit()
     if cur.rowcount:
-        for row in _get_conn().execute(
-            "SELECT id FROM memory_items WHERE user_id = ? AND entity = ? "
-            "COLLATE NOCASE AND deleted_at IS NOT NULL",
-            (user_id, entity),
-        ).fetchall():
-            _chroma_delete(row[0])
-        _audit(user_id, None, "delete", f"entity={entity}")
+        for item_id in item_ids:
+            _chroma_delete(item_id)
+        _audit(user_id, None, "delete", f"entity={entity}; related={cur.rowcount}")
     return cur.rowcount
 
 

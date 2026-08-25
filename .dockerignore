@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+data
+__pycache__
+*.py[cod]
+.pytest_cache
+.codex-pytest-tmp-*
+.sandbox
+eval/sandbox_pytest.xml
+frontend/node_modules
+static/dist
+eval/case_cache

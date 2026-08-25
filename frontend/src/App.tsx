@@ -7,6 +7,7 @@ import { LibraryDrawer } from "./components/LibraryDrawer";
 import { LoginScreen } from "./components/LoginScreen";
 import { MemoryPanel } from "./components/MemoryPanel";
 import { OversizeModal } from "./components/OversizeModal";
+import { OperationsCenter } from "./components/OperationsCenter";
 import { SchemaModal } from "./components/SchemaModal";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
@@ -76,6 +77,10 @@ export default function App() {
         ui.closeModal("memory");
         return;
       }
+      if (ui.modal === "operations") {
+        ui.closeModal("operations");
+        return;
+      }
       if (ui.modal === "settings") {
         ui.closeModal("settings");
         return;
@@ -116,12 +121,13 @@ export default function App() {
       <input
         id="file-input"
         type="file"
+        className="file-input-visually-hidden"
         accept=".pdf,.csv,.xlsx,.xls,.jpg,.jpeg,.png,.webp"
-        hidden
         multiple
         onChange={onFileChange}
       />
       <MemoryPanel />
+      <OperationsCenter />
       <LibraryDrawer />
       <SchemaModal />
       <SettingsDialog />

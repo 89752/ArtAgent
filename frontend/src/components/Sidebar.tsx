@@ -5,6 +5,7 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconMessageSquarePlus,
+  IconInfo,
   IconSettings,
 } from "./icons";
 
@@ -69,6 +70,14 @@ export function Sidebar() {
         )}
 
         <div className="side-footer">
+          <button
+            type="button"
+            className="side-foot-btn"
+            onClick={() => openModal("operations")}
+          >
+            <IconInfo width={16} height={16} />
+            {!collapsed && <span>运行中心</span>}
+          </button>
           <button
             type="button"
             className="side-foot-btn"

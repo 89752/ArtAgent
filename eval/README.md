@@ -55,11 +55,11 @@ python eval/agent_eval_v2.py --retrieval-n 100   # 只跑检索（离线）
   缺省回落对话模型配置；
 - 跳过占比高时先恢复 API 可用性再重跑，勿把不完整报告当正式基线。
 
-> 2026-08-17 对齐当前图：行为/工具用例中的 compare_subjects /
-> timeline_by_periods / recommend_with_exclusions 已替换为对应技能
-> （skill_art_comparison / skill_art_timeline / skill_art_recommendation）；
+> 2026-08-23 对齐统一 ReAct：偏好表达/推荐不再是独立路由、工具或技能；
+> 它们以 `open_retrieval` 用例覆盖，预期走 `semantic_search` 并使用记忆上下文。
+> 对比和时间线仍可使用各自的结构化技能。
 > 路由决策诊断（route_diag）随旧路由管线移除，意图诊断改为规则
-> classify_intent（comparison / timeline / recommendation / general）。
+> classify_intent（comparison / timeline / general）。
 >
 > 2026-08-18 整体重建为统一数据集：单一 cases.json（60 条）
 > 每条只跑一次

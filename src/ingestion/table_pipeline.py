@@ -61,12 +61,14 @@ def ingest_table(
     llm 可注入（测试用 fake）；None 走确定性 LLM。
     """
     t0 = time.time()
+    owner_id = user_id or "web_user"
     doc_name = doc_name or Path(table_path).name
     path_obj = Path(table_path)
     file_size = path_obj.stat().st_size if path_obj.exists() else None
     documents_store.upsert_document(
         doc_id,
         kind="table",
+        user_id=owner_id,
         doc_name=doc_name, kb_id=kb_id,
         status="processing", started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
         file_path=str(table_path), file_size=file_size,
@@ -87,7 +89,7 @@ def ingest_table(
             "proposed_schema": inferred.to_dict(),
         }
         # kind-specific 字段存 metadata；返回仍保持旧扁平形状兼容
-        documents_store.upsert_document(doc_id, metadata={k: summary[k] for k in (
+        documents_store.upsert_document(doc_id, user_id=owner_id, metadata={k: summary[k] for k in (
             "table_path", "dataset_id", "rows", "cols", "sheet_name",
             "columns", "proposed_schema",
         )}, **{k: v for k, v in summary.items() if k not in (
@@ -99,7 +101,7 @@ def ingest_table(
         return {"doc_id": doc_id, **summary}
     except Exception as e:  # noqa: BLE001 — 失败落状态供前端展示
         logger.exception("[table] 入库失败 doc_id=%s", doc_id)
-        documents_store.upsert_document(doc_id, status="failed", error=str(e))
+        documents_store.upsert_document(doc_id, user_id=owner_id, status="failed", error=str(e))
         raise
 
 
@@ -129,7 +131,8 @@ def confirm_table_schema(
     空串/None 表示该角色无列。entity_col 为必填——它是模糊匹配与排除逻辑的
     锚点，连实体列都没有的表无法接入任何管线（报错让用户重选）。
     """
-    st = documents_store.get_document(doc_id)
+    owner_id = user_id or "web_user"
+    st = documents_store.get_document(doc_id, owner_id)
     if not st or st.get("kind") != "table":
         raise KeyError(f"非表格文档：{doc_id}")
     if st.get("status") not in CONFIRMABLE_STATUS:
@@ -176,15 +179,13 @@ def confirm_table_schema(
             },
             "display_name": display_name or st.get("doc_name") or dataset_id,
             "supports_timeline": schema.supports_timeline,
-            "supports_recommendation": schema.supports_recommendation,
             "dataset_id": dataset_id,
         },
     }
-    documents_store.upsert_document(doc_id, **confirmed)
+    documents_store.upsert_document(doc_id, user_id=owner_id, **confirmed)
     log_event(logger, "table_confirm", doc_id=doc_id, dataset_id=dataset_id,
-              timeline=schema.supports_timeline,
-              recommendation=schema.supports_recommendation)
-    return documents_store.get_document(doc_id)
+              timeline=schema.supports_timeline)
+    return documents_store.get_document(doc_id, owner_id)
 
 
 def unregister_table(dataset_id: str) -> None:
@@ -199,7 +200,7 @@ def unregister_table(dataset_id: str) -> None:
 def restore_active_tables() -> int:
     """服务重启后从状态存储重建注册（幂等）；返回恢复的数据源个数。"""
     restored = 0
-    for st in documents_store.list_documents():
+    for st in documents_store.list_all_documents():
         if st.get("kind") != "table" or st.get("status") != "active":
             continue
         cs = st.get("confirmed_schema") or {}

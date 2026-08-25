@@ -983,7 +983,7 @@ def _messages(n_turns: int) -> list:
 def test_load_save_roundtrip():
     _summary_tmp_db()
     summary_mod._save_summary("c1", "u1", "摘要内容", 10)
-    assert summary_mod.load_summary("c1") == "摘要内容"
+    assert summary_mod.load_summary("c1", "u1") == "摘要内容"
     assert summary_mod.load_summary("missing") == ""
 
 
@@ -1000,7 +1000,7 @@ def test_maybe_summarize_incremental_and_stored():
     fake_llm = lambda prompt: "压缩后的摘要"
     out = summary_mod.maybe_summarize(_messages(10), "c1", "u1", llm=fake_llm)
     assert out == "压缩后的摘要"
-    assert summary_mod.load_summary("c1") == "压缩后的摘要"
+    assert summary_mod.load_summary("c1", "u1") == "压缩后的摘要"
     with patch.object(summary_mod, "_summarize") as mock:
         out2 = summary_mod.maybe_summarize(_messages(11), "c1", "u1", llm=fake_llm)
     mock.assert_not_called()
@@ -1019,7 +1019,7 @@ def test_volume_trigger_fires_below_turn_threshold():
         _messages(5), "c1", "u1", llm=fake_llm, volume_chars=20000
     )
     assert out == "体积触发的摘要"
-    assert summary_mod.load_summary("c1") == "体积触发的摘要"
+    assert summary_mod.load_summary("c1", "u1") == "体积触发的摘要"
 
 
 def test_low_volume_below_turn_threshold_skips():
@@ -1134,6 +1134,18 @@ def test_delete_by_entity_and_clear():
     mi.add_memory("test-user", "莫奈睡莲", entity="莫奈")
     assert mi.delete_by_entity("test-user", "莫奈") == 2
     assert mi.list_memories("test-user") == []
+
+
+def test_delete_by_entity_removes_equivalent_entity_variants():
+    mi.add_memory("test-user", "喜欢巴洛克的强烈明暗对照", entity="巴洛克")
+    mi.add_memory("test-user", "偏好巴洛克时期的戏剧性光影", entity="巴洛克时期")
+    mi.add_memory(
+        "test-user", "用户画像：喜欢印象派，也偏好巴洛克的强烈明暗对照",
+        kind="profile", entity="user_profile",
+    )
+    mi.add_memory("test-user", "喜欢莫奈", entity="莫奈")
+    assert mi.delete_by_entity("test-user", "喜欢巴洛克时期的强烈明暗对照") == 3
+    assert [item["entity"] for item in mi.list_memories("test-user")] == ["莫奈"]
     mi.add_memory("test-user", "新记忆", entity="X")
     assert mi.clear_user_memories("test-user") >= 1  # 硬删全部行（含已软删）
     assert mi.list_memories("test-user") == []

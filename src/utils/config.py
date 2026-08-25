@@ -35,6 +35,15 @@ _ENV_MAP: dict[str, str] = {
     "JUDGE_MODEL": "models.judge_model",
     "JUDGE_API_KEY": "models.judge_api_key",
     "JUDGE_BASE_URL": "models.judge_base_url",
+    "CHEAP_MODEL": "models.cheap_model",
+    "CHEAP_API_KEY": "models.cheap_api_key",
+    "CHEAP_BASE_URL": "models.cheap_base_url",
+    "REASONING_MODEL": "models.reasoning_model",
+    "REASONING_API_KEY": "models.reasoning_api_key",
+    "REASONING_BASE_URL": "models.reasoning_base_url",
+    "MODEL_ROUTING_ENABLED": "models.routing_enabled",
+    "AGENTIC_RAG_ENABLED": "retrieval.agentic_enabled",
+    "AGENTIC_RAG_MIN_EVIDENCE": "retrieval.agentic_min_evidence",
     "PDF_IMAGE_EMBED_PROVIDER": "retrieval.pdf_image_embed_provider",
     "PDF_IMAGE_EMBED_MODEL": "retrieval.pdf_image_embed_model",
     "PDF_IMAGE_EMBED_API_KEY": "retrieval.pdf_image_embed_api_key",
@@ -62,6 +71,13 @@ def _defaults() -> dict[str, Any]:
             "judge_model": None,
             "judge_api_key": None,
             "judge_base_url": None,
+            "cheap_model": None,
+            "cheap_api_key": None,
+            "cheap_base_url": None,
+            "reasoning_model": None,
+            "reasoning_api_key": None,
+            "reasoning_base_url": None,
+            "routing_enabled": True,
             "request_timeout_sec": 180,
             "max_retries": 2,
         },
@@ -70,6 +86,8 @@ def _defaults() -> dict[str, Any]:
             "pdf_image_embed_model": "tongyi-embedding-vision-plus",
             "pdf_image_embed_api_key": None,
             "pdf_image_embed_base_url": None,
+            "agentic_enabled": True,
+            "agentic_min_evidence": 3,
         },
         "governance": {
             "tool_timeout_sec": 60,
@@ -203,3 +221,19 @@ def get_float(dotted: str, default: float, lo: float | None = None) -> float:
     if lo is not None:
         value = max(lo, value)
     return value
+
+
+def get_bool(dotted: str, default: bool = False) -> bool:
+    """Read a boolean config value without treating arbitrary strings as true."""
+    raw = get(dotted, default)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+    return bool(default)

@@ -10,11 +10,11 @@ collection 级隔离、不做物理合并。当前实际存在两个异构向量
 search 流程:
   1. 扇出：各数据源独立检索（BGE 空间数据源各自用共享 BGE 编码 query；
      多模态数据源走 DashScope 编码另查一路）
-  2. RRF（Reciprocal Rank Fusion）按源内排名融合多路结果——
-     跨数据源的 score 绝对值不可比，排名可比
-  3. 按 page_id/doc_id 去重（应对双路线页面被多路命中）；
-     无 page_id/doc_id 的结果（如核心库行）不参与去重
-  4. Jina Reranker v3.5 API 精排：粗排 top 40 重排后取 top_k；
+  2. RRF（Reciprocal Rank Fusion）按稳定结果身份累计多路排名分——
+     语义与词法命中同一作品/chunk 时合并加分，跨数据源的原生 score
+     绝对值不可比，排名可比
+  3. 去重并处理双路线页面：同页文字与整页图同时命中时保留文字证据
+  4. Jina Reranker v3.5 API 精排：粗排 top 20 重排后取 top_k；
      整页图等非文本候选不参与精排、保持原槽位；精排失败降级粗排原序；
      RERANK_ENABLED=0 或 search(rerank=False) 可关闭（eval A/B 用）
 """
@@ -36,10 +36,19 @@ load_dotenv()
 
 logger = get_logger("retrieval.hybrid")
 
+
 def _chroma_dir() -> Path:
     """惰性解析 Chroma 目录（首次使用时），避免测试在 import 期修改 INDEX_DIR
     导致全局索引路径被污染（2026-08-04 全量套件串扰修复）。"""
     return Path(os.getenv("INDEX_DIR", "./data/index")) / "chroma"
+
+
+def _core_chroma_dir() -> Path:
+    """核心作品向量索引目录；沙盒可单独只读挂载，避免与用户写入混用。"""
+    root = os.getenv("CORE_INDEX_DIR", "").strip()
+    return (Path(root) if root else Path(os.getenv("INDEX_DIR", "./data/index"))) / "chroma"
+
+
 # 核心库用多语言模型（中文提问 + 英文描述）：1024 维，~2.2GB，本地缓存后全离线
 EMBEDDING_MODEL_M3 = "BAAI/bge-m3"
 # bge-m3 默认 max_seq_length=8192：长文本 padding 会让批量编码极慢。
@@ -61,7 +70,7 @@ CHANNEL_WEIGHTS: dict[str, float] = {
     "user_table": 1.0,
     "user_pdf_text": 1.0,
     "user_pdf_image": 0.5,  # 整页图是兜底证据（同页有文字已被 _dedup 丢弃），降权防干扰画作检索
-    "met_museum": 0.5,      # 实时 API 预留：只有元数据，低权重
+    "met_museum": 0.5,  # 实时 API 预留：只有元数据，低权重
     "rijksmuseum": 0.5,
 }
 
@@ -80,12 +89,11 @@ def _channel_weight(source: str) -> float:
 
 # 精排：RRF 粗排后送 reranker 重排的候选池大小。
 # 实测（2026-08-01，n=25 基线口径）：pool=20 时池召回 68.0%、pool=40 时
-# 76.0%，精排两次都 100% 兑现池内召回——瓶颈在池召回不在排序，默认取 40。
-# 池子越大召回越高、单次精排耗时越长，可按延迟预算调小（如 15）。
+# 76.0%；当前按调用延迟与费用预算默认取 20，可通过 RERANK_POOL 调大。
 try:
-    RERANK_POOL = int(os.getenv("RERANK_POOL", "40"))
+    RERANK_POOL = int(os.getenv("RERANK_POOL", "20"))
 except ValueError:
-    RERANK_POOL = 40
+    RERANK_POOL = 20
 
 # 不参与文本精排的源：整页图 content 只是占位标签，精排打分无意义且会
 # 把多模态高相似页错误压底——它们保持粗排原槽位
@@ -104,21 +112,31 @@ _NON_RERANK_SOURCES = {"user_pdf_image"}
 _chroma_local = threading.local()
 
 
-def _get_thread_local_chroma_client():
-    client = getattr(_chroma_local, "client", None)
-    path = str(_chroma_dir())
-    if client is None or getattr(_chroma_local, "path", None) != path:
+def _get_thread_local_chroma_client(path: Path | None = None):
+    target = str(path or _chroma_dir())
+    clients = getattr(_chroma_local, "clients", {})
+    client = clients.get(target)
+    if client is None:
         import chromadb
 
-        client = chromadb.PersistentClient(path=path)
-        _chroma_local.client = client
-        _chroma_local.path = path
+        client = chromadb.PersistentClient(path=target)
+        clients[target] = client
+        _chroma_local.clients = clients
     return client
 
 
 def get_or_create_chroma_collection(name: str):
     """按名获取或创建 Chroma collection（每线程单例；用户上传文档用）。"""
     return _get_thread_local_chroma_client().get_or_create_collection(name)
+
+
+def get_core_chroma_collection(name: str = "core"):
+    """只读取得核心作品集合；未索引时返回 None，保留词法降级路径。"""
+    try:
+        return _get_thread_local_chroma_client(_core_chroma_dir()).get_collection(name)
+    except Exception as exc:  # 核心索引可选，不可因缺失中断普通检索
+        logger.warning("[core_chroma] collection unavailable: %s", exc)
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -140,7 +158,7 @@ def _get_bge_m3_model():
         raise RuntimeError(
             f"bge-m3 嵌入模型未在本地缓存，无法加载（{EMBEDDING_MODEL_M3}）。"
             "请先手动下载一次（可设 HF_ENDPOINT=https://hf-mirror.com 走镜像）："
-            f"python -c \"from sentence_transformers import SentenceTransformer; "
+            f'python -c "from sentence_transformers import SentenceTransformer; '
             f"SentenceTransformer('{EMBEDDING_MODEL_M3}', trust_remote_code=True)\""
         ) from e
     model.max_seq_length = BGE_M3_MAX_SEQ_LENGTH
@@ -163,9 +181,11 @@ def get_bge_m3_embed_batch() -> Callable[[list[str], int], list[list[float]]]:
     """返回 bge-m3 批量编码函数（索引用：内部批处理，CPU 上远快于逐条调用）。"""
 
     def embed_batch(texts: list[str], batch_size: int = 64) -> list[list[float]]:
-        return _get_bge_m3_model().encode(
-            texts, normalize_embeddings=True, batch_size=batch_size
-        ).tolist()
+        return (
+            _get_bge_m3_model()
+            .encode(texts, normalize_embeddings=True, batch_size=batch_size)
+            .tolist()
+        )
 
     return embed_batch
 
@@ -175,18 +195,67 @@ def get_bge_m3_embed_batch() -> Callable[[list[str], int], list[list[float]]]:
 # ------------------------------------------------------------------ #
 
 
+def _clean_identity_value(value: object) -> str:
+    """将 metadata 身份字段归一化；空值和 CSV 的 nan 不作为有效身份。"""
+    normalized = " ".join(str(value or "").split()).casefold()
+    return "" if normalized in {"", "nan", "none", "null"} else normalized
+
+
+def _fusion_identity(hit: RetrievalResult) -> tuple:
+    """返回跨检索通道稳定的结果身份，无可靠字段时退回对象身份。
+
+    同一核心作品的向量结果与 FTS 结果是两个 RetrievalResult 实例，但共享
+    dedup_key/artwork_id；PDF 的向量与 BM25 结果共享文档、页面和 chunk 内容。
+    身份必须在 RRF 之前解析，否则后置去重只能删副本，无法累计多路得分。
+    """
+    meta = hit.metadata
+    if hit.source == "core":
+        dedup_key = _clean_identity_value(meta.get("dedup_key"))
+        if dedup_key:
+            return ("core", "dedup_key", dedup_key)
+        artwork_id = _clean_identity_value(meta.get("artwork_id"))
+        if artwork_id:
+            return ("core", "artwork_id", artwork_id)
+        title = _clean_identity_value(meta.get("title"))
+        artist = _clean_identity_value(meta.get("artist") or meta.get("artist_name"))
+        if title or artist:
+            return ("core", "title_artist", title, artist)
+    elif hit.source == "user_pdf_text":
+        doc_id = _clean_identity_value(meta.get("doc_id"))
+        page_id = _clean_identity_value(meta.get("page_id"))
+        content = _clean_identity_value(hit.content)
+        if doc_id and content:
+            return ("pdf_text", doc_id, page_id, content)
+    return ("object", id(hit))
+
+
 def _rrf_fuse(per_source: list[list[RetrievalResult]]) -> list[RetrievalResult]:
-    """按源内排名做加权 RRF 融合排序（默认等权时与旧行为逐位一致）。"""
-    fused_scores: dict[int, float] = {}
+    """按稳定身份做加权 RRF；同一结果被多路命中时贡献真正累加。"""
+    fused_scores: dict[tuple, float] = {}
+    representatives: dict[tuple, RetrievalResult] = {}
+    first_seen: dict[tuple, int] = {}
+    sequence = 0
     for hits in per_source:
         weight = _channel_weight(hits[0].source) if hits else 1.0
+        seen_in_source: set[tuple] = set()
         for rank, hit in enumerate(hits):
-            fused_scores[id(hit)] = fused_scores.get(id(hit), 0.0) + weight / (
+            identity = _fusion_identity(hit)
+            # 单个检索器异常返回同一结果多次时，只计算其最高排名一次。
+            if identity in seen_in_source:
+                continue
+            seen_in_source.add(identity)
+            if identity not in representatives:
+                representatives[identity] = hit
+                first_seen[identity] = sequence
+                sequence += 1
+            fused_scores[identity] = fused_scores.get(identity, 0.0) + weight / (
                 _RRF_K + rank + 1
             )
-    all_hits = [hit for hits in per_source for hit in hits]
-    all_hits.sort(key=lambda h: -fused_scores[id(h)])
-    return all_hits
+    identities = sorted(
+        representatives,
+        key=lambda identity: (-fused_scores[identity], first_seen[identity]),
+    )
+    return [representatives[identity] for identity in identities]
 
 
 def _dedup(hits: list[RetrievalResult]) -> list[RetrievalResult]:
@@ -219,10 +288,7 @@ def _dedup(hits: list[RetrievalResult]) -> list[RetrievalResult]:
             if key in seen:
                 continue
             seen.add(key)
-        if (
-            h.source == "user_pdf_image"
-            and h.metadata.get("page_id") in text_pages
-        ):
+        if h.source == "user_pdf_image" and h.metadata.get("page_id") in text_pages:
             continue
         out.append(h)
     return out
@@ -240,7 +306,9 @@ def _rerank_enabled(override: Optional[bool]) -> bool:
     return os.getenv("RERANK_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
 
-def _rerank_fused(query: str, fused: list[RetrievalResult], top_k: int) -> list[RetrievalResult]:
+def _rerank_fused(
+    query: str, fused: list[RetrievalResult], top_k: int
+) -> list[RetrievalResult]:
     """
     粗排结果送 Jina Reranker v3.5 API 精排。
 
@@ -325,7 +393,11 @@ class HybridRetriever:
             if sources is not None and name not in sources and src_label not in sources:
                 continue
             r_dataset = getattr(retriever, "dataset_id", None)
-            if dataset_id is not None and r_dataset is not None and r_dataset != dataset_id:
+            if (
+                dataset_id is not None
+                and r_dataset is not None
+                and r_dataset != dataset_id
+            ):
                 continue
             try:
                 hits = retriever.search(query, top_k=fetch_k, filters=filters)
@@ -357,7 +429,11 @@ def get_hybrid_retriever() -> HybridRetriever:
         from src.retrieval.userdoc_text_retriever import UserDocTextRetriever
 
         hybrid = HybridRetriever()
-        if os.getenv("LEXICAL_ENABLED", "1").strip().lower() not in ("0", "false", "no"):
+        if os.getenv("LEXICAL_ENABLED", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        ):
             from src.retrieval.lexical import CoreLexicalRetriever, PdfBm25Retriever
 
             hybrid.register("core_lexical", CoreLexicalRetriever())

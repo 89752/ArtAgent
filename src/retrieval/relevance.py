@@ -1,7 +1,7 @@
 """
 检索结果相关性校正：通用轻量 LLM 过滤步骤。
 
-定位：recommendation 的 rec_filter 思路的通用化。向量检索（即便经
+定位：向量检索（即便经
 Jina Reranker v3.5 精排）仍会混入"形似而答非所问"的噪声候选；确定性管线把
 证据直接拼进合成 prompt，没有自救机会。本步骤在 HybridRetriever 之后、
 证据消费之前，用一次轻量确定性 LLM 调用剔掉不相关候选。
@@ -11,8 +11,6 @@ Jina Reranker v3.5 精排）仍会混入"形似而答非所问"的噪声候选�
   - general      在 general_tools 节点对 semantic_search 的 ToolMessage
                  结果过滤（图节点层，不进工具——工具内不藏 LLM 调用，
                  eval 与工具单测保持确定性）
-  - recommendation 保留其专用 rec_filter：它做特征匹配 + 排除 + 理由生成，
-                 不止相关性判断，通用过滤器不替代
   - timeline     无向量检索（结构化 group_by_axis），不适用
 
 纪律（与 reranker 相同）：过滤是增强不是依赖——任何失败返回原列表；
@@ -96,9 +94,9 @@ def llm_relevance_filter(
 
         model = llm
         if model is None:
-            from src.utils.llm import get_deterministic_llm
+            from src.utils.llm import get_cheap_llm
 
-            model = get_deterministic_llm()
+            model = get_cheap_llm()
         raw = model.invoke(prompt).content
         parsed = parse_json(raw)
     except Exception as e:  # noqa: BLE001 — 任何失败都降级原列表

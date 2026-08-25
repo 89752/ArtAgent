@@ -1,8 +1,8 @@
 """
 表格 schema 推断：LLM 看表头+前几行猜列角色，人工确认后生效。
 
-为什么必须有人工确认：猜错 entity_col 会让 recommendation
-的排除逻辑静默出错（排除了错误的行而不报错），比明显报错更危险——所以
+为什么必须有人工确认：猜错 entity_col 会让实体检索
+静默返回错误记录（而不报错），比明显报错更危险——所以
 本模块只产出"建议值"，确认/纠正权在用户（confirm 流程见 table_pipeline）。
 
 工程纪律：
@@ -103,6 +103,5 @@ def infer_table_schema(df: pd.DataFrame, table_name: str = "", llm=None) -> Infe
         logger, "schema_infer",
         table=table_name, entity=result.entity_col, axis=result.group_axis_col,
         desc=result.description_col, timeline=schema.supports_timeline,
-        recommendation=schema.supports_recommendation,
     )
     return result

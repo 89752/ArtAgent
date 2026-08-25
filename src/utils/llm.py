@@ -8,6 +8,7 @@
 """
 
 from functools import lru_cache
+from typing import Literal
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -55,6 +56,44 @@ def get_llm(temperature: float = 0.7) -> ChatOpenAI:
 def get_deterministic_llm() -> ChatOpenAI:
     """Temperature=0 for tool calling and routing decisions."""
     return get_llm(temperature=0.0)
+
+
+ModelRole = Literal["main", "cheap", "reasoning", "vision", "judge"]
+
+
+@lru_cache(maxsize=None)
+def get_role_llm(role: ModelRole = "main", temperature: float = 0.0) -> ChatOpenAI:
+    """Resolve a named model role with explicit, backwards-compatible fallback.
+
+    `cheap` is intended for bounded classification/rewrite work and `reasoning`
+    for explicitly complex planning.  Neither silently becomes mandatory: when
+    absent, both reuse the configured main model.
+    """
+    if role == "main":
+        return get_llm(temperature=temperature)
+    if role == "vision":
+        return get_vision_llm()
+    if role == "judge":
+        return get_judge_llm()
+    model = get(f"models.{role}_model") or get("models.llm_model")
+    api_key = get(f"models.{role}_api_key") or get("models.llm_api_key")
+    base_url = get(f"models.{role}_base_url") or get("models.llm_base_url")
+    missing = [name for name, value in (("model", model), ("api_key", api_key), ("base_url", base_url)) if not value]
+    if missing:
+        raise ValueError(f"模型角色 {role} 缺少配置：{', '.join(missing)}")
+    return ChatOpenAI(
+        model=model, api_key=api_key, base_url=base_url, temperature=temperature,
+        request_timeout=get_int("models.request_timeout_sec", 180, lo=1),
+        max_retries=get_int("models.max_retries", 2, lo=0),
+    )
+
+
+def get_cheap_llm() -> ChatOpenAI:
+    return get_role_llm("cheap", temperature=0.0)
+
+
+def get_reasoning_llm() -> ChatOpenAI:
+    return get_role_llm("reasoning", temperature=0.1)
 
 
 @lru_cache(maxsize=1)

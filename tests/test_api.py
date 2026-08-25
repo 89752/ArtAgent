@@ -65,7 +65,7 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _api_clean():
+def _api_clean(client):
     api._rate_buckets.clear()
     # 重新断言各存储路径：pytest 命令行顺序可能让其他文件的 fixture
     # 改写本文件的模块全局 _DB_PATH，导致跨文件数据串扰
@@ -84,6 +84,11 @@ def _api_clean():
     db.close_all()
     tasks_mod._reset_for_tests(_TMP / "tasks.db")
     users_store._reset_for_tests(_TMP / "platform.db")
+    # Business endpoints are authenticated in production.  API behavior tests
+    # use a real, server-issued token rather than the retired X-User-Id header.
+    users_store.ensure_default_user()
+    token = users_store.issue_session_token("web_user")
+    client.headers.update({"Authorization": f"Bearer {token}"})
     analysis_store.DB_PATH = _TMP / "user_images.db"
     analysis_engine.USER_IMAGE_ROOT = _TMP / "uploads" / "user_images"
     documents_store.init_db()
@@ -101,6 +106,22 @@ def test_thumb_url_variants():
     assert svc._thumb_url("https://x/a.jpg") == "https://x/a.jpg"
     assert svc._thumb_url("28496-early05.jpg") == "/api/images/28496-early05.jpg"
     assert svc._thumb_url("../a.jpg") == "/api/images/a.jpg"
+
+
+def test_operations_run_list_and_pause_endpoint(client):
+    runs_mod.record_run(
+        user_id="web_user", session_id="s-ops", intent="general",
+        model_calls=[{"role": "reasoning", "model": "test"}],
+    )
+    listed = client.get("/api/runs")
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["session_id"] == "s-ops"
+
+    task_id = tasks_mod.create_agent_job("研究任务", "web_user", ["收集资料"])
+    paused = client.post(f"/api/jobs/{task_id}/pause")
+    assert paused.status_code == 200 and paused.json()["ok"] is True
+    detail = client.get(f"/api/jobs/{task_id}").json()["job"]
+    assert detail["status"] == "paused"
 
 
 def test_parse_artworks_from_knowledge_sample_images():
@@ -121,6 +142,35 @@ def test_parse_artworks_from_knowledge_sample_images():
         {"title": "Impression, Sunrise", "author": "Claude Monet",
          "date": "", "image_file": "https://x/2.jpg"},
     ]
+
+
+def test_cards_are_limited_to_artworks_named_in_answer():
+    msgs = [ToolMessage(content=json.dumps([
+        {"title": "Water Lilies", "author": "Claude Monet", "date": "1916", "image_file": "a.jpg"},
+        {"title": "The Starry Night", "author": "Vincent van Gogh", "image_file": "b.jpg"},
+    ]), tool_call_id="search-1")]
+    cards = svc._parse_artworks_from_messages(msgs)
+    selected = svc._artworks_named_in_answer(
+        cards, "推荐《睡莲》（Water Lilies），它的色彩层次很适合你。"
+    )
+    assert selected == [{
+        "title": "Water Lilies", "author": "Claude Monet",
+        "date": "1916", "image_file": "a.jpg",
+    }]
+
+
+def test_source_allowlist_excludes_unmentioned_candidates():
+    msgs = [ToolMessage(content=json.dumps([
+        {"title": "Water Lilies", "author": "Claude Monet"},
+        {"title": "The Starry Night", "author": "Vincent van Gogh"},
+    ]), tool_call_id="rec-2")]
+    selected = [{"title": "Water Lilies", "author": "Claude Monet"}]
+    sources = svc._collect_sources(
+        msgs,
+        selected,
+        allowed_artworks={svc._artwork_identity(selected[0])},
+    )
+    assert sources == [{"kind": "artwork", "label": "《Water Lilies》 · Claude Monet"}]
 
 
 def test_answer_block_escapes_html():
@@ -192,6 +242,11 @@ def test_init_db_resets_zombie_processing(tmp_path):
 
 
 # ══════════════ Web API（会话/文档/图片） ══════════════
+def test_health_and_readiness_probes(client):
+    assert client.get("/health").json() == {"ok": True, "status": "live"}
+    assert client.get("/ready").json() == {"ok": True, "status": "ready"}
+
+
 def test_chat_empty_message_streams_done(client):
     with client.stream(
         "POST", "/api/chat", json={"message": "", "session_id": "s-empty"},
@@ -374,13 +429,15 @@ def test_memory_import_file_api(client):
 
 
 def test_metrics_api(client):
+    before = client.get("/api/metrics").json()
     runs_mod.record_run(
-        session_id="s-m", intent="general", tools=["web_search"],
+        user_id="web_user", session_id="s-m", intent="general", tools=["web_search"],
         context_chars=1000, tool_rounds=1, latency_ms=300.0,
     )
     m = client.get("/api/metrics").json()
-    assert m["count"] >= 1
-    assert m["latency_ms"]["avg"] >= 300.0
+    assert m["count"] == before.get("count", 0) + 1
+    # metrics 是最近窗口的聚合值；此前同用户的低延迟轨迹会拉低均值。
+    assert m["latency_ms"]["avg"] > 0
     assert m["tool_calls"]["web_search"] >= 1
 
 
@@ -404,7 +461,9 @@ def test_request_id_passthrough(client):
 
 # ══════════════ 任务化与重试 ══════════════
 def test_tasks_lifecycle_and_payload():
-    tid = tasks_mod.create_task("ingest_pdf", {"doc_id": "d1", "kind": "pdf"})
+    tid = tasks_mod.create_task(
+        "ingest_pdf", {"doc_id": "d1", "kind": "pdf", "user_id": "web_user"}
+    )
     assert tasks_mod.get_task(tid)["status"] == "pending"
     tasks_mod.update_task(tid, status="processing", progress=30)
     t = tasks_mod.get_task(tid)
@@ -425,14 +484,89 @@ def test_tasks_interrupted_recovery_and_retry():
     assert tasks_mod.reset_task(tid) is False
 
 
+def test_pending_ingestion_task_is_retriable_after_restart():
+    tid = tasks_mod.create_task("ingest_pdf", {"kind": "pdf"})
+
+    assert tasks_mod.mark_interrupted_on_startup() == 1
+    assert tasks_mod.get_task(tid)["status"] == "interrupted"
+    assert tasks_mod.reset_task(tid) is True
+
+
 def test_tasks_invalid_status_rejected():
     tid = tasks_mod.create_task("x")
     with pytest.raises(ValueError):
         tasks_mod.update_task(tid, status="bogus")
 
 
+def test_agent_job_checkpoints_each_plan_step():
+    tid = tasks_mod.create_agent_job("梳理印象派", "web_user", ["收集证据", "撰写结论"])
+    assert tasks_mod.get_task(tid)["step_index"] == 0
+    tasks_mod.update_task(tid, status="processing")
+    assert tasks_mod.advance_agent_job(tid, artifact={"kind": "step_answer", "content": "证据"})
+    halfway = tasks_mod.get_task(tid)
+    assert halfway["status"] == "processing"
+    assert halfway["step_index"] == 1
+    assert halfway["steps"][0]["status"] == "done"
+    assert halfway["artifacts"][0]["content"] == "证据"
+    assert tasks_mod.advance_agent_job(tid, artifact={"kind": "step_answer", "content": "结论"})
+    completed = tasks_mod.get_task(tid)
+    assert completed["status"] == "done"
+    assert completed["step_index"] == 2
+    assert len(completed["artifacts"]) == 2
+
+    retry_id = tasks_mod.create_agent_job("失败后重试", "web_user", ["易失败步骤", "后续步骤"])
+    tasks_mod.update_task(retry_id, status="processing")
+    assert tasks_mod.advance_agent_job(retry_id, error="临时故障")
+    failed = tasks_mod.get_task(retry_id)
+    assert failed["status"] == "failed"
+    assert failed["step_index"] == 0  # failed work is never skipped
+    assert failed["steps"][0]["status"] == "failed"
+    assert tasks_mod.reset_task(retry_id)
+    retried = tasks_mod.get_task(retry_id)
+    assert retried["steps"][0]["status"] == "pending"
+    assert retried["step_index"] == 0
+
+
+def test_run_agent_job_executes_all_steps(monkeypatch):
+    prompts = []
+
+    class FakeGraph:
+        def invoke(self, state, config):
+            prompts.append(state["user_query"])
+            return {"final_answer": f"answer-{len(prompts)}"}
+
+    monkeypatch.setattr(svc, "graph", FakeGraph())
+    tid = tasks_mod.create_agent_job("比较莫奈与透纳", "web_user", ["检索", "综合"])
+    svc.run_agent_job(tid, "web_user")
+    job = tasks_mod.get_task(tid)
+    assert job["status"] == "done"
+    assert job["step_index"] == 2
+    assert [a["content"] for a in job["artifacts"]] == ["answer-1", "answer-2"]
+    assert "第 1/2 步：检索" in prompts[0]
+    assert "第 2/2 步：综合" in prompts[1]
+
+
+def test_agent_jobs_api_is_user_scoped_and_cancellable(client, monkeypatch):
+    monkeypatch.setattr(svc, "run_agent_job", lambda task_id, user_id: None)
+    created = client.post("/api/jobs", json={"objective": "研究莫奈", "plan": ["检索", "成文"]})
+    assert created.status_code == 200
+    task_id = created.json()["job_id"]
+    fetched = client.get(f"/api/jobs/{task_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["job"]["plan"] == ["检索", "成文"]
+    assert client.post(f"/api/jobs/{task_id}/cancel").json()["ok"] is True
+    assert tasks_mod.get_task(task_id)["cancel_requested"] is True
+    tasks_mod.advance_agent_job(task_id)  # worker observes the cancellation
+    resumed = client.post(f"/api/jobs/{task_id}/retry")
+    assert resumed.status_code == 200
+    assert resumed.json()["job"]["status"] == "pending"
+    assert resumed.json()["job"]["cancel_requested"] is False
+
+
 def test_tasks_api_and_retry(client, monkeypatch):
-    tid = tasks_mod.create_task("ingest_pdf", {"doc_id": "d1", "kind": "pdf"})
+    tid = tasks_mod.create_task(
+        "ingest_pdf", {"doc_id": "d1", "kind": "pdf", "user_id": "web_user"}
+    )
     tasks_mod.update_task(tid, status="failed", error="解析失败")
     r = client.get(f"/api/tasks/{tid}")
     assert r.status_code == 200
@@ -526,7 +660,6 @@ def test_delete_table_unregisters_and_resets_active():
                 },
                 "display_name": "书单",
                 "supports_timeline": False,
-                "supports_recommendation": False,
             },
         )
         retriever = tp.register_structured_dataset(
@@ -726,6 +859,7 @@ def test_register_and_change_password_api(client):
     r = client.post(
         "/api/auth/change-password",
         json={"old_password": "password123", "new_password": "newpass456"},
+        headers={"Authorization": ""},
     )
     assert r.status_code == 401
 

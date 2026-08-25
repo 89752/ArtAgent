@@ -132,12 +132,19 @@ def _run_subagent(
             for tc in calls:
                 tool = TOOL_BY_NAME.get(tc.get("name"))
                 try:
-                    output = tool.invoke(tc.get("args") or {}) if tool else "未注册工具"
+                    if tool is None:
+                        output = "未注册工具"
+                    else:
+                        from src.utils.governance import governed_invoke
+
+                        output = governed_invoke(
+                            tool, tc.get("args") or {}, context="subagent"
+                        )
                 except Exception as exc:  # noqa: BLE001 —— 工具失败回灌给模型
                     output = f"工具执行失败：{exc}"
                 messages.append(
                     ToolMessage(
-                        content=str(output)[:2000],
+                        content=str(output),
                         name=tc.get("name"),
                         tool_call_id=tc.get("id"),
                     )

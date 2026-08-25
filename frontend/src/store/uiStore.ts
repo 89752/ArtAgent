@@ -3,6 +3,7 @@ import { create } from "zustand";
 export type ModalName =
   | "library"
   | "memory"
+  | "operations"
   | "settings"
   | "confirm"
   | "oversize";

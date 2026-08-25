@@ -1,14 +1,24 @@
 import { useChatStore } from "../store/chatStore";
 import { useUiStore } from "../store/uiStore";
-import { IconThemeMoon } from "./icons";
+import { IconMenu, IconThemeMoon } from "./icons";
 
 export function Topbar() {
   const title = useChatStore((s) => s.title);
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
+  const openSidebar = useUiStore((s) => s.openSidebar);
 
   return (
     <header id="topbar" className="topbar">
+      <button
+        className="icon-btn tb-menu"
+        type="button"
+        aria-label="打开导航菜单"
+        data-tip="打开导航菜单"
+        onClick={openSidebar}
+      >
+        <IconMenu />
+      </button>
       <div className="tb-title" id="tb-title" data-tip={title}>
         {title}
       </div>
