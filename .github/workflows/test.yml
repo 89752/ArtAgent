@@ -64,6 +64,13 @@ jobs:
     # and deterministic through eval-gate above.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Secrets are unavailable in an `if:` expression. Expose them as job
+    # environment variables and guard the online step through the env context.
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      JUDGE_MODEL: ${{ secrets.JUDGE_MODEL }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -72,12 +79,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Full online evaluation
-        if: ${{ secrets.LLM_API_KEY != '' && secrets.LLM_BASE_URL != '' && secrets.LLM_MODEL != '' }}
-        env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL }}
-          JUDGE_MODEL: ${{ secrets.JUDGE_MODEL }}
+        if: ${{ env.LLM_API_KEY != '' && env.LLM_BASE_URL != '' && env.LLM_MODEL != '' }}
         run: python eval/agent_eval_v2.py --capture-regressions
 
   container-smoke:
