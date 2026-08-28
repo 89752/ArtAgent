@@ -2,7 +2,7 @@
 
 <p align="right"><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
 
-ArtAgent 是一个面向西方艺术史的对话式 Agent，基于 LangGraph 编排：内置 **5.5 万+ 条作品记录**的本地艺术库，支持事实查询、风格对比、时间线梳理、偏好推荐、图像分析、文档解读与跨会话长期记忆。
+ArtAgent 是一个面向西方艺术史的对话式 Agent，基于 LangGraph 编排。它优先使用本地核心艺术库（约 **5.3 万条来源记录**）回答问题，并支持事实查询、风格对比、时间线梳理、审美偏好驱动的检索、图像分析、文档解读与跨会话长期记忆。
 
 ## 快速开始
 
@@ -11,7 +11,8 @@ ArtAgent 是一个面向西方艺术史的对话式 Agent，基于 LangGraph 编
 pip install -r requirements.txt
 
 # 2. 配置环境变量
-cp .env.example .env
+# macOS / Linux：cp .env.example .env
+# Windows PowerShell：Copy-Item .env.example .env
 # 必填：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL（对话模型，不预设平台）
 # 可选：VISION_MODEL / VISION_API_KEY / VISION_BASE_URL（图像分析；缺省回落对话模型配置，LLM_MODEL 需支持图像输入）
 # 可选：JUDGE_MODEL / JUDGE_API_KEY / JUDGE_BASE_URL（评估裁判模型，缺省同对话模型）
@@ -19,9 +20,9 @@ cp .env.example .env
 # 可选：RERANK_API_KEY（精排）、TAVILY_API_KEY（联网兜底）、MINERU_TOKEN（PDF 精准解析）
 # config.yaml 已随仓库提供且不含密钥：超时/并发/检索嵌入等非密钥项直接改它，模型与密钥放 .env
 
-# 说明：不再自动创建默认账号（user/11111111）。首个管理员请用
-#   python scripts/manage_users.py create --name 管理员 --username admin --password <强密码> --admin
-# 注册页亦可自助建普通账号。仅保留旧单机体验时可设 ARTAGENT_SEED_DEFAULT_ACCOUNT=1。
+# 首次访问：在注册页创建账号后即可使用。
+# 共享部署请保持 ARTAGENT_SEED_DEFAULT_ACCOUNT 未设置；它会创建
+# user/11111111 这一已知演示账号，仅适合临时本地体验。
 
 # 3. 启动 Web 界面
 python api.py
@@ -33,29 +34,13 @@ npm install
 npm run dev
 # 打开 http://127.0.0.1:5173（/api 与 /static 自动代理到 7860）
 
-# 前端生产构建：产物输出到 static/dist，由 FastAPI 直接托管
+# 前端生产构建：产物输出到 static/dist
 npm run build
 ```
 
-### 容器部署与运维
+运行轨迹默认仅保存脱敏元数据 30 天，可通过 `TRACE_RETENTION_DAYS` 调整。模型提供商返回 `usage_metadata` 时会优先采用真实 token 用量，否则回退字符估算。
 
-```bash
-docker compose up --build
-curl http://127.0.0.1:7860/health  # 进程存活
-curl http://127.0.0.1:7860/ready   # SQLite 等本地依赖已就绪
-```
-
-本地隔离验收使用 `docker-compose.sandbox.yml`，它只运行镜像内的源码；需要不重建镜像、直接验收当前工作区改动时，再叠加开发覆盖层：
-
-```bash
-docker compose -f docker-compose.sandbox.yml -f docker-compose.sandbox.dev.yml up
-```
-
-`.sandbox/` 是本地运行数据和索引缓存，不应提交。
-
-`docker-compose.yml` 会将本地 `data/` 挂载为持久化目录；密钥仍只从 `.env` 读取。运行轨迹默认仅保存脱敏元数据 30 天，可通过 `TRACE_RETENTION_DAYS` 调整。模型提供商返回 `usage_metadata` 时会优先采用真实 token 用量，否则回退字符估算。
-
-> 仓库不包含数据资产。运行前需要本地 `data/`（核心库 CSV、Chroma 向量索引、SQLite 记忆库、`data/core/images/` 图片）；只有 CSV 时可执行 `python scripts/06_index_core.py --csv data/core/artworks_core.csv` 重建索引。
+> 仓库不包含数据资产。运行前需要本地 `data/`（核心库 CSV、Chroma 向量索引、SQLite 记忆库、`data/core/images/` 图片）。只有 CSV 时，请在数据准备环境中构建与之匹配的核心索引后再启动服务；不要把数据资产或本地构建缓存提交到仓库。
 
 ## 应用场景
 
@@ -63,21 +48,12 @@ docker compose -f docker-compose.sandbox.yml -f docker-compose.sandbox.dev.yml u
 |---|---|
 | 作品与画家查询 | 按标题、作者、年代、流派检索画作与画家信息 |
 | 风格对比与演变 | 对比多位画家或画作的风格差异，梳理某位画家、某个流派的风格演变 |
-| 偏好推荐 | 根据你表达的审美偏好，推荐合适的画家与作品 |
+| 审美偏好驱动检索 | 结合当前问题与已记住的偏好，检索并解释匹配的画家、作品或流派 |
 | 图像视觉分析 | 从构图、色彩、笔触等角度分析画作 |
 | 专家技能 | 风格对比、时间线梳理、画作深度分析、文档总结、展览前期研究 |
 | 文档与表格解读 | 上传 PDF / Excel 后解读内容，可定位到具体页 |
 | 数据统计 | 统计库内作品的流派、年代、技法分布 |
 | 记忆与收藏 | 记住你的偏好并跨会话调用，维护收藏清单 |
-
-## 核心能力
-
-- **本地艺术库优先**：知识来自合并后的核心库（Wikidata + SemArt + AIC），查不到时再联网（Tavily / Wikipedia / Met 馆藏 API），不硬编。
-- **ReAct + 澄清**：信息不足先反问；对比 / 时间线可调用结构化技能；偏好与推荐作为记忆增强的普通检索问答处理；检索不到时联网兜底。
-- **基础工具 + 5 个专家技能**：基础工具覆盖语义检索、精确查询、画家知识、图像定位与视觉分析、PDF 整页图读取、色彩分析、聚合统计、馆藏检索、维基百科、联网搜索、记忆读写删、收藏清单 CRUD、并行调研；专家技能为风格对比、时间线梳理、画作深度分析、文档总结、展览前期研究。
-- **长期记忆（可选增强）**：显式“记住 / 忘记”开箱即用；可开启自动抽取（`MEMORY_AUTO_EXTRACT=1`）、语义冲突合并（`MEMORY_SMART_MERGE=1`）、跨会话用户画像（`MEMORY_PROFILE_REFRESH=1`）；全部存本地 SQLite，记忆面板按条查看 / 删除。
-- **文档与表格**：上传 PDF / Excel，MinerU 精准解析（可选）、扫描页视觉读取，回答可引用《文档》第 N 页。
-- **Web 界面**：SSE 流式展示思考链、多会话后台生成（回答未结束也能开新对话）、停止生成、侧栏折叠 / 拖拽调宽、深色模式、参考来源卡片、记忆面板、对话反馈。
 
 ## 数据
 
@@ -91,8 +67,6 @@ docker compose -f docker-compose.sandbox.yml -f docker-compose.sandbox.dev.yml u
 
 > 部分记录存在多源交叉（如同一作品同时命中 Wikidata 与 SemArt）。
 
-合并去重后共 **5.5 万+ 条作品记录**，其中带描述的记录已建立 Chroma 向量索引（BGE-M3 多语言向量，数量随核心库重建更新）。年代以 8–19 世纪欧洲绘画为主（约占 83%），另含少量 20 世纪早期作品，约 7,000 条未标注年份；每条记录都带图片引用（本地图片或馆藏 URL）。
-
 ## 技术栈
 
 | 模块 | 选型 |
@@ -104,61 +78,16 @@ docker compose -f docker-compose.sandbox.yml -f docker-compose.sandbox.dev.yml u
 | 用户体系 | 账号注册/登录/API Key 鉴权，会话/记忆/文档/反馈按用户隔离 |
 | 记忆与会话 | SQLite（记忆条目/事件、会话、滚动摘要、用户文档、收藏、反馈、抽取指标） |
 | Web 前端 | React 19 + TypeScript + Vite（SSE 流式对话） |
-| 测试 | pytest 快档（11 个测试文件 / 470 个离线用例，CI 已接入） |
+| 测试与交付 | pytest 离线回归、确定性评测门禁与前端类型检查/构建均已接入 GitHub Actions |
 
 ## 评估
 
 ```bash
-python eval/agent_eval_v2.py --retrieval-n 100   # 离线检索 Recall@5
-python eval/agent_eval_v2.py --agentic-ab-n 100  # 普通检索 / Agentic RAG 的质量、覆盖、延迟、调用次数对照
-python eval/memory_reliability_eval.py            # 50 写入 / 50 召回 / 20 冲突、过时、遗忘可靠性门禁
-python eval/agent_eval_v2.py                     # 核心在线评估（不含实时联网/上传夹具/Multi-Agent）
-python eval/agent_eval_v2.py --limit 10 --offset 0  # 只跑 10 条核心单轮；已完成缓存会自动复用
-python eval/agent_eval_v2.py --limit 10 --offset 10 # 接着跑第 11–20 条；加 --refresh 才会强制重跑
-python eval/agent_eval_v2.py --case-ids c-034,c-042,c-043,c-044,c-046,c-047 --refresh  # 仅复测状态用例
-python eval/agent_eval_v2.py --full --include-live --include-artifact-fixtures  # 扩展能力验收
-pytest                                           # 快档离线测试
+pytest -q                                      # 先跑不消耗模型额度的离线回归
+python eval/memory_reliability_eval.py         # 验证记忆写入、召回、冲突与遗忘
+python eval/agent_eval_v2.py --retrieval-n 100 # 测量核心库的离线检索 Recall@5
+python eval/agent_eval_v2.py                   # 跑完整核心在线评估
 ```
-
-单轮核心集以每条用例可独立复现为原则：带前置记忆或收藏的用例会自行初始化状态，
-因此不会因分批执行而误报失败。实时联网、真实文件/图片夹具和 Multi-Agent 则单列为
-可选能力集，避免外部服务或夹具缺失污染核心基线。
-
-模型路由与 Agentic RAG 均可安全回退，便于灰度或 A/B：`MODEL_ROUTING_ENABLED=0`
-会让复杂问题使用主模型；`AGENTIC_RAG_ENABLED=0` 则停用二次改写检索。登录后可在侧栏的“运行中心”查看本账号的任务状态、模型角色分布、近期轨迹与每步产物；任务支持暂停、继续、取消、失败重试及服务重启后的自动续跑。
-
-最近基线（2026-08）：
-
-| 维度 | 结果 |
-|---|---|
-| 答案质量（30 条黄金集） | 平均 4.67/5 · 通过率(≥4) 93% |
-| 事实准确率 | 27/31（87%） |
-| 多轮对话 | 6/6 |
-| 工具选择 | 42/48（88%） |
-| 对抗与安全 | 8/10 |
-| 意图诊断（软信号） | 36/40（90%） |
-| 路由决策 | 13/15 |
-| 检索 Recall@5 | 90.0%（core · 语义+词法混合 · Jina API 精排） |
-
-> 注：上表为 2026-08 历史基线；当前图已收敛为纯 ReAct + 技能，意图诊断已改为规则化 `classify_intent`，路由决策维度已随旧管线移除。
-
-## 路线图
-
-**已完成**
-
-- **混合检索与精排**：语义向量（BGE-M3）与词法（core FTS5 / PDF BM25）双通道召回，查询语言与索引语言不一致时按需翻译，RRF 融合后经 Jina Reranker v3.5 API 精排；
-- **成熟工具带**：ReAct 工具带 + 23 个基础工具与 6 个专家技能，覆盖查询、对比、时间线、推荐、视觉分析、统计、记忆与收藏；
-- **长期记忆**：显式记忆、自动抽取、语义冲突合并与跨会话画像，记忆可见可控；
-- **文档理解**：PDF 文字层解析与整页图像识别双通道、表格上传问答，回答可溯源到具体页；
-- **评估体系**：答案质量、事实、工具、多轮、对抗、意图、路由、检索多维评估与测试集；
-- **质量闭环**：LLM 自动裁判评分、规则判题与状态断言，用户点赞/点踩反馈入库并可导出为评估候选集。
-- **多用户与数据隔离**：账号注册/登录/API Key 鉴权，会话、记忆、文档与反馈按用户隔离（platform 层）。
-
-**规划中**
-
-- **OpenAI 兼容 API**：对外开放流式对话接口与 OpenAPI 文档；
-- **MCP 工具接入**：导入第三方工具扩展 Agent 能力；
-- **部署与运维**：Docker 一键启动、CI 门禁。
 
 ## 项目结构
 
@@ -183,5 +112,5 @@ src/
 └─ observability/      # 轨迹日志与 /api/metrics
 agent_skills/          # 专家技能定义（SKILL.md）
 eval/                  # 评估入口与测试集
-tests/                 # pytest 快档
+tests/                 # pytest 测试
 ```
