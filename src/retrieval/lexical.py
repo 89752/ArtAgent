@@ -12,6 +12,7 @@
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import math
 import os
@@ -70,7 +71,7 @@ def translate_query(query: str, target_lang: str) -> str:
             "只输出译文本身；人名、作品名、专有名词保留原文。\n"
             f"查询：{query}"
         )
-        out = str(get_deterministic_llm().invoke(prompt).content).strip()
+        out = str(invoke_model(get_deterministic_llm(), prompt).content).strip()
         return out or query
     except Exception:  # noqa: BLE001 —— 翻译失败回退原文，不阻塞检索
         return query
@@ -339,9 +340,19 @@ class PdfBm25Retriever:
     def search(
         self, query: str, top_k: int = 5, filters: dict | None = None
     ) -> list[RetrievalResult]:
+        from src.ingestion.versions import visible_indexes
+        visible = visible_indexes(filters)
+        if not visible:
+            return []
+        signature = tuple(sorted(visible.items()))
+        if getattr(self, "_visible_signature", None) != signature:
+            self._cache = None
+            self._visible_signature = signature
         groups = self._load_chunks()
         out: list[RetrievalResult] = []
         for lang, items in groups.items():
+            items = [(content, {**meta, "doc_id": visible[meta["doc_id"]]})
+                     for content, meta in items if meta.get("doc_id") in visible]
             if not items:
                 continue
             q = translate_query(query, lang)

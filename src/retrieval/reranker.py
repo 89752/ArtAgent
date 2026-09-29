@@ -34,8 +34,10 @@ JINA_RERANK_URL = "https://api.jina.ai/v1/rerank"
 # 模型 ID 槽位（与 LLM_MODEL 同原则）：改 env 即换模型，无需改代码
 RERANK_MODEL = os.getenv("RERANK_MODEL", "jina-reranker-v3.5")
 
-REQUEST_TIMEOUT = 30  # 秒：外部 API 必须显式超时
-MAX_RETRIES = 2       # 首次之后的额外重试次数
+# 精排只是相关性增强，不能阻塞主回答链路。默认单次 8 秒且不重试；
+# 需要更激进的精排可靠性时，可在部署环境中显式放宽。
+REQUEST_TIMEOUT = max(1.0, float(os.getenv("RERANK_TIMEOUT_SECONDS", "8")))
+MAX_RETRIES = max(0, int(os.getenv("RERANK_MAX_RETRIES", "0")))
 DOC_CHAR_LIMIT = 3000  # 单文档字符级保守截断
 
 

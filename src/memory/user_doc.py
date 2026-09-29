@@ -14,6 +14,7 @@ shouldUpdate 门控），不再用"条目堆积→重压缩"的画像刷新。
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import json
 import os
@@ -183,7 +184,7 @@ def _default_llm() -> Callable[[str], str]:
     from src.utils.llm import get_deterministic_llm
 
     def _invoke(p: str) -> str:
-        return get_deterministic_llm().invoke(p).content
+        return invoke_model(get_deterministic_llm(), p).content
 
     return _invoke
 

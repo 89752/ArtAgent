@@ -80,7 +80,7 @@ jobs:
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Full online evaluation
         if: ${{ env.LLM_API_KEY != '' && env.LLM_BASE_URL != '' && env.LLM_MODEL != '' }}
-        run: python eval/agent_eval_v2.py --capture-regressions
+        run: python eval/agent_eval_v2.py --capture-regressions --gate
 
   container-smoke:
     runs-on: ubuntu-latest

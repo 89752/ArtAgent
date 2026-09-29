@@ -75,18 +75,18 @@ def apply_budget(blocks: ContextBlocks, budget: ContextBudget | None = None) -> 
         if estimate_context_chars(out) <= budget.total_chars:
             break
     # 2) 文本块按优先级截断（secondary 保险；主预算在 build 时已生效）
-    for field, cap in (
+    for block_name, cap in (
         ("summary", budget.summary_chars),
         ("evidence", budget.evidence_chars),
         ("subtasks", budget.subtasks_chars),
         ("memory", budget.memory_chars),
     ):
-        cur = getattr(out, field)
+        cur = getattr(out, block_name)
         if len(cur) > cap:
             if cap > 24:
-                setattr(out, field, cur[: cap - 16] + "…（已截断）")
+                setattr(out, block_name, cur[: cap - 16] + "…（已截断）")
             else:
-                setattr(out, field, cur[:cap])
+                setattr(out, block_name, cur[:cap])
     return out
 
 
@@ -295,8 +295,7 @@ def format_skills_index(skills) -> str:
 def trim_history(messages, max_turns: int = HISTORY_MAX_TURNS):
     """历史窗口裁剪：保留开头的 system 消息 + 最近 max_turns 轮消息。
 
-    简单保守策略（不拆散 tool_call 与 ToolMessage 的配对）：
-    取尾部 max_turns*2 条消息，前缀的 system 消息保留。
+    按 human 消息划分完整轮次，保留轮内所有 tool_call/ToolMessage 配对。
     """
     if not messages:
         return []
@@ -304,7 +303,14 @@ def trim_history(messages, max_turns: int = HISTORY_MAX_TURNS):
     rest: list = list(messages)
     while rest and getattr(rest[0], "type", "") == "system":
         head.append(rest.pop(0))
-    tail = rest[-(max_turns * 2) :] if max_turns > 0 else []
+    starts = [i for i, message in enumerate(rest) if getattr(message, "type", "") == "human"]
+    if max_turns <= 0:
+        tail = []
+    elif starts:
+        tail = rest[starts[max(0, len(starts)-max_turns)]:]
+    else:
+        # A tool-only continuation must remain intact.
+        tail = rest
     return head + tail
 
 
@@ -363,7 +369,7 @@ def condense_tool_messages(messages, limit: int = 300):
             if is_json and len(content) > limit:
                 out.append(
                     ToolMessage(
-                        content=content[:limit] + "…（完整证据见【evidence】块）",
+                        content=json.dumps({"summary": content[:limit], "truncated": True}, ensure_ascii=False),
                         name=msg.name,
                         tool_call_id=msg.tool_call_id,
                         id=msg.id,

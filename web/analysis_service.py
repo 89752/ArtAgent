@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import time
+import uuid
 from pathlib import Path
 from typing import Iterator
 
@@ -34,6 +37,11 @@ def stream_analysis(
     stop_event=None,
 ) -> Iterator[dict]:
     """产出 SSE 事件：stage/metrics → done/rejected/error。"""
+    if os.getenv("ARTAGENT_STREAM_EXECUTION", "process") == "process":
+        from src.harness.stream_process import stream
+        yield from stream("analysis", {"image_id": image_id, "focus": focus,
+                                      "framework_override": framework_override, "rerun": rerun}, stop_event)
+        return
     rec = get_image(image_id)
     if not rec:
         yield {"type": "error", "message": "图片不存在或已删除"}
@@ -47,9 +55,18 @@ def stream_analysis(
             cached["cached"] = True
             yield {"type": "done", **cached}
             return
-    for evt in run_analysis(
-        image_id, focus=focus, framework_override=framework_override
-    ):
-        if stop_event is not None and stop_event.is_set():
-            break
-        yield evt
+    from src.harness.context import RunContext, RunStopped, current_run, run_scope
+    context = current_run() or RunContext(
+        uuid.uuid4().hex, rec.get("user_id") or "web_user", task_type="analysis",
+        max_model_calls=4, max_tokens=30000, deadline=time.monotonic()+180,
+        cancelled=lambda: stop_event is not None and stop_event.is_set())
+    try:
+        with run_scope(context):
+            context.check()
+            for evt in run_analysis(image_id, focus=focus, framework_override=framework_override):
+                context.check()
+                yield evt
+    except RunStopped as exc:
+        from src.analysis.store import update_image_status
+        update_image_status(image_id, "failed", exc.status)
+        yield {"type": "error", "message": "分析已取消或超出执行预算", "code": exc.status}

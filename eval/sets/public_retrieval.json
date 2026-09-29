@@ -1,0 +1,8 @@
+[
+ {"text":"The orchard painting uses orange pigments and broad brushwork.","query":"orange orchard pigments"},
+ {"text":"A harbor watercolor studies blue reflections on still water.","query":"harbor blue reflections"},
+ {"text":"The limestone sculpture depicts a standing figure.","query":"limestone standing sculpture"},
+ {"text":"这幅山水画以青绿设色表现山峰。","query":"青绿山峰"},
+ {"text":"铜版画使用细密排线表现明暗。","query":"铜版画排线"},
+ {"text":"展览目录记录了三件陶瓷作品的尺寸。","query":"陶瓷尺寸"}
+]

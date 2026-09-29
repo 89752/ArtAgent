@@ -53,6 +53,11 @@ Thumbs.db
 flagged/
 gradio_cached_examples/
 
+# ── 本地验收与导出产物 ──
+/acceptance/
+/output/
+/tmp/
+
 # ── Node 前端（React + Vite） ──
 node_modules/
 /static/dist/

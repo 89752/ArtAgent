@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass
 from typing import Optional
@@ -120,7 +121,10 @@ def _run_subagent(
                 tool_calls=tool_calls,
             )
         try:
-            resp = llm.invoke(messages)
+            from src.harness.context import invoke_model, RunStopped
+            resp = invoke_model(llm, messages)
+        except RunStopped:
+            raise
         except Exception as exc:  # noqa: BLE001
             return SubagentResult(
                 task_id=task_id, status="failed", error=f"LLM: {exc}", tool_calls=tool_calls
@@ -140,6 +144,8 @@ def _run_subagent(
                         output = governed_invoke(
                             tool, tc.get("args") or {}, context="subagent"
                         )
+                except RunStopped:
+                    raise
                 except Exception as exc:  # noqa: BLE001 —— 工具失败回灌给模型
                     output = f"工具执行失败：{exc}"
                 messages.append(
@@ -211,7 +217,7 @@ def run_tasks(tasks: list[dict]) -> list[SubagentResult]:
     pending = set()
     with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
         futures = {
-            pool.submit(_run_subagent, p["task_id"], p["prompt"], max_turns, timeout_sec): i
+            pool.submit(contextvars.copy_context().run, _run_subagent, p["task_id"], p["prompt"], max_turns, timeout_sec): i
             for i, p in enumerate(prepared)
         }
         pending = set(futures)
@@ -232,7 +238,12 @@ def run_tasks(tasks: list[dict]) -> list[SubagentResult]:
                     pending.discard(fut)
                     i = futures[fut]
                     try:
+                        from src.harness.context import RunStopped
                         results[i] = fut.result()
+                    except RunStopped:
+                        for other in pending:
+                            other.cancel()
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         results[i] = SubagentResult(
                             task_id=prepared[i]["task_id"],

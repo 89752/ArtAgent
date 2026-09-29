@@ -12,6 +12,7 @@ import os
 import sqlite3
 import threading
 import uuid
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -19,10 +20,10 @@ from typing import Optional
 from src.data import db
 
 _DB_PATH = Path(os.getenv("INDEX_DIR", "./data/index")) / "tasks.db"
-_lock = threading.Lock()
+_lock = threading.RLock()
 _db_ready = False
 
-VALID_STATUS = {"pending", "processing", "paused", "done", "failed", "interrupted"}
+VALID_STATUS = {"pending", "processing", "paused", "done", "failed", "interrupted", "waiting_input", "verification_failed", "budget_exhausted", "unknown_execution_state"}
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -50,6 +51,10 @@ def _get_conn() -> sqlite3.Connection:
         _ensure_column(conn, "tasks", "artifacts_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "tasks", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "tasks", "pause_requested", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "tasks", "lease_owner", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "tasks", "lease_until", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, "tasks", "attempt_id", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "tasks", "usage_json", "TEXT NOT NULL DEFAULT '{}'")
         conn.commit()
         _db_ready = True
     return conn
@@ -86,14 +91,15 @@ def create_task(
     return tid
 
 
-def create_agent_job(objective: str, user_id: str, plan: Optional[list[str]] = None) -> str:
+def create_agent_job(objective: str, user_id: str, plan: Optional[list[str]] = None, *, spec: Optional[dict] = None) -> str:
     """Create a durable, user-scoped multi-step Agent job."""
     steps = [{"title": str(step)[:300], "status": "pending"} for step in (plan or [])]
-    tid = create_task("agent_job", {"objective": str(objective)[:4000], "user_id": user_id})
+    tid = f"t_{uuid.uuid4().hex[:12]}"
+    payload = {"objective": str(objective)[:4000], "user_id": user_id, "spec": spec or {}}
     with _lock:
         _get_conn().execute(
-            "UPDATE tasks SET plan_json = ?, steps_json = ? WHERE task_id = ?",
-            (json.dumps(plan or [], ensure_ascii=False), json.dumps(steps, ensure_ascii=False), tid),
+            "INSERT INTO tasks (task_id,type,status,payload,created_at,plan_json,steps_json) VALUES (?,'agent_job','pending',?,?,?,?)",
+            (tid, json.dumps(payload, ensure_ascii=False), _now(), json.dumps(plan or [], ensure_ascii=False), json.dumps(steps, ensure_ascii=False)),
         )
         _get_conn().commit()
     return tid
@@ -111,7 +117,7 @@ def get_task(task_id: str) -> Optional[dict]:
         out["payload"] = json.loads(out.get("payload") or "{}")
     except json.JSONDecodeError:
         out["payload"] = {}
-    for key, default in (("plan_json", []), ("steps_json", []), ("artifacts_json", [])):
+    for key, default in (("plan_json", []), ("steps_json", []), ("artifacts_json", []), ("usage_json", {})):
         try:
             out[key.removesuffix("_json")] = json.loads(out.pop(key) or "[]")
         except (json.JSONDecodeError, TypeError):
@@ -121,7 +127,7 @@ def get_task(task_id: str) -> Optional[dict]:
     return out
 
 
-def advance_agent_job(task_id: str, *, artifact: Optional[dict] = None, error: str = "") -> bool:
+def _advance_agent_job(task_id: str, *, artifact: Optional[dict] = None, error: str = "") -> bool:
     """Atomically complete the current step and checkpoint durable job state."""
     job = get_task(task_id)
     if not job or job.get("type") != "agent_job" or job.get("status") not in {"pending", "processing"}:
@@ -192,27 +198,22 @@ def resume_agent_job(task_id: str) -> bool:
     return cur.rowcount > 0
 
 
-def list_tasks(status: Optional[str] = None, limit: int = 100) -> list[dict]:
+def list_tasks(status: Optional[str] = None, limit: int = 100, *, user_id: str | None = None) -> list[dict]:
     limit = min(max(1, int(limit)), 500)
     with _lock:
         conn = _get_conn()
+        clauses, params = [], []
         if status:
-            rows = conn.execute(
-                "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                (status, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
-            ).fetchall()
+            clauses.append("status = ?")
+            params.append(status)
+        if user_id is not None:
+            clauses.append("json_extract(payload, '$.user_id') = ?")
+            params.append(user_id)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = conn.execute("SELECT task_id FROM tasks" + where + " ORDER BY created_at DESC LIMIT ?", (*params, limit)).fetchall()
     out = []
     for row in rows:
-        d = dict(row)
-        try:
-            d["payload"] = json.loads(d.get("payload") or "{}")
-        except json.JSONDecodeError:
-            d["payload"] = {}
-        out.append(d)
+        out.append(get_task(row["task_id"]))
     return out
 
 
@@ -262,7 +263,7 @@ def reset_task(task_id: str, status: str = "pending") -> bool:
                 """
                 UPDATE tasks SET status = 'pending', error = '', progress = 0,
                     cancel_requested = 0, pause_requested = 0, steps_json = ?, started_at = NULL, finished_at = NULL
-                WHERE task_id = ? AND status IN ('failed', 'interrupted')
+                WHERE task_id = ? AND status IN ('failed', 'interrupted', 'verification_failed', 'waiting_input')
                 """,
                 (json.dumps(steps, ensure_ascii=False), task_id),
             )
@@ -270,8 +271,9 @@ def reset_task(task_id: str, status: str = "pending") -> bool:
             cur = conn.execute(
                 """
                 UPDATE tasks SET status = 'pending', error = '', progress = 0,
-                                 started_at = NULL, finished_at = NULL
-                WHERE task_id = ? AND status IN ('failed', 'interrupted')
+                                 started_at = NULL, finished_at = NULL, usage_json='{}',
+                                 lease_owner='',lease_until=0,cancel_requested=0,pause_requested=0
+                WHERE task_id = ? AND status IN ('failed', 'interrupted', 'budget_exhausted')
                 """,
                 (task_id,),
             )
@@ -280,21 +282,19 @@ def reset_task(task_id: str, status: str = "pending") -> bool:
 
 
 def mark_interrupted_on_startup() -> int:
-    """服务启动时标记未被恢复调度的持久任务为 interrupted。
+    """仅中断租约已过期的运行任务，保留有效执行者。
 
-    进程可能在 BackgroundTask 尚未切到 ``processing`` 时重启；这类
-    ``pending`` 导入任务已经不在内存队列中，若保留 pending 会永远无法由
-    UI 重试。统一改为 interrupted 后，文件任务可由用户重试，AgentJob 则由
-    ``recover_interrupted_agent_jobs`` 自动恢复。
+    待解析任务由持久队列重新领取；已开始但失联的解析任务需显式重试，
+    避免自动重复解析副作用。研究任务另由恢复调度处理。
     """
     with _lock:
         cur = _get_conn().execute(
             """
             UPDATE tasks SET status = 'interrupted', error = '服务重启，任务中断',
                              finished_at = ?
-            WHERE status IN ('pending', 'processing')
+            WHERE (status='processing' OR (status='pending' AND type NOT IN ('ingest_pdf','ingest_table'))) AND lease_until < ?
             """,
-            (_now(),),
+            (_now(), time.time()),
         )
         _get_conn().commit()
     return cur.rowcount
@@ -323,6 +323,145 @@ def recover_interrupted_agent_jobs() -> list[dict]:
             payload = {}
         recovered.append({"task_id": str(row["task_id"]), "user_id": str(payload.get("user_id") or "")})
     return recovered
+
+
+def runnable_agent_jobs(limit: int = 16) -> list[dict]:
+    """Poll durable work, including workers whose leases expired after startup."""
+    with _lock:
+        conn = _get_conn()
+        conn.execute("""UPDATE tasks SET status=CASE WHEN cancel_requested=1 THEN 'interrupted' ELSE 'paused' END,
+            lease_owner='',lease_until=0 WHERE type='agent_job' AND status IN ('pending','processing')
+            AND lease_until < ? AND (cancel_requested=1 OR pause_requested=1)""", (time.time(),))
+        conn.commit()
+        rows = _get_conn().execute(
+            "SELECT task_id,payload FROM tasks WHERE type='agent_job' "
+            "AND status IN ('pending','processing') AND lease_until < ? "
+            "AND cancel_requested=0 AND pause_requested=0 ORDER BY created_at LIMIT ?",
+            (time.time(), limit),
+        ).fetchall()
+    return [{"task_id": row["task_id"], "user_id": json.loads(row["payload"]).get("user_id", "")} for row in rows]
+
+
+def claim_job(task_id: str, user_id: str, owner: str, ttl: int = 90) -> str | None:
+    """Compare-and-set claim; only the holder may commit a step."""
+    return claim_task(task_id, user_id, owner, ttl, task_types=("agent_job",))
+
+
+def claim_task(task_id: str, user_id: str, owner: str, ttl: int = 90, *, task_types=("agent_job", "ingest_pdf", "ingest_table")) -> str | None:
+    attempt = uuid.uuid4().hex
+    with _lock:
+        conn = _get_conn()
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT type FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        if row and row["type"] in {"ingest_pdf","ingest_table"}:
+            active = conn.execute("SELECT COUNT(*) FROM tasks WHERE type IN ('ingest_pdf','ingest_table') AND status='processing' AND lease_until>?", (time.time(),)).fetchone()[0]
+            if active >= max(1,int(os.getenv("TASK_PARSE_CONCURRENCY","2"))):
+                conn.rollback()
+                return None
+        placeholders = ",".join("?" for _ in task_types)
+        cur = conn.execute(f"""UPDATE tasks SET status='processing',lease_owner=?,lease_until=?,attempt_id=?
+            WHERE task_id=? AND type IN ({placeholders}) AND json_extract(payload,'$.user_id')=?
+            AND status IN ('pending','processing') AND lease_until < ? AND cancel_requested=0 AND pause_requested=0""",
+            (owner, time.time()+ttl, attempt, task_id, *task_types, user_id, time.time()))
+        conn.commit()
+        return attempt if cur.rowcount else None
+
+
+def runnable_ingestion_tasks(limit=2):
+    """Pending uploads survive a restart. Expired parsing needs explicit retry."""
+    with _lock:
+        conn = _get_conn()
+        conn.execute("UPDATE tasks SET status='interrupted',error='用户取消' WHERE type IN ('ingest_pdf','ingest_table') AND status='pending' AND cancel_requested=1")
+        conn.execute("""UPDATE tasks SET status='interrupted',error='解析进程失联，请重试',lease_owner='',lease_until=0
+            WHERE type IN ('ingest_pdf','ingest_table') AND status='processing' AND lease_until<?""", (time.time(),))
+        rows = conn.execute("SELECT task_id,payload FROM tasks WHERE type IN ('ingest_pdf','ingest_table') AND status='pending' AND cancel_requested=0 ORDER BY created_at LIMIT ?", (max(0,limit),)).fetchall()
+        conn.commit()
+    return [{"task_id":r["task_id"], "payload":json.loads(r["payload"])} for r in rows]
+
+
+def cancel_ingestion(doc_id, user_id):
+    with _lock:
+        conn = _get_conn()
+        conn.execute("""UPDATE tasks SET cancel_requested=1,
+            status=CASE WHEN status='pending' THEN 'interrupted' ELSE status END
+            WHERE type IN ('ingest_pdf','ingest_table') AND json_extract(payload,'$.user_id')=?
+            AND (task_id=? OR json_extract(payload,'$.doc_id')=?) AND status IN ('pending','processing')""", (user_id,doc_id,doc_id))
+        conn.commit()
+
+
+def heartbeat(task_id: str, attempt: str, usage: dict | None = None) -> bool:
+    with _lock:
+        conn = _get_conn()
+        cur = conn.execute("""UPDATE tasks SET lease_until=?,usage_json=COALESCE(?,usage_json)
+            WHERE task_id=? AND attempt_id=? AND status='processing' AND lease_until>?""",
+            (time.time()+90, json.dumps(usage) if usage is not None else None, task_id, attempt, time.time()))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def finish_attempt(task_id: str, attempt: str, status: str, error: str = "") -> bool:
+    if status not in VALID_STATUS:
+        raise ValueError(status)
+    with _lock:
+        conn = _get_conn()
+        cur = conn.execute("""UPDATE tasks SET status=?,error=?,lease_until=0,lease_owner='',finished_at=?,progress=CASE WHEN ?='done' THEN 100 ELSE progress END
+            WHERE task_id=? AND attempt_id=? AND lease_until>?""",
+            (status, error[:1000], _now(), status, task_id, attempt, time.time()))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def advance_agent_job(task_id: str, *, artifact: Optional[dict] = None, error: str = "", attempt: str = "") -> bool:
+    with _lock:
+        conn = _get_conn()
+        # A SQLite write reservation also fences concurrent API processes.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            job = get_task(task_id)
+            if not job:
+                conn.rollback()
+                return False
+            if job.get("lease_owner") and (not attempt or job["attempt_id"] != attempt or job["lease_until"] <= time.time()):
+                conn.rollback()
+                return False
+            if not error and not job.get("cancel_requested") and not (artifact or {}).get("content", "").strip():
+                conn.rollback()
+                return False
+            advanced = _advance_agent_job(task_id, artifact=artifact, error=error)
+            conn.commit()
+            return advanced
+        except BaseException:
+            conn.rollback()
+            raise
+
+
+def revise_job(task_id: str, user_id: str, text: str) -> bool:
+    with _lock:
+        conn = _get_conn()
+        conn.execute("BEGIN IMMEDIATE")
+        job = get_task(task_id)
+        if not job or job["payload"].get("user_id") != user_id or job["status"] not in {"done", "verification_failed", "budget_exhausted"}:
+            conn.rollback()
+            return False
+        payload = job["payload"]
+        payload["additional_input"] = text[:8000]
+        payload["revision"] = int(payload.get("revision",0))+1
+        conn.execute("""UPDATE tasks SET payload=?,status='pending',step_index=?,usage_json='{}',
+            error='',lease_until=0,lease_owner='',cancel_requested=0,pause_requested=0 WHERE task_id=?""",
+            (json.dumps(payload,ensure_ascii=False),max(0,len(job["plan"])-1),task_id))
+        conn.commit()
+        return True
+
+
+def supply_input(task_id: str, user_id: str, text: str) -> bool:
+    with _lock:
+        job = get_task(task_id)
+        if not job or job["payload"].get("user_id") != user_id or job["status"] not in {"waiting_input", "verification_failed", "failed"}:
+            return False
+        payload = job["payload"]
+        payload["additional_input"] = str(text)[:8000]
+        update_task(task_id, payload=payload)
+        return reset_task(task_id)
 
 
 def _reset_for_tests(path: Path | None = None) -> None:

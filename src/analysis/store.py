@@ -175,6 +175,10 @@ def save_analysis(
     result_path: str,
     metadata: dict | None = None,
 ) -> None:
+    from src.harness.context import current_run
+    context = current_run()
+    if context:
+        context.check()
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     import json
 

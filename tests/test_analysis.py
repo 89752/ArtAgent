@@ -18,6 +18,7 @@ import api
 import src.analysis.engine as engine
 import src.analysis.gate as gate_mod
 import src.analysis.metrics as metrics_mod
+import src.analysis.report as report_mod
 import src.analysis.store as store
 import src.analysis.validate as validate_mod
 import web.analysis_service as analysis_service
@@ -319,6 +320,30 @@ def test_gate_parse_failure_falls_back_unknown(monkeypatch):
     monkeypatch.setattr("src.utils.llm.get_vision_llm", lambda: FakeLLM())
     out = gate_mod.classify_framework("b64", "jpeg")
     assert out["framework"] == "unknown"
+
+
+def test_report_validation_never_calls_model_more_than_twice(monkeypatch):
+    calls: list[list] = []
+
+    class FakeResp:
+        content = '{"summary":"仍不完整"}'
+
+    def _invoke(_model, messages):
+        calls.append(messages)
+        return FakeResp()
+
+    monkeypatch.setattr(report_mod, "invoke_model", _invoke)
+    monkeypatch.setattr("src.utils.llm.get_vision_llm", lambda: object())
+    out = report_mod.generate_layered_report(
+        "b64", "jpeg",
+        {"framework": "abstract", "confidence": 0.8, "reason": "x"},
+        {},
+    )
+
+    assert isinstance(out, dict)
+    assert len(calls) == 2
+    retry_text = calls[1][0].content[1]["text"]
+    assert "上次输出存在问题" in retry_text
 
 
 # ══════════════ 图片/分析存储 ══════════════

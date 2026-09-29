@@ -60,6 +60,8 @@ def _get_conn() -> sqlite3.Connection:
             conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
         if "is_admin" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        if "deleting" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS api_keys (
@@ -78,6 +80,9 @@ def _get_conn() -> sqlite3.Connection:
             )
             """
         )
+        # One-way migration: existing bearer values remain valid for clients.
+        for row in conn.execute("SELECT key FROM api_keys WHERE key NOT LIKE 'sha256:%'").fetchall():
+            conn.execute("UPDATE api_keys SET key=? WHERE key=?", (_token_digest(row[0]), row[0]))
         conn.commit()
         _db_ready = True
     return conn
@@ -98,16 +103,31 @@ def init_db() -> None:
 
 
 def _hash_password(password: str) -> str:
-    salt = secrets.token_hex(8)
-    digest = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
-    return f"{salt}:{digest}"
+    salt = secrets.token_hex(16)
+    iterations = 600000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), iterations).hex()
+    return f"pbkdf2_sha256${iterations}${salt}${digest}"
 
 
 def _verify_password(password: str, stored: str) -> bool:
+    if stored and stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, rounds, salt, digest = stored.split("$")
+            iterations = int(rounds)
+            if not 100000 <= iterations <= 2000000:
+                return False
+            actual = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), iterations).hex()
+            return secrets.compare_digest(actual, digest)
+        except (ValueError, TypeError):
+            return False
     if not stored or ":" not in stored:
         return False
     salt, digest = stored.split(":", 1)
-    return hashlib.sha256(f"{salt}:{password}".encode()).hexdigest() == digest
+    return secrets.compare_digest(hashlib.sha256(f"{salt}:{password}".encode()).hexdigest(), digest)
+
+
+def _token_digest(token: str) -> str:
+    return "sha256:" + hashlib.sha256(token.encode()).hexdigest()
 
 
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,40}$")
@@ -156,7 +176,7 @@ def register_user(username: str, password: str, name: str = "") -> dict:
         )
         conn.execute(
             "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, 'default', ?)",
-            (key, uid, _now()),
+            (_token_digest(key), uid, _now()),
         )
         conn.execute(
             "INSERT OR IGNORE INTO user_settings (user_id, dataset_id) VALUES (?, 'core')",
@@ -189,7 +209,7 @@ def change_password(
         if keep_token:
             conn.execute(
                 "DELETE FROM api_keys WHERE user_id = ? AND label = 'session' AND key != ?",
-                (user_id, keep_token),
+                (user_id, _token_digest(keep_token)),
             )
         else:
             conn.execute(
@@ -277,7 +297,7 @@ def create_user(name: str, api_key: str | None = None, label: str = "default") -
         )
         conn.execute(
             "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, ?, ?)",
-            (key, user_id, label[:40], _now()),
+            (_token_digest(key), user_id, label[:40], _now()),
         )
         conn.execute(
             "INSERT OR IGNORE INTO user_settings (user_id, dataset_id) VALUES (?, 'core')",
@@ -315,7 +335,7 @@ def create_user_with_password(
         )
         conn.execute(
             "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, ?, ?)",
-            (key, uid, "default", _now()),
+            (_token_digest(key), uid, "default", _now()),
         )
         conn.execute(
             "INSERT OR IGNORE INTO user_settings (user_id, dataset_id) VALUES (?, 'core')",
@@ -339,8 +359,14 @@ def get_user_by_username(username: str) -> Optional[dict]:
 def verify_login(username: str, password: str) -> Optional[dict]:
     """校验账号密码；成功返回用户，失败返回 None。"""
     user = get_user_by_username((username or "").strip())
-    if user is None or not _verify_password(password or "", user.get("password_hash")):
+    if user is None or user.get("deleting") or not _verify_password(password or "", user.get("password_hash")):
         return None
+    if not str(user.get("password_hash") or "").startswith("pbkdf2_sha256$"):
+        with _lock:
+            conn = _get_conn()
+            conn.execute("UPDATE users SET password_hash=? WHERE user_id=? AND password_hash=?",
+                (_hash_password(password), user["user_id"], user["password_hash"]))
+            conn.commit()
     return user
 
 
@@ -350,7 +376,7 @@ def issue_session_token(user_id: str) -> str:
     with _lock:
         _get_conn().execute(
             "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, 'session', ?)",
-            (token, user_id, _now()),
+            (_token_digest(token), user_id, _now()),
         )
         _get_conn().commit()
     return token
@@ -365,6 +391,7 @@ def reset_password(user_id: str, password: str) -> bool:
             "UPDATE users SET password_hash = ? WHERE user_id = ?",
             (_hash_password(password), user_id),
         )
+        _get_conn().execute("DELETE FROM api_keys WHERE user_id=? AND label='session'", (user_id,))
         _get_conn().commit()
         return cur.rowcount > 0
 
@@ -408,7 +435,7 @@ def create_api_key(user_id: str, label: str = "default") -> str:
             raise KeyError(f"用户不存在：{user_id}")
         conn.execute(
             "INSERT INTO api_keys (key, user_id, label, created_at) VALUES (?, ?, ?, ?)",
-            (key, user_id, label[:40], _now()),
+            (_token_digest(key), user_id, label[:40], _now()),
         )
         conn.commit()
     return key
@@ -417,7 +444,7 @@ def create_api_key(user_id: str, label: str = "default") -> str:
 def revoke_api_key(key: str) -> bool:
     with _lock:
         conn = _get_conn()
-        cur = conn.execute("DELETE FROM api_keys WHERE key = ?", (key,))
+        cur = conn.execute("DELETE FROM api_keys WHERE key = ?", (_token_digest(key),))
         conn.commit()
     return cur.rowcount > 0
 
@@ -431,9 +458,9 @@ def get_user_by_api_key(api_key: str) -> Optional[dict]:
         row = conn.execute(
             """
             SELECT u.* FROM api_keys k JOIN users u ON u.user_id = k.user_id
-            WHERE k.key = ?
+            WHERE k.key = ? AND u.deleting=0 AND (k.label != 'session' OR datetime(k.created_at) > datetime('now', ?))
             """,
-            (api_key,),
+            (_token_digest(api_key), f"-{max(60, int(os.getenv('SESSION_TTL_SECONDS', '604800')))} seconds"),
         ).fetchone()
     return dict(row) if row else None
 
@@ -479,6 +506,13 @@ def delete_user(user_id: str, cascade: bool = True) -> dict:
                     "summaries": 0, "documents": 0, "feedback": 0,
                     "api_keys": 0}
     if cascade:
+        with _lock:
+            conn = _get_conn()
+            conn.execute("UPDATE users SET deleting=1 WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM api_keys WHERE user_id=?", (user_id,))
+            conn.commit()
+        from src.platform.cleanup import purge_resources
+        result.update(purge_resources(user_id))
         # 会话/偏好/摘要（级联接口依赖平台集成进度；缺失或签名不符时跳过并告警）
         try:
             from src.memory.conversations import delete_user_conversations
@@ -503,7 +537,7 @@ def delete_user(user_id: str, cascade: bool = True) -> dict:
             from src.data.documents_store import delete_documents_by_user
             from src.memory.feedback import delete_user_feedback
 
-            result["documents"] = delete_documents_by_user(user_id)
+            delete_documents_by_user(user_id)
             result["feedback"] = delete_user_feedback(user_id)
         except (ImportError, TypeError) as e:
             logger.warning("[users] 文档/反馈级联接口缺失，跳过：%s", e)

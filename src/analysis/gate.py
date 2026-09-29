@@ -1,6 +1,7 @@
 """S1 适用框架门控（视觉模型 #1，结构化输出）。"""
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 from langchain_core.messages import HumanMessage
 
@@ -27,7 +28,7 @@ def classify_framework(image_b64: str, image_ext: str, retries: int = 1) -> dict
     last_error = ""
     for attempt in range(retries + 1):
         try:
-            resp = get_vision_llm().invoke([msg])
+            resp = invoke_model(get_vision_llm(), [msg])
             data = parse_json(str(resp.content))
             if isinstance(data, dict) and data.get("framework") in FRAMEWORKS:
                 flags = data.get("quality_flags") or []

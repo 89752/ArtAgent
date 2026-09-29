@@ -51,6 +51,9 @@ def _get_conn() -> sqlite3.Connection:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id, id)"
         )
+        for column in ("turn_id", "run_id", "artifact_id"):
+            if column not in cols:
+                conn.execute(f"ALTER TABLE feedback ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         conn.commit()
         _db_ready = True
     return conn
@@ -66,6 +69,7 @@ def add_feedback(
     reason: str = "",
     comment: str = "",
     user_id: str = "web_user",
+    *, turn_id: str = "", run_id: str = "", artifact_id: str = "",
 ) -> int:
     """写入一条反馈；返回自增 id。rating 仅接受 1 / -1。"""
     rating = int(rating)
@@ -77,10 +81,10 @@ def add_feedback(
         conn = _get_conn()
         cur = conn.execute(
             """
-            INSERT INTO feedback (user_id, session_id, rating, reason, comment, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO feedback (user_id, session_id, rating, reason, comment, created_at, turn_id, run_id, artifact_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, str(session_id)[:128], rating, reason, comment, _now()),
+            (user_id, str(session_id)[:128], rating, reason, comment, _now(), turn_id[:128], run_id[:128], artifact_id[:128]),
         )
         conn.commit()
     return int(cur.lastrowid)
@@ -101,7 +105,7 @@ def list_feedback(
         ).fetchone()[0]
         rows = conn.execute(
             """
-            SELECT id, session_id, rating, reason, comment, created_at
+            SELECT id, session_id, rating, reason, comment, created_at, turn_id, run_id, artifact_id
             FROM feedback WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?
             """,
             (user_id, limit, offset),
@@ -111,6 +115,7 @@ def list_feedback(
             {
                 "id": r[0], "session_id": r[1], "rating": r[2],
                 "reason": r[3], "comment": r[4], "created_at": r[5],
+                "turn_id": r[6], "run_id": r[7], "artifact_id": r[8],
             }
             for r in rows
         ],

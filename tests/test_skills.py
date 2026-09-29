@@ -170,6 +170,34 @@ def test_validate_output():
     assert ok
 
 
+def test_skill_without_schema_returns_plain_text():
+    skill = Skill(
+        id="plain", name="plain", description="", when_to_use="",
+        tools=["exact_lookup"], output_schema={}, max_steps=1,
+    )
+
+    class PlainLLM:
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            return AIMessage(content="完成")
+
+    runner = _skill_runner(skill)
+    with patch("src.skills.loader.get_deterministic_llm", return_value=PlainLLM()), \
+         patch.dict("src.skills.loader.TOOL_REGISTRY", {"exact_lookup": MagicMock()}, clear=True):
+        assert runner("任务") == "完成"
+
+
+def test_skill_tool_output_is_bounded(monkeypatch):
+    monkeypatch.setenv("SKILL_TOOL_RESULT_CHARS", "2000")
+    from src.skills.loader import _bounded_tool_output
+
+    out = _bounded_tool_output("x" * 5000)
+    assert len(out) < 2100
+    assert "已截断" in out
+
+
 # ── 技能斜杠激活 ────────────────────────────────────────────
 def _fake_skills() -> list[Skill]:
     return [

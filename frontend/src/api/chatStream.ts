@@ -1,4 +1,5 @@
 import type { ChatDone, ChatEvent } from "./types";
+import { authHeaders } from "./client";
 
 export interface StreamChatOptions {
   message: string;
@@ -18,7 +19,7 @@ export async function streamChat(opts: StreamChatOptions): Promise<void> {
   try {
     res = await fetch("/api/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       signal: opts.signal,
       body: JSON.stringify({
         message: opts.message,

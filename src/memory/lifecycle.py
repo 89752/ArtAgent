@@ -7,6 +7,7 @@ LLM 决定 REMOVE（软删除）或 EXTEND（延长有效期），失败时保�
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import os
 import sqlite3
@@ -158,7 +159,7 @@ def _default_llm() -> Callable[[str], str]:
     from src.utils.llm import get_deterministic_llm
 
     def _invoke(p: str) -> str:
-        return get_deterministic_llm().invoke(p).content
+        return invoke_model(get_deterministic_llm(), p).content
 
     return _invoke
 

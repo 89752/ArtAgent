@@ -17,6 +17,7 @@ front matter（--- 包裹，key: value）：
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import Callable
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.utils.llm import get_deterministic_llm
+import hashlib
 
 
 @dataclass
@@ -40,6 +42,8 @@ class Skill:
     instructions: str = ""
     steps: list[str] = field(default_factory=list)
     output_schema: dict[str, str] = field(default_factory=dict)
+    version: str = "1"
+    content_hash: str = ""
 
 
 def _parse_front_matter(text: str) -> tuple[dict, str]:
@@ -122,6 +126,8 @@ def load_skills(skills_dir: Path = Path("agent_skills")) -> list[Skill]:
                 instructions=body,
                 steps=_parse_json_field(kv.get("steps_json", "[]"), []),
                 output_schema=_parse_json_field(kv.get("output_schema_json", "{}"), {}),
+                version=str(kv.get("version", "1")),
+                content_hash=hashlib.sha256(md.read_bytes()).hexdigest(),
             )
         )
     return skills
@@ -136,6 +142,19 @@ def _build_tool_registry() -> dict[str, object]:
 
 
 TOOL_REGISTRY: dict[str, object] = _build_tool_registry()
+
+
+def _bounded_tool_output(output: object) -> str:
+    """Bound evidence copied into the skill prompt so one broad retrieval cannot
+    consume the shared run budget before the skill produces an answer."""
+    try:
+        limit = max(2000, int(os.getenv("SKILL_TOOL_RESULT_CHARS", "8000")))
+    except ValueError:
+        limit = 8000
+    text = str(output)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n…（工具结果已截断，共 {len(text)} 字符）"
 
 
 def _validate_output(text: str, schema: dict[str, str]) -> tuple[bool, list[str]]:
@@ -195,7 +214,10 @@ def _skill_runner(skill: Skill) -> Callable[[str], str]:
         messages: list = [SystemMessage(content=system), HumanMessage(content=task)]
         for step in range(skill.max_steps):
             try:
-                resp = llm.invoke(messages)
+                from src.harness.context import invoke_model, RunStopped
+                resp = invoke_model(llm, messages)
+            except RunStopped:
+                raise
             except Exception as e:  # noqa: BLE001
                 return f"技能执行失败（第{step + 1}步）：{e}"
             tool_calls = getattr(resp, "tool_calls", None) or []
@@ -204,6 +226,8 @@ def _skill_runner(skill: Skill) -> Callable[[str], str]:
                 for tc in tool_calls:
                     tool = TOOL_REGISTRY.get(tc.get("name"))
                     try:
+                        if tc.get("name") not in skill.tools:
+                            raise PermissionError(f"技能不允许工具 {tc.get('name')}")
                         if tool is None:
                             raise KeyError(f"未注册工具 {tc.get('name')}")
                         from src.utils.governance import governed_invoke
@@ -211,11 +235,13 @@ def _skill_runner(skill: Skill) -> Callable[[str], str]:
                         output = governed_invoke(
                             tool, tc.get("args") or {}, context="skill"
                         )
+                    except RunStopped:
+                        raise
                     except Exception as e:  # noqa: BLE001 — 工具失败回灌给模型
                         output = f"工具执行失败：{e}"
                     messages.append(
                         ToolMessage(
-                            content=str(output),
+                            content=_bounded_tool_output(output),
                             name=tc.get("name"),
                             tool_call_id=tc.get("id"),
                         )
@@ -225,7 +251,7 @@ def _skill_runner(skill: Skill) -> Callable[[str], str]:
             if skill.output_schema:
                 ok, missing = _validate_output(text, skill.output_schema)
                 if ok:
-                    return text
+                    return _bounded_tool_output(text)
                 # 缺字段：有界补齐（每轮一次，超限由 max_steps 兜底）
                 messages.append(AIMessage(content=text))
                 messages.append(
@@ -234,19 +260,19 @@ def _skill_runner(skill: Skill) -> Callable[[str], str]:
                     )
                 )
                 continue
-            return attach_evidence(text)
+            return _bounded_tool_output(text)
         last = str(messages[-1].content)[:2000]
         return last + "\n\n（已达技能步数上限）"
 
     return run
 
 
-def register_skills(skills_dir: Path = Path("agent_skills")) -> list:
+def register_skills(skills_dir: Path = Path("agent_skills"), *, skills=None) -> list:
     """把全部技能注册为 skill_<id> 工具（StructuredTool）。"""
     from langchain_core.tools import StructuredTool
 
     tools: list = []
-    for skill in load_skills(skills_dir):
+    for skill in (load_skills(skills_dir) if skills is None else skills):
         runner = _skill_runner(skill)
         description = skill.description or skill.when_to_use or f"执行技能 {skill.name}"
         tools.append(

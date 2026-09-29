@@ -472,7 +472,8 @@ class _FakeChroma:
         return {"documents": self._docs, "metadatas": self._metas}
 
 
-def test_pdf_bm25_chinese_query():
+def test_pdf_bm25_chinese_query(monkeypatch):
+    monkeypatch.setattr("src.ingestion.versions.visible_indexes", lambda filters: {"d1": "d1", "d2": "d2"})
     docs = ["莫奈在葛列尔画室认识了布丹", "梵高在阿尔勒画了向日葵"]
     metas = [
         {"doc_id": "d1", "page_id": "d1-p1", "kb_id": "k"},
@@ -490,6 +491,7 @@ def test_pdf_bm25_chinese_query():
 
 
 def test_pdf_bm25_english_query_translated(monkeypatch):
+    monkeypatch.setattr("src.ingestion.versions.visible_indexes", lambda filters: {"d1": "d1", "d2": "d2"})
     docs = ["莫奈的睡莲系列创作于吉维尼", "卡拉瓦乔擅长明暗对照"]
     metas = [{"doc_id": "d1", "page_id": "d1-p1"}, {"doc_id": "d2", "page_id": "d2-p1"}]
     monkeypatch.setattr(
@@ -739,6 +741,34 @@ def test_filter_search_message_skips_when_nothing_dropped():
         _patch(general_mod, "llm_relevance_filter", old_filter)
 
 
+def test_filter_search_message_skips_llm_for_selected_documents():
+    from src.harness.context import RunContext, run_scope
+
+    items = _items(3)
+    msg = ToolMessage(content=json.dumps(items), name="semantic_search",
+                      tool_call_id="c1", id="m1")
+    old_filter = _patch(general_mod, "llm_relevance_filter", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not call LLM")))
+    try:
+        with run_scope(RunContext("r", "u", document_ids={"d1"})):
+            assert general_mod._filter_search_message(msg, "q") is msg
+    finally:
+        _patch(general_mod, "llm_relevance_filter", old_filter)
+
+
+def test_filter_search_message_skips_llm_for_user_pdf_hits():
+    items = [
+        {"source": "user_pdf_text", "doc_id": "d1", "page": 1},
+        {"source": "user_pdf_image", "doc_id": "d1", "page": 2},
+    ]
+    msg = ToolMessage(content=json.dumps(items), name="semantic_search",
+                      tool_call_id="c1", id="m1")
+    old_filter = _patch(general_mod, "llm_relevance_filter", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not call LLM")))
+    try:
+        assert general_mod._filter_search_message(msg, "q") is msg
+    finally:
+        _patch(general_mod, "llm_relevance_filter", old_filter)
+
+
 # ══════════════ reranker ══════════════
 class _FakeResp:
     def __init__(self, payload):
@@ -914,6 +944,22 @@ def test_pool_not_larger_than_top_k_skips_rerank():
     try:
         pool = [_hit("a"), _hit("b")]
         assert [h.content for h in _rerank_fused("q", pool, top_k=5)] == ["a", "b"]
+    finally:
+        _patch(reranker_mod, "rerank", old)
+
+
+def test_user_pdf_text_skips_remote_rerank():
+    def _boom(*a, **kw):
+        raise AssertionError("用户 PDF 检索不应等待远程 reranker")
+
+    old = _patch(reranker_mod, "rerank", _boom)
+    try:
+        pool = [
+            _hit("pdf", source="user_pdf_text", page_id="d-p1"),
+            _hit("core-1"),
+            _hit("core-2"),
+        ]
+        assert _rerank_fused("q", pool, top_k=1) == pool
     finally:
         _patch(reranker_mod, "rerank", old)
 

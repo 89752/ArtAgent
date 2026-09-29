@@ -116,7 +116,7 @@ def record_extraction_metrics(
     }
 
 
-def recent_extraction_metrics(limit: int = 50) -> list[dict]:
+def recent_extraction_metrics(limit: int = 50, user_id: str | None = None) -> list[dict]:
     """最近 N 次抽取质量记录（倒序）。"""
     limit = min(max(1, int(limit)), 500)
     with _lock:
@@ -125,9 +125,9 @@ def recent_extraction_metrics(limit: int = 50) -> list[dict]:
             SELECT user_id, extracted, passed,
                    rejected_scope, rejected_durability, rejected_authority,
                    rejected_confidence, rejected_total, rejection_rate, error, created_at
-            FROM extraction_metrics ORDER BY id DESC LIMIT ?
+            FROM extraction_metrics WHERE (? IS NULL OR user_id=?) ORDER BY id DESC LIMIT ?
             """,
-            (limit,),
+            (user_id, user_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 

@@ -56,6 +56,8 @@ from src.tasks import store as tasks_store
 from src.observability import runs as runs_store
 from src.platform.auth import current_user, require_authenticated_user, require_admin
 from src.platform import users as users_store
+from src.harness.verification import TaskSpec
+from src.harness.planning import default_plan
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -101,11 +103,19 @@ class FeedbackIn(BaseModel):
     rating: Literal[1, -1]
     reason: str = Field(default="", max_length=40)
     comment: str = Field(default="", max_length=500)
+    turn_id: str = Field(default="", max_length=128)
+    run_id: str = Field(default="", max_length=128)
+    artifact_id: str = Field(default="", max_length=128)
 
 
 class AgentJobIn(BaseModel):
     objective: str = Field(min_length=1, max_length=4000)
     plan: list[str] = Field(default_factory=list, max_length=20)
+    spec: TaskSpec = Field(default_factory=TaskSpec)
+
+
+class JobInputIn(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
 
 
 class LoginIn(BaseModel):
@@ -148,9 +158,7 @@ async def _lifespan(_app: FastAPI):
     tasks_store.mark_interrupted_on_startup()
     # AgentJob 的步骤和产物已落库；恢复时从 step_index 自动续跑，非 Agent
     # 的文件解析任务保持 interrupted，避免不透明地重复重型导入。
-    for job in tasks_store.recover_interrupted_agent_jobs():
-        if job.get("task_id") and job.get("user_id"):
-            asyncio.create_task(asyncio.to_thread(service.run_agent_job, job["task_id"], job["user_id"]))
+    tasks_store.recover_interrupted_agent_jobs()
     service.restore_tables()
     from src.analysis import store as analysis_store
 
@@ -165,7 +173,46 @@ async def _lifespan(_app: FastAPI):
             shutil.rmtree(USER_IMAGE_ROOT / image_id, ignore_errors=True)
     except Exception:  # noqa: BLE001
         logger.exception("user image TTL cleanup failed")
-    yield
+    async def dispatch_jobs():
+        # Database leases arbitrate between processes; keep local concurrency bounded.
+        running = set()
+        try:
+            while True:
+                for finished in [task for task in running if task.done()]:
+                    running.remove(finished)
+                    if not finished.cancelled() and finished.exception():
+                        logger.error("background worker failed: %s", finished.exception())
+                for task in tasks_store.runnable_ingestion_tasks(limit=min(2,max(0,4-len(running)))):
+                    payload = task["payload"]
+                    if payload.get("user_id") and payload.get("file_path"):
+                        running.add(asyncio.create_task(asyncio.to_thread(service.run_document_task,task["task_id"],payload["user_id"])))
+                for job in tasks_store.runnable_agent_jobs(limit=max(0, 4-len(running))):
+                    if job.get("user_id"):
+                        running.add(asyncio.create_task(asyncio.to_thread(
+                            service.run_agent_job, job["task_id"], job["user_id"])))
+                await asyncio.sleep(10)
+        finally:
+            for task in running:
+                task.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+
+    dispatcher = asyncio.create_task(dispatch_jobs())
+    async def maintain_documents():
+        from src.ingestion.maintenance import collect_versions, mark_orphaned_documents
+        while True:
+            try:
+                await asyncio.to_thread(collect_versions)
+                await asyncio.to_thread(mark_orphaned_documents)
+            except Exception:
+                logger.exception("document maintenance failed; will retry")
+            await asyncio.sleep(300)
+    maintenance = asyncio.create_task(maintain_documents())
+    try:
+        yield
+    finally:
+        dispatcher.cancel()
+        maintenance.cancel()
+        await asyncio.gather(dispatcher, maintenance, return_exceptions=True)
     try:
         from src.memory.extract import shutdown_flush
 
@@ -176,6 +223,17 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="西方艺术智能助手", docs_url=None, redoc_url=None, lifespan=_lifespan)
+from src.memory.conversations import ConversationBusy
+from src.harness.ingestion import DocumentBusy
+from src.platform.cleanup import CleanupPending
+
+
+@app.exception_handler(ConversationBusy)
+@app.exception_handler(DocumentBusy)
+@app.exception_handler(CleanupPending)
+async def conversation_busy_handler(_request, exc):
+    return JSONResponse({"ok": False, "error": str(exc), "code": "document_busy" if isinstance(exc,DocumentBusy) else "conversation_busy"}, status_code=409)
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -197,6 +255,12 @@ def ready():
             status_code=503,
         )
     return {"ok": True, "status": "ready"}
+
+
+@app.get("/api/capabilities")
+def capabilities(user_id: str = Depends(require_authenticated_user)):
+    from src.ops.capabilities import report
+    return report(user_id)
 
 
 # ── 请求治理中间件：request_id 贯穿 + 令牌桶限流 ──
@@ -574,9 +638,16 @@ def get_feedback(
 @app.post("/api/feedback")
 def add_feedback(payload: FeedbackIn, user_id: str = Depends(require_authenticated_user)):
     """用户反馈闭环：{session_id, rating(1/-1), reason?, comment?}。"""
-    fid = feedback_store.add_feedback(
-        payload.session_id, payload.rating, payload.reason, payload.comment, user_id
-    )
+    if payload.turn_id and not any(m.get("turn_id") == payload.turn_id for m in service.conversation(payload.session_id, user_id)):
+        return JSONResponse({"error": "回答不存在"}, status_code=404)
+    if payload.run_id and payload.run_id != payload.turn_id:
+        return JSONResponse({"error": "运行与回答不匹配"}, status_code=400)
+    if payload.artifact_id:
+        from src.harness.storage import get_artifact
+        if not get_artifact(payload.artifact_id,user_id):
+            return JSONResponse({"error": "成果不存在"}, status_code=404)
+    fid = feedback_store.add_feedback(payload.session_id, payload.rating, payload.reason, payload.comment, user_id,
+        turn_id=payload.turn_id, run_id=payload.run_id, artifact_id=payload.artifact_id)
     return JSONResponse({"ok": True, "id": fid})
 
 
@@ -606,7 +677,7 @@ def get_memory_metrics(limit: int = 50, user_id: str = Depends(require_authentic
     """记忆抽取质量：提取数/放行数/各门控拒绝数/拒绝率。"""
     from src.memory.metrics import recent_extraction_metrics
 
-    return JSONResponse({"items": recent_extraction_metrics(limit=limit)})
+    return JSONResponse({"items": recent_extraction_metrics(limit=limit, user_id=user_id)})
 
 
 @app.post("/api/chat")
@@ -648,6 +719,7 @@ async def chat(
             logger.exception("chat producer failed: %s", e)
             put({"type": "error", "message": "服务器内部错误"})
         finally:
+            it.close()
             put(None)  # 哨兵：流结束
 
     threading.Thread(target=producer, daemon=True, name="chat-producer").start()
@@ -681,6 +753,15 @@ async def upload_document(
     oversize: str = Form(""),
     user_id: str = Depends(require_authenticated_user),
 ):
+    from src.harness.admission import upload_slot, UploadQuotaExceeded
+    try:
+        with upload_slot(user_id) as reservation:
+            return await _upload_document(file, background, oversize, user_id, reservation)
+    except UploadQuotaExceeded as exc:
+        return JSONResponse({"ok": False, "error": str(exc), "code": "upload_quota"}, status_code=429)
+
+
+async def _upload_document(file, background, oversize, user_id, reservation):
     """上传 PDF/表格：保存 → BackgroundTasks 后台处理 → 前端轮询进度。
 
     文件类型路由（零模型调用）：.pdf → PDF 解析入库；
@@ -700,13 +781,15 @@ async def upload_document(
     # 分块读取：未选择拆分/直传模式时，超限立即中止，避免超大文件整份读入内存（OOM）
     allow_full_read = kind == "pdf" and oversize in ("split", "pdfplumber")
     max_mb = max(1, _UPLOAD_MAX_BYTES // (1024 * 1024))
-    chunks: list[bytes] = []
     total = 0
+    hard_limit = max(1, int(os.getenv("UPLOAD_HARD_MAX_MB", "200"))) * 1024 * 1024
     while True:
         chunk = await file.read(1024 * 1024)
         if not chunk:
             break
         total += len(chunk)
+        if total > hard_limit:
+            return JSONResponse({"ok": False, "error": "文件超过上传硬上限", "code": "upload_hard_limit"}, status_code=413)
         if total > _UPLOAD_MAX_BYTES and not allow_full_read:
             return JSONResponse(
                 {
@@ -718,19 +801,19 @@ async def upload_document(
                 },
                 status_code=400,
             )
-        chunks.append(chunk)
-    data = b"".join(chunks)
-    if not data:
+    await file.seek(0)
+    if not total:
         return JSONResponse({"ok": False, "error": "空文件"}, status_code=400)
-    if len(data) > _UPLOAD_MAX_BYTES:
+    if total > _UPLOAD_MAX_BYTES:
         if kind == "pdf" and oversize == "split":
-            from src.ingestion.pdf_splitter import split_pdf
-
-            parts = split_pdf(data, _UPLOAD_MAX_BYTES, filename)
+            from src.ingestion.pdf_splitter import save_split_upload
+            try:
+                parts = await asyncio.to_thread(save_split_upload, file.file, _UPLOAD_MAX_BYTES, filename, user_id, reservation)
+            except ValueError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
             docs = []
             split_group_id = uuid.uuid4().hex
-            for part_name, part_bytes in parts:
-                saved = service.save_upload(part_name, part_bytes, user_id=user_id)
+            for saved in parts:
                 documents_store.update_document(
                     saved["doc_id"],
                     metadata={
@@ -774,7 +857,13 @@ async def upload_document(
             )
 
     force_pdfplumber = oversize == "pdfplumber"
-    saved = service.save_upload(filename, data, user_id=user_id)
+    if kind == "pdf":
+        from src.ingestion.pdf_splitter import validate_pdf_stream
+        try:
+            await asyncio.to_thread(validate_pdf_stream, file.file)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    saved = await asyncio.to_thread(service.save_upload, filename, file.file, user_id=user_id)
     # 任务化：task_id 复用 doc_id，后台解析全程可查可重试（响应形状不变）
     task_id = tasks_store.create_task(
         type=f"ingest_{kind}",
@@ -814,7 +903,7 @@ def get_tasks(status: str = "", user_id: str = Depends(require_authenticated_use
     """任务列表：可按状态过滤 pending/processing/done/failed/interrupted。"""
     return JSONResponse({
         "items": [
-            task for task in tasks_store.list_tasks(status=status.strip() or None)
+            task for task in tasks_store.list_tasks(status=status.strip() or None, user_id=user_id)
             if (task.get("payload") or {}).get("user_id") == user_id
         ]
     })
@@ -827,8 +916,11 @@ async def create_agent_job(
     user_id: str = Depends(require_authenticated_user),
 ):
     """Queue a durable long-horizon job; each completed step is checkpointed."""
-    plan = payload.plan or ["执行任务并生成可恢复结果"]
-    task_id = tasks_store.create_agent_job(payload.objective, user_id, plan)
+    plan = payload.plan or default_plan(payload.objective)
+    for doc_id in payload.spec.document_ids:
+        if not documents_store.get_document(doc_id, user_id):
+            return JSONResponse({"ok": False, "error": "资料不存在"}, status_code=404)
+    task_id = tasks_store.create_agent_job(payload.objective, user_id, plan, spec=payload.spec.model_dump())
     background.add_task(service.run_agent_job, task_id, user_id)
     return JSONResponse({"ok": True, "job_id": task_id})
 
@@ -839,6 +931,66 @@ def get_agent_job(task_id: str, user_id: str = Depends(require_authenticated_use
     if not job or job.get("type") != "agent_job" or (job.get("payload") or {}).get("user_id") != user_id:
         return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
     return JSONResponse({"ok": True, "job": job})
+
+
+@app.post("/api/jobs/{task_id}/input")
+async def job_input(task_id: str, payload: JobInputIn, background: BackgroundTasks, user_id: str = Depends(require_authenticated_user)):
+    if not tasks_store.supply_input(task_id, user_id, payload.text):
+        return JSONResponse({"ok": False, "error": "任务不存在或当前不能补充"}, status_code=409)
+    background.add_task(service.run_agent_job, task_id, user_id)
+    return {"ok": True}
+
+
+@app.get("/api/jobs/{task_id}/artifacts")
+def job_artifacts(task_id: str, user_id: str = Depends(require_authenticated_user)):
+    from src.harness.storage import list_artifacts
+    return {"items": list_artifacts(task_id, user_id)}
+
+
+@app.post("/api/jobs/{task_id}/revise")
+async def revise_job(task_id: str, payload: JobInputIn, background: BackgroundTasks, user_id: str = Depends(require_authenticated_user)):
+    if not tasks_store.revise_job(task_id, user_id, payload.text):
+        return JSONResponse({"error": "当前任务不能修订"}, status_code=409)
+    background.add_task(service.run_agent_job, task_id, user_id)
+    return {"ok": True}
+
+
+@app.get("/api/artifacts/{artifact_id}/download")
+def download_artifact(artifact_id: str, user_id: str = Depends(require_authenticated_user)):
+    from src.harness.storage import get_artifact
+    from fastapi.responses import Response
+    artifact = get_artifact(artifact_id, user_id)
+    if not artifact:
+        return JSONResponse({"error": "成果不存在"}, status_code=404)
+    return Response(artifact["content"], media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="report-{artifact_id}-v{artifact["revision"]}.md"'})
+
+
+@app.get("/api/experiences")
+def experiences(user_id: str = Depends(require_authenticated_user)):
+    from src.learning.store import list_experiences
+    return {"items": list_experiences(user_id)}
+
+
+@app.post("/api/jobs/{task_id}/learn")
+async def learn_job(task_id: str, user_id: str = Depends(require_authenticated_user)):
+    from src.learning.service import distill
+    try:
+        return {"ok": True, "experience": await asyncio.to_thread(distill, task_id, user_id)}
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/experiences/{experience_id}/{action}")
+async def experience_action(experience_id: str, action: Literal["evaluate", "promote", "rollback"], user_id: str = Depends(require_authenticated_user)):
+    from src.learning.service import evaluate
+    from src.learning.store import change_status
+    try:
+        if action == "evaluate":
+            return {"ok": True, "evaluation": await asyncio.to_thread(evaluate, experience_id, user_id)}
+        return {"ok": True, "status": change_status(experience_id, user_id, action)}
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 @app.post("/api/jobs/{task_id}/cancel")
@@ -906,6 +1058,8 @@ async def retry_task(
     task = tasks_store.get_task(task_id)
     if not task or (task.get("payload") or {}).get("user_id") != user_id:
         return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    if task.get("type") not in {"ingest_pdf", "ingest_table"}:
+        return JSONResponse({"ok": False, "error": "此接口仅支持文档解析任务重试"}, status_code=400)
     if not tasks_store.reset_task(task_id):
         return JSONResponse(
             {"ok": False, "error": "只有 failed/interrupted 任务可重试"},
@@ -919,9 +1073,13 @@ async def retry_task(
     force_pdfplumber = bool(payload.get("force_pdfplumber"))
     task_user_id = payload.get("user_id") or user_id
     # 同步把文档状态重置为解析中，避免界面一直停留在失败
-    if documents_store.get_document(doc_id, user_id):
+    retry_doc = documents_store.get_document(doc_id, user_id)
+    if retry_doc:
+        metadata = {}
+        if retry_doc.get("kind") == "pdf" and retry_doc.get("status") == "done" and not retry_doc.get("active_index_id"):
+            metadata["active_index_id"] = doc_id
         documents_store.update_document(
-            doc_id, user_id, status="processing", error=""
+            doc_id, status="processing", error="", metadata=metadata
         )
     if payload.get("kind") == "table":
         background.add_task(
@@ -975,6 +1133,8 @@ def delete_document(doc_id: str, user_id: str = Depends(require_authenticated_us
     """删除文档并级联清理向量/文件/状态。"""
     try:
         result = service.delete_document(doc_id, user_id)
+    except DocumentBusy:
+        raise
     except KeyError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
     except Exception as e:  # noqa: BLE001
@@ -1010,6 +1170,9 @@ async def upload_user_image(
             break
         chunks.append(chunk)
         total += len(chunk)
+        hard_limit = max(_UPLOAD_MAX_BYTES, int(os.getenv("UPLOAD_HARD_MAX_MB", "200")) * 1024 * 1024)
+        if total > hard_limit:
+            return JSONResponse({"ok": False, "error": "文件超过上传硬上限"}, status_code=413)
         if total > max_bytes:
             return JSONResponse(
                 {"ok": False, "error": "图片超过大小限制"}, status_code=400
@@ -1165,6 +1328,7 @@ def _analysis_sse(
             logger.exception("painting analysis producer failed: %s", e)
             put({"type": "error", "message": "服务器内部错误"})
         finally:
+            it.close()
             put(None)
 
     threading.Thread(target=producer, daemon=True, name="painting-analysis").start()

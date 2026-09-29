@@ -11,6 +11,7 @@
 行转字典统一走 src/data/access.py 数据访问层。
 """
 
+from src.harness.context import invoke_model
 import base64
 from typing import Optional
 
@@ -223,7 +224,7 @@ def _analyze_image_file(image_file: str, analysis_focus: str) -> dict:
                 {"type": "text", "text": metadata_hint},
             ]
         )
-        response = llm.invoke([msg])
+        response = invoke_model(llm, [msg])
         analysis_text = response.content
     except Exception as e:
         analysis_text = f"视觉分析失败：{e}"

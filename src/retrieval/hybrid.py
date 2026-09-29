@@ -320,6 +320,12 @@ def _rerank_fused(
     pool = fused[:RERANK_POOL]
     if len(pool) <= top_k:
         return pool  # 无排可重，省一次 API 调用
+    # 用户文档问答已经由 owner/doc/version 过滤并保留页码定位。此时远程
+    # reranker 的边际收益很小，而网络抖动曾让一次检索额外等待 60 秒以上。
+    # 保留 RRF 粗排，优先保证交互速度和可用性。
+    if any(h.source == "user_pdf_text" for h in pool):
+        log_event(logger, "hybrid_rerank_skipped", reason="user_pdf_text", pool=len(pool))
+        return pool
     text_slots = [i for i, h in enumerate(pool) if h.source not in _NON_RERANK_SOURCES]
     if not text_slots:
         return pool
@@ -384,12 +390,17 @@ class HybridRetriever:
                     与向量检索的 metadata 过滤语义一致。
         """
         use_rerank = _rerank_enabled(rerank)
+        from src.harness.context import current_run, RunStopped
+        run = current_run()
+        selected = run.document_ids if run else None
         # 精排开启时各源多取候选（池化后再重排）；否则保持原样按需取
         fetch_k = RERANK_POOL if use_rerank else top_k
 
         per_source: list[list[RetrievalResult]] = []
-        for name, retriever in self._retrievers.items():
+        for name, retriever in list(self._retrievers.items()):
             src_label = getattr(retriever, "source", name)
+            if selected is not None and src_label not in {"user_pdf_text", "user_pdf_image", "user_table"}:
+                continue
             if sources is not None and name not in sources and src_label not in sources:
                 continue
             r_dataset = getattr(retriever, "dataset_id", None)
@@ -400,7 +411,26 @@ class HybridRetriever:
             ):
                 continue
             try:
-                hits = retriever.search(query, top_k=fetch_k, filters=filters)
+                if selected is None:
+                    hits = retriever.search(query, top_k=fetch_k, filters=filters)
+                else:
+                    hits = []
+                    for doc_id in sorted(selected):
+                        if run:
+                            run.check()
+                        if src_label == "user_table":
+                            from src.ingestion.table_pipeline import table_dataset_id
+                            if r_dataset != table_dataset_id(doc_id, run.user_id):
+                                continue
+                            candidates = retriever.search(query, top_k=fetch_k, filters=filters)
+                            for hit in candidates:
+                                hit.metadata = {**hit.metadata, "doc_id": doc_id}
+                            hits.extend(candidates)
+                            continue
+                        candidates = retriever.search(query, top_k=fetch_k, filters={**(filters or {}), "doc_id": doc_id})
+                        hits.extend(hit for hit in candidates if str(hit.metadata.get("doc_id") or "") == doc_id)
+            except RunStopped:
+                raise
             except Exception as e:  # 单源失败不拖垮整体检索
                 logger.warning("[hybrid] source=%s 检索失败：%s", name, e)
                 hits = []
@@ -450,4 +480,6 @@ def get_hybrid_retriever() -> HybridRetriever:
         if os.getenv("DEFAULT_DATASET") == "core" and "core" in hybrid._retrievers:
             hybrid.active_dataset = "core"
         _hybrid = hybrid
+    from src.ingestion.table_pipeline import sync_active_tables
+    sync_active_tables(_hybrid)
     return _hybrid

@@ -48,6 +48,7 @@ export interface ChatDone {
 export type ChatEvent = ChatDelta | ChatDone;
 
 export interface HistoryMessage {
+  turn_id?: string;
   role: string;
   content?: string;
   sources?: Source[];
@@ -91,7 +92,8 @@ export interface MemoryListData {
 export interface AgentTask {
   task_id: string;
   type: string;
-  status: "pending" | "processing" | "paused" | "done" | "failed" | "interrupted";
+  status: "pending" | "processing" | "paused" | "done" | "failed" | "interrupted" | "waiting_input" | "verification_failed" | "budget_exhausted" | "unknown_execution_state";
+  payload?: { objective?: string };
   progress?: number;
   error?: string;
   created_at?: string;

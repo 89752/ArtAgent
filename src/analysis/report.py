@@ -1,6 +1,7 @@
 """S3 三层分层分析（视觉模型 #2，schema 校验 + 有界重试）。"""
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import json
 
@@ -65,8 +66,11 @@ def generate_layered_report(
 
     flags = quality_flags or []
     last_report: dict | None = None
+    fix_hint = ""
+    # 严格限制为首次生成 + 一次修复。旧实现会在修复失败后再次执行外层
+    # 循环，最坏调用三次视觉模型，且第三次没有携带修复提示。
     for attempt in range(2):
-        prompt = _build_prompt(gate, metrics, focus, flags)
+        prompt = _build_prompt(gate, metrics, focus, flags, fix_hint)
         msg = HumanMessage(
             content=[
                 {
@@ -79,7 +83,7 @@ def generate_layered_report(
             ]
         )
         try:
-            resp = get_vision_llm().invoke([msg])
+            resp = invoke_model(get_vision_llm(), [msg])
         except Exception as e:  # noqa: BLE001
             log_event(logger, "report_llm_failed", attempt=attempt, error=str(e))
             continue
@@ -92,41 +96,14 @@ def generate_layered_report(
         boundary = boundary_hits(json.dumps(data, ensure_ascii=False))
         if not missing and not vague and not boundary:
             break
-        fix_hint = ""
+        hints: list[str] = []
         if missing:
-            fix_hint += "；".join(f"缺少字段 {m}" for m in missing)
+            hints.extend(f"缺少字段 {m}" for m in missing)
         if vague:
-            fix_hint += "；".join(vague)
+            hints.extend(vague)
         if boundary:
-            fix_hint += "；禁止出现心理推断/诊断词：" + "、".join(boundary)
-        # 第二轮带修正提示
-        if attempt == 0:
-            msg2 = HumanMessage(
-                content=[
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/{image_ext};base64,{image_b64}"
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": _build_prompt(gate, metrics, focus, flags, fix_hint),
-                    },
-                ]
-            )
-            try:
-                resp2 = get_vision_llm().invoke([msg2])
-                data2 = parse_json(str(resp2.content))
-                if isinstance(data2, dict):
-                    last_report = data2
-                    missing2 = missing_fields(data2)
-                    vague2 = vague_suggestions(data2)
-                    boundary2 = boundary_hits(json.dumps(data2, ensure_ascii=False))
-                    if not missing2 and not vague2 and not boundary2:
-                        break
-            except Exception as e:  # noqa: BLE001
-                log_event(logger, "report_retry_failed", error=str(e))
+            hints.append("禁止出现心理推断/诊断词：" + "、".join(boundary))
+        fix_hint = "；".join(hints)
     if not last_report:
         last_report = {}
     log_event(

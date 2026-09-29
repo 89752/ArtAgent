@@ -16,6 +16,7 @@
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import json
 from dataclasses import dataclass, field
@@ -208,7 +209,7 @@ def llm_extract_parameters(
         from src.utils.llm import get_llm
 
         def _default_llm(prompt: str) -> str:
-            return get_llm(temperature=0.1).invoke(prompt).content
+            return invoke_model(get_llm(temperature=0.1), prompt).content
 
         llm = _default_llm
 

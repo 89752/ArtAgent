@@ -101,6 +101,11 @@ class UserDocTextRetriever:
             elif len(conds) > 1:
                 where = {"$and": [{k: v} for k, v in conds.items()]}
 
+        from src.ingestion.versions import visible_indexes
+        visible = visible_indexes(filters)
+        if not visible:
+            return []
+        where = {"doc_id": {"$in": list(visible)}}
         out: list[RetrievalResult] = []
         primary = get_or_create_chroma_collection(COLLECTION_NAME)
         fallback = get_or_create_chroma_collection(FALLBACK_COLLECTION_NAME)
@@ -123,6 +128,9 @@ class UserDocTextRetriever:
             for meta, dist, doc in zip(
                 results["metadatas"][0], results["distances"][0], results["documents"][0]
             ):
+                if meta.get("doc_id") not in visible:
+                    continue
+                meta = {**meta, "doc_id": visible[meta["doc_id"]]}
                 out.append(
                     RetrievalResult(
                         content=doc or "",

@@ -101,6 +101,63 @@ def _api_clean(client):
 
 
 # ══════════════ service 渲染层 ══════════════
+def test_account_deletion_revokes_credentials_before_retryable_cleanup(monkeypatch):
+    from src.platform import cleanup
+    created = users_store.create_user("cleanup-test")
+    uid = created["user"]["user_id"]
+    def busy(_uid):
+        raise cleanup.CleanupPending("busy")
+    monkeypatch.setattr(cleanup, "purge_resources", busy)
+    with pytest.raises(cleanup.CleanupPending):
+        users_store.delete_user(uid)
+    assert users_store.get_user(uid)["deleting"] == 1
+    assert users_store.get_user_by_api_key(created["api_key"]) is None
+
+
+def test_account_deletion_cleans_owned_artifacts_and_tasks(tmp_path, monkeypatch):
+    from src.harness.storage import put_artifact, list_artifacts
+    from src.memory import collections, metrics
+    for module in (collections, metrics):
+        monkeypatch.setattr(module, "_DB_PATH", tmp_path / "memory.db")
+        monkeypatch.setattr(module, "_db_ready", False)
+    monkeypatch.setenv("ARTAGENT_HARNESS_DB_PATH", str(tmp_path / "harness.db"))
+    monkeypatch.setenv("ARTAGENT_CHECKPOINT_DB_PATH", str(tmp_path / "checkpoints.db"))
+    created = users_store.create_user("cleanup-complete")
+    uid = created["user"]["user_id"]
+    tid = tasks_mod.create_task("agent_job", {"user_id": uid})
+    tasks_mod.update_task(tid, status="failed")
+    put_artifact(uid, tid, "step", "private report")
+    put_artifact("other", "other-task", "step", "keep")
+    conv_mod.save_conversation("cleanup-session", "private", [], uid)
+    collections.save_collection(uid, "private", ["artwork"])
+    metrics.record_extraction_metrics(uid, 1, 1)
+    users_store.delete_user(uid)
+    assert users_store.get_user(uid) is None
+    assert tasks_mod.get_task(tid) is None
+    assert list_artifacts(tid, uid) == []
+    assert len(list_artifacts("other-task", "other")) == 1
+    assert collections.list_collections(uid) == []
+    assert metrics.recent_extraction_metrics(user_id=uid) == []
+
+
+def test_memory_metrics_endpoint_is_owner_scoped(client, tmp_path, monkeypatch):
+    from src.memory import metrics
+    monkeypatch.setattr(metrics, "_DB_PATH", tmp_path / "metrics.db")
+    monkeypatch.setattr(metrics, "_db_ready", False)
+    metrics.record_extraction_metrics("web_user", 1, 1)
+    metrics.record_extraction_metrics("other", 5, 0, error="private diagnostic")
+    response = client.get("/api/metrics/memory").json()
+    assert len(response["items"]) == 1
+    assert response["items"][0]["user_id"] == "web_user"
+
+
+def test_capabilities_are_authenticated_and_do_not_expose_secrets(client):
+    response = client.get("/api/capabilities")
+    assert response.status_code == 200
+    assert response.json()["provider_tested"] is False
+    assert "llm_api_key" not in response.text
+
+
 def test_thumb_url_variants():
     assert svc._thumb_url("") == ""
     assert svc._thumb_url("https://x/a.jpg") == "https://x/a.jpg"
@@ -226,7 +283,7 @@ def test_collect_sources_dedup_and_caps():
     assert len(sources) <= 6
 
 
-def test_init_db_resets_zombie_processing(tmp_path):
+def test_init_db_does_not_reset_another_workers_processing(tmp_path):
     documents_store._reset_for_tests(tmp_path / "docs.db")
     documents_store.init_db()
     documents_store.add_document(
@@ -236,8 +293,7 @@ def test_init_db_resets_zombie_processing(tmp_path):
         doc_id="ok1", kind="table", doc_name="t.csv", status="pending_confirm"
     )
     documents_store.init_db()
-    assert documents_store.get_document("zombie1")["status"] == "failed"
-    assert "重启" in documents_store.get_document("zombie1")["error"]
+    assert documents_store.get_document("zombie1")["status"] == "processing"
     assert documents_store.get_document("ok1")["status"] == "pending_confirm"
 
 
@@ -256,6 +312,15 @@ def test_chat_empty_message_streams_done(client):
         text = "".join(r.iter_text())
     assert '"type": "done"' in text
     assert '"sources"' in text
+
+
+def test_provider_quota_error_has_actionable_message():
+    from web.service import _friendly_generation_error
+
+    message = _friendly_generation_error(
+        RuntimeError("AllocationQuota.FreeTierOnly: Free quota exhausted")
+    )
+    assert "额度已用尽" in message
 
 
 def test_chat_message_too_long_rejected(client):
@@ -306,6 +371,27 @@ def test_upload_rejects_unsupported_type(client):
     )
     assert r.status_code == 400
     assert "仅支持" in r.json()["error"]
+
+
+def test_pdf_split_cannot_bypass_hard_upload_limit(client, monkeypatch):
+    monkeypatch.setenv("UPLOAD_HARD_MAX_MB", "1")
+    response = client.post("/api/documents/upload", data={"oversize":"split"},
+        files={"file":("large.pdf", b"x"*(1024*1024+1), "application/pdf")})
+    assert response.status_code == 413
+    assert response.json()["code"] == "upload_hard_limit"
+
+
+def test_upload_passes_file_stream_instead_of_full_bytes(client, monkeypatch):
+    captured = []
+    def save(filename, stream, **kwargs):
+        assert not isinstance(stream, bytes)
+        captured.append(stream.read())
+        return {"doc_id":"streamed", "doc_name":filename, "file_path":"unused.csv", "kb_id":"default"}
+    monkeypatch.setattr(svc, "save_upload", save)
+    monkeypatch.setattr(svc, "ingest_table_doc", lambda *args, **kwargs: None)
+    response = client.post("/api/documents/upload", files={"file":("table.csv", b"name\nA", "text/csv")})
+    assert response.status_code == 200
+    assert captured == [b"name\nA"]
 
 
 def test_schema_validation(client):
@@ -484,12 +570,12 @@ def test_tasks_interrupted_recovery_and_retry():
     assert tasks_mod.reset_task(tid) is False
 
 
-def test_pending_ingestion_task_is_retriable_after_restart():
+def test_pending_ingestion_task_remains_in_durable_queue_after_restart():
     tid = tasks_mod.create_task("ingest_pdf", {"kind": "pdf"})
 
-    assert tasks_mod.mark_interrupted_on_startup() == 1
-    assert tasks_mod.get_task(tid)["status"] == "interrupted"
-    assert tasks_mod.reset_task(tid) is True
+    assert tasks_mod.mark_interrupted_on_startup() == 0
+    assert tasks_mod.get_task(tid)["status"] == "pending"
+    assert tasks_mod.runnable_ingestion_tasks()[0]["task_id"] == tid
 
 
 def test_tasks_invalid_status_rejected():
@@ -588,6 +674,16 @@ def test_tasks_api_and_retry(client, monkeypatch):
     assert client.post("/api/tasks/nope/retry").status_code == 404
 
 
+def test_document_retry_rejects_research_job_without_mutation(client):
+    tid = tasks_mod.create_task("agent_job", {"user_id": "web_user"})
+    tasks_mod.update_task(tid, status="failed", error="research failed")
+    response = client.post(f"/api/tasks/{tid}/retry")
+    assert response.status_code == 400
+    task = tasks_mod.get_task(tid)
+    assert task["status"] == "failed"
+    assert task["error"] == "research failed"
+
+
 # ══════════════ 文档生命周期级联 ══════════════
 def _doc_isolate(tmp: Path):
     old_db = documents_store.DB_PATH
@@ -636,7 +732,7 @@ def test_delete_pdf_cascades():
         assert result["db_deleted"] is True
         assert documents_store.get_document(doc_id) is None
         assert not work_dir.exists()
-        mock_del.assert_called_once_with(doc_id)
+        mock_del.assert_called_once_with(doc_id, strict=True)
     finally:
         restore()
 
@@ -713,8 +809,11 @@ def test_pdf_ingest_preserves_non_default_user_status(monkeypatch):
             status="processing", file_path=str(pdf_path), file_size=8,
         )
 
-        plan = type("Plan", (), {"pages": [], "distribution": {}})()
+        page = type("Page", (), {"page_no": 0, "route": "text", "force_mineru": False})()
+        plan = type("Plan", (), {"pages": [page], "distribution": {}})()
         monkeypatch.setattr(pipeline_mod, "classify_document", lambda _path: plan)
+        monkeypatch.setattr(pipeline_mod, "_parse_text_route", lambda *a, **k: ([], set()))
+        monkeypatch.setattr(pipeline_mod, "index_text_chunks", lambda *a, **k: 1)
         monkeypatch.setattr(pipeline_mod, "index_page_images", lambda *a, **k: 0)
 
         pipeline_mod.ingest_pdf(
@@ -729,7 +828,7 @@ def test_pdf_ingest_preserves_non_default_user_status(monkeypatch):
         restore()
 
 
-def test_documents_repairs_legacy_stuck_pdf_from_done_task():
+def test_documents_projects_done_task_without_mutating_document():
     doc_id = "legacy-stuck-pdf"
     user_id = "user-legacy"
     documents_store.add_document(
@@ -745,7 +844,8 @@ def test_documents_repairs_legacy_stuck_pdf_from_done_task():
     docs = svc.documents(user_id)
 
     assert docs[0]["status"] == "done"
-    assert documents_store.get_document(doc_id, user_id)["status"] == "done"
+    # A GET must not overwrite a concurrently restarted parser status.
+    assert documents_store.get_document(doc_id, user_id)["status"] == "processing"
 
 
 # ══════════════ 重新生成 / 断开回归 ══════════════

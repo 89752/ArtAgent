@@ -88,6 +88,40 @@ _NODE_LABELS = {
 }
 
 
+_QUALITY_CHAT_SIGNALS = (
+    "深入", "详细", "严谨", "研究", "报告", "论文", "论证", "核对",
+    "引用", "出处", "证据", "逐条", "全面", "系统分析", "深度分析",
+)
+_MEMORY_CHAT_SIGNALS = (
+    "记住", "请记得", "以后都", "以后请", "我的偏好", "我喜欢", "我不喜欢",
+)
+
+
+def _chat_execution_mode(message: str) -> str:
+    """Keep ordinary chat responsive; reserve costly verification for explicit deep work."""
+    text = (message or "").strip().lower()
+    configured = os.getenv("ARTAGENT_CHAT_MODE", "adaptive").strip().lower()
+    if configured in {"fast", "quality", "memory"}:
+        return f"conversation_{configured}"
+    if any(signal in text for signal in _MEMORY_CHAT_SIGNALS):
+        return "conversation_memory"
+    if any(signal in text for signal in _QUALITY_CHAT_SIGNALS):
+        return "conversation_quality"
+    return "conversation_fast"
+
+
+def _friendly_generation_error(exc: Exception) -> str:
+    """Translate common provider failures without exposing credentials or raw payloads."""
+    raw = str(exc).lower()
+    if "allocationquota" in raw or "quota exhausted" in raw or "insufficient_quota" in raw:
+        return "😔 当前模型额度已用尽，请更换有可用额度的模型或调整供应商账户的额度设置后重试。"
+    if "401" in raw or "unauthorized" in raw or "invalid api key" in raw:
+        return "😔 模型服务认证失败，请检查 API Key 与模型服务地址后重试。"
+    if "timeout" in raw or "timed out" in raw:
+        return "😔 模型服务响应超时，请稍后重试。"
+    return "😔 抱歉，模型服务暂时无法完成请求，请稍后重试。"
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 渲染工具（与 app.py 一致）
 # ═══════════════════════════════════════════════════════════════════
@@ -467,6 +501,35 @@ def stream_answer(
     request_id: str | None = None,
     user_id: str = WEB_USER_ID,
 ) -> Iterator[dict]:
+    if os.getenv("ARTAGENT_STREAM_EXECUTION", "process") == "process":
+        from src.harness.stream_process import stream
+        yield from stream("chat", {"message": message, "sid": sid, "regenerate": regenerate,
+                                  "request_id": request_id, "user_id": user_id}, stop_event)
+        return
+    from src.memory.conversations import conversation_run, ConversationBusy
+    from src.memory.memory_items import clear_active_user_id
+    from src.harness.context import RunContext, run_scope
+    request_id = request_id or uuid.uuid4().hex[:12]
+    try:
+        with conversation_run(sid, user_id) as lost:
+            context = RunContext(request_id, user_id,
+                cancelled=lambda: lost.is_set() or bool(stop_event and stop_event.is_set()))
+            with run_scope(context):
+                yield from _stream_answer(message, sid, regenerate, stop_event, request_id, user_id)
+    except ConversationBusy as exc:
+        yield {"type": "error", "code": "conversation_busy", "message": str(exc)}
+    finally:
+        clear_active_user_id()
+
+
+def _stream_answer(
+    message: str,
+    sid: str,
+    regenerate: bool = False,
+    stop_event: threading.Event | None = None,
+    request_id: str | None = None,
+    user_id: str = WEB_USER_ID,
+) -> Iterator[dict]:
     """
     生成器：逐节点产出事件字典，API 层转 SSE。
       · {"type": "delta", "html": <助手气泡 HTML>}           —— 流式刷新
@@ -585,6 +648,7 @@ def stream_answer(
                 "reflection_notes": "",
                 "retry_count": 0,
                 "final_answer": "",
+                "execution_mode": _chat_execution_mode(message),
             },
             config={"configurable": {"thread_id": checkpoint_thread_id(user_id, sid)}},
             stream_mode="updates",
@@ -694,7 +758,7 @@ def stream_answer(
         )
         history[-1]["content"] = _assistant_bubble(
             steps,
-            "😔 抱歉，处理时出错了。可能是模型接口超时或未配置 API Key，请稍后重试。",
+            _friendly_generation_error(e),
             [],
             False,
             done=True,
@@ -702,6 +766,7 @@ def stream_answer(
         history[-1]["sources"] = []
 
     title = next((m["content"] for m in history if m["role"] == "user"), message)
+    history[-1]["turn_id"] = request_id
     save_conversation(sid, title, history, user_id)
     runs_store.record_run(
         request_id=request_id,
@@ -760,71 +825,18 @@ def remove_conversation(sid: str, user_id: str = WEB_USER_ID) -> None:
 
 
 def run_agent_job(task_id: str, user_id: str) -> None:
-    """Execute an AgentJob plan, checkpointing after every useful step.
-
-    A process crash leaves the currently running job in ``processing`` for the
-    startup recovery path; all earlier steps and artifacts are already durable.
-    Cancellation is checked between invocations, so it cannot start a later
-    step after a user has cancelled the job.
-    """
-    while True:
-        job = tasks_store.get_task(task_id)
-        if (
-            not job
-            or job.get("type") != "agent_job"
-            or (job.get("payload") or {}).get("user_id") != user_id
-            or job.get("status") not in {"pending", "processing"}
-        ):
-            return
-        if job.get("pause_requested"):
-            tasks_store.update_task(task_id, status="paused", error="用户暂停")
-            return
-        if job.get("cancel_requested"):
-            tasks_store.advance_agent_job(task_id)
-            return
-
-        plan = list(job.get("plan") or [])
-        step_index = int(job.get("step_index") or 0)
-        if step_index >= len(plan):
-            # Defensive completion for legacy jobs with an empty/corrupt plan.
-            tasks_store.advance_agent_job(
-                task_id,
-                artifact={"kind": "notice", "content": "任务计划为空，未执行模型调用。"},
-            )
-            return
-
-        tasks_store.update_task(task_id, status="processing")
-        objective = str((job.get("payload") or {}).get("objective") or "")
-        step = str(plan[step_index])
-        prompt = (
-            f"长期任务目标：{objective}\n"
-            f"当前第 {step_index + 1}/{len(plan)} 步：{step}\n"
-            "请只完成当前步骤，并给出可供后续步骤使用的事实、结论或草稿。"
-        )
-        try:
-            result = graph.invoke(
-                {
-                    "messages": [HumanMessage(content=prompt)], "user_query": prompt,
-                    "user_id": user_id, "conversation_id": f"job:{task_id}", "final_answer": "",
-                    "tool_rounds": 0, "executed_tool_signatures": [], "retry_count": 0,
-                },
-                config={"configurable": {"thread_id": checkpoint_thread_id(user_id, f"job:{task_id}")}},
-            )
-            tasks_store.advance_agent_job(
-                task_id,
-                artifact={
-                    "kind": "step_answer",
-                    "step_index": step_index,
-                    "step": step,
-                    "content": str(result.get("final_answer") or "")[:8000],
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("agent job %s failed at step %s", task_id, step_index)
-            tasks_store.advance_agent_job(task_id, error=f"{type(exc).__name__}: {exc}")
-            return
+    if os.getenv("ARTAGENT_JOB_EXECUTION", "process") == "process":
+        from src.harness.process import run_process
+        run_process(task_id, user_id)
+        return
+    from src.harness.runner import run_job
+    run_job(graph, task_id, user_id)
 
 
+from src.memory.conversations import serialized_write
+
+
+@serialized_write
 def record_attachment(
     sid: str,
     doc_id: str,
@@ -855,6 +867,7 @@ def record_attachment(
     return {"ok": True, "duplicated": False}
 
 
+@serialized_write
 def record_analysis_turn(
     sid: str,
     image_id: str,
@@ -898,8 +911,9 @@ def record_analysis_turn(
             }
         )
     if not html:
+        from html import escape
         overall = str(report.get("overall_assessment") or "已生成三层分析报告")[:120]
-        html = f'<div class="md-answer">分析完成：{html.escape(overall)}</div>'
+        html = f'<div class="md-answer">分析完成：{escape(overall)}</div>'
     history.append(
         {
             "role": "assistant",
@@ -927,7 +941,7 @@ _parse_semaphore = threading.Semaphore(
 
 def save_upload(
     filename: str,
-    data: bytes,
+    data,
     kb_id: str = "default",
     user_id: str = WEB_USER_ID,
 ) -> dict:
@@ -950,7 +964,13 @@ def save_upload(
         file_path = work_dir / f"table{Path(filename).suffix.lower()}"
     else:
         file_path = work_dir / "document.pdf"
-    file_path.write_bytes(data)
+    if isinstance(data, bytes):
+        file_path.write_bytes(data)
+    else:
+        import shutil
+        data.seek(0)
+        with file_path.open("wb") as target:
+            shutil.copyfileobj(data, target, length=1024 * 1024)
 
     # 一上传就落库基础记录，后续后台任务补充解析结果
     documents_store.add_document(
@@ -961,7 +981,7 @@ def save_upload(
         kb_id=kb_id,
         status="processing",
         file_path=str(file_path),
-        file_size=len(data),
+        file_size=file_path.stat().st_size,
         started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
     )
 
@@ -972,6 +992,15 @@ def save_upload(
         "file_path": str(file_path),
         "kb_id": kb_id,
     }
+
+
+def run_document_task(task_id: str, user_id: str) -> None:
+    if os.getenv("ARTAGENT_JOB_EXECUTION", "process") == "process":
+        from src.harness.process import run_process
+        run_process(task_id,user_id)
+    else:
+        from src.harness.ingestion import run_ingestion
+        run_ingestion(task_id,user_id)
 
 
 def ingest_document(
@@ -987,6 +1016,9 @@ def ingest_document(
 
     task_id 提供时同步维护任务表状态，解析并发受信号量约束。
     """
+    if task_id:
+        run_document_task(task_id,user_id)
+        return
     from src.ingestion.pipeline import ingest_pdf
 
     with _parse_semaphore:
@@ -1020,6 +1052,9 @@ def ingest_table_doc(
     user_id: str = WEB_USER_ID,
 ) -> None:
     """表格后台任务入口：加载 + schema 推断 → 待确认状态。"""
+    if task_id:
+        run_document_task(task_id,user_id)
+        return
     from src.ingestion.table_pipeline import ingest_table
 
     with _parse_semaphore:
@@ -1072,9 +1107,7 @@ def document_status(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
 
 def _reconcile_pdf_task_status(doc: dict, user_id: str) -> dict:
     """修复旧版本遗留的“任务已结束、文档仍解析中”状态。"""
-    from src.data import documents_store
-
-    if doc.get("kind") != "pdf" or doc.get("status") != "processing":
+    if not doc:
         return doc
     task = tasks_store.get_task(str(doc.get("doc_id") or ""))
     if not task:
@@ -1083,13 +1116,13 @@ def _reconcile_pdf_task_status(doc: dict, user_id: str) -> dict:
     if payload.get("user_id") and payload.get("user_id") != user_id:
         return doc
     task_status = task.get("status")
-    if task_status == "done":
+    if task_status == "done" and doc.get("status") in {"processing","pending"}:
         patch = {
-            "status": "done",
+            "status": "pending_confirm" if doc.get("kind") == "table" else "done",
             "finished_at": task.get("finished_at") or "",
             "error": "",
         }
-    elif task_status in ("failed", "interrupted"):
+    elif task_status in ("failed", "interrupted", "budget_exhausted", "unknown_execution_state"):
         patch = {
             "status": "failed",
             "finished_at": task.get("finished_at") or "",
@@ -1097,11 +1130,25 @@ def _reconcile_pdf_task_status(doc: dict, user_id: str) -> dict:
         }
     else:
         return doc
-    documents_store.update_document(doc["doc_id"], **patch)
+    # Read-time projection only: writing this snapshot can race with a new retry.
     return {**doc, **patch}
 
 
 def delete_document(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
+    from src.data import documents_store
+    from src.harness.ingestion import document_lock, DocumentBusy
+    if not documents_store.get_document(doc_id,user_id):
+        raise KeyError(f"文档不存在：{doc_id}")
+    tasks_store.cancel_ingestion(doc_id,user_id)
+    deadline = time.monotonic()+5
+    def check():
+        if time.monotonic() >= deadline:
+            raise DocumentBusy("解析进程正在停止，请稍后重试删除")
+    with document_lock(user_id,doc_id,check):
+        return _delete_document(doc_id,user_id)
+
+
+def _delete_document(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
     """删除文档并级联清理：状态记录、上传文件、向量（PDF）、注册表（Table）。"""
     from src.data import documents_store
     from src.ingestion.pipeline import UPLOADS_DIR, delete_pdf_vectors
@@ -1114,6 +1161,10 @@ def delete_document(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
 
     kind = doc.get("kind", "pdf")
     kb_id = doc.get("kb_id", "default")
+    work_dir = (UPLOADS_DIR / kb_id / doc_id).resolve()
+    root = UPLOADS_DIR.resolve()
+    if work_dir == root or not work_dir.is_relative_to(root):
+        raise ValueError("文档路径超出上传目录")
     result: dict = {
         "doc_id": doc_id,
         "kind": kind,
@@ -1123,7 +1174,11 @@ def delete_document(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
 
     # 1. PDF：清理两路 Chroma 向量
     if kind == "pdf":
-        result["vectors"] = delete_pdf_vectors(doc_id)
+        result["vectors"] = delete_pdf_vectors(doc_id, strict=True)
+        for version in set(doc.get("index_versions") or []):
+            counts = delete_pdf_vectors(version, strict=True)
+            for key, value in counts.items():
+                result["vectors"][key] += value
 
     # 2. Table：从内存注册表与 Hybrid 移除；若当前生效则复位
     else:
@@ -1142,7 +1197,6 @@ def delete_document(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
             result["user_dataset_reset"] = "core"
 
     # 3. 删除上传文件目录
-    work_dir = UPLOADS_DIR / kb_id / doc_id
     if work_dir.exists():
         try:
             import shutil
@@ -1151,9 +1205,12 @@ def delete_document(doc_id: str, user_id: str = WEB_USER_ID) -> dict:
             result["files_removed"] = True
         except Exception as e:  # noqa: BLE001
             logger.warning("delete_document 删除文件目录失败 %s: %s", work_dir, e)
+            raise
 
     # 4. 删除 SQLite 记录
     deleted = documents_store.delete_document(doc_id, user_id)
+    if kind == "table":
+        unregister_table(dataset_id)
     result["db_deleted"] = deleted
 
     # 5. 从所有会话历史中移除该文档的附件记录

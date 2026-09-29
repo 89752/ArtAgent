@@ -3,3 +3,5 @@
 import os
 
 os.environ.setdefault("LEXICAL_TRANSLATE", "0")
+os.environ.setdefault("ARTAGENT_JOB_EXECUTION", "inline")
+os.environ.setdefault("ARTAGENT_STREAM_EXECUTION", "inline")

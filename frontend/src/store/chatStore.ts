@@ -24,6 +24,14 @@ import { useUiStore } from "./uiStore";
 const SESSIONS_PAGE = 50;
 const SESSIONS_SEARCH_CAP = 500;
 
+function finalizeInterruptedHtml(html: string): string {
+  if (!html) return "";
+  return html
+    .replace(/<details class="think-box" open>/g, '<details class="think-box">')
+    .replace(/正在思考…/g, "思考过程")
+    .replace(/chain-dot pending/g, "chain-dot");
+}
+
 export interface UserTurn {
   id: string;
   role: "user";
@@ -32,6 +40,7 @@ export interface UserTurn {
 }
 
 export interface AssistantTurn {
+  serverTurnId?: string;
   id: string;
   role: "assistant";
   html: string;
@@ -134,6 +143,7 @@ function toTurns(messages: HistoryMessage[]): Turn[] {
       turns.push({
         id: genId(),
         role: "assistant",
+        serverTurnId: m.turn_id,
         html: m.content || "",
         sources: m.sources || [],
         report: m.report,
@@ -480,6 +490,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         onDone: (evt: ChatDone) => {
           updateTurn(sidAtSend, turnId, {
             html: evt.html,
+            serverTurnId: evt.request_id,
             sources: evt.sources || [],
             streaming: false,
             cancelled: evt.cancelled,
@@ -494,9 +505,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       });
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
+        const current = get().turnsBySid[sidAtSend]?.find(
+          (turn) => turn.id === turnId && turn.role === "assistant",
+        ) as AssistantTurn | undefined;
         updateTurn(sidAtSend, turnId, {
+          html: finalizeInterruptedHtml(current?.html || ""),
           note: "已停止生成",
           streaming: false,
+          cancelled: true,
         });
       } else {
         const msg = err instanceof Error ? err.message : "网络中断或服务未响应，请稍后重试。";

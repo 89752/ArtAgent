@@ -237,6 +237,9 @@ def record_run(
 
 def _cleanup_retention(conn) -> None:
     days = max(1, int(os.getenv("TRACE_RETENTION_DAYS", "30") or 30))
+    for table in ("node_events", "model_calls", "tool_calls"):
+        conn.execute(f"DELETE FROM {table} WHERE run_id NOT IN (SELECT id FROM agent_runs) OR run_id IN "
+                     "(SELECT id FROM agent_runs WHERE created_at < datetime('now', ?))", (f"-{days} days",))
     conn.execute("DELETE FROM agent_runs WHERE created_at < datetime('now', ?)", (f"-{days} days",))
 
 

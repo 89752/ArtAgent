@@ -124,6 +124,11 @@ class UserDocImageRetriever:
             elif len(conds) > 1:
                 where = {"$and": [{k: v} for k, v in conds.items()]}
 
+        from src.ingestion.versions import visible_indexes
+        visible = visible_indexes(filters)
+        if not visible:
+            return []
+        where = {"doc_id": {"$in": list(visible)}}
         try:
             query_vec = get_mm_embed_fn()({"text": query})
         except Exception as e:
@@ -140,6 +145,9 @@ class UserDocImageRetriever:
         out: list[RetrievalResult] = []
         for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
             meta = dict(meta)
+            if meta.get("doc_id") not in visible:
+                continue
+            meta["doc_id"] = visible[meta["doc_id"]]
             out.append(
                 RetrievalResult(
                     content=f"[整页图]《{meta.get('doc_name', '')}》第 {meta.get('page', '?')} 页",

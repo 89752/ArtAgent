@@ -48,7 +48,7 @@ UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", "./data/uploads"))
 # ------------------------------------------------------------------ #
 
 
-def delete_pdf_vectors(doc_id: str) -> dict:
+def delete_pdf_vectors(doc_id: str, *, strict: bool = False) -> dict:
     """删除该 doc_id 的 BGE/离线文字向量及多模态页面向量。"""
     from src.retrieval.userdoc_image_retriever import COLLECTION_NAME as IMAGE_COLLECTION
 
@@ -67,6 +67,8 @@ def delete_pdf_vectors(doc_id: str) -> dict:
                 collection.delete(where={"doc_id": doc_id})
                 deleted[name] += len(hits["ids"])
         except Exception as e:  # noqa: BLE001
+            if strict:
+                raise
             logger.warning("[pipeline] 清理 %s collection 失败 doc_id=%s: %s", col_name, doc_id, e)
     return deleted
 
@@ -162,6 +164,7 @@ def index_text_chunks(chunks, doc_name: str = "") -> int:
     """
     if not chunks:
         return 0
+    from src.ingestion.versions import physical_id
     collection_name, embed_batch = get_userdoc_text_indexer()
     collection = get_or_create_chroma_collection(collection_name)
     headers = [_context_header(doc_name, c.section) for c in chunks]
@@ -170,11 +173,11 @@ def index_text_chunks(chunks, doc_name: str = "") -> int:
     ]
     vectors = embed_batch(embed_inputs)
     collection.upsert(
-        ids=[c.chroma_id() for c in chunks],
+        ids=[physical_id(c.doc_id) + ":" + c.chroma_id() for c in chunks],
         embeddings=vectors,
         documents=[c.content for c in chunks],
         metadatas=[
-            {**c.metadata(doc_name=doc_name), "context_header": h}
+            {**c.metadata(doc_name=doc_name), "context_header": h, "doc_id": physical_id(c.doc_id)}
             for c, h in zip(chunks, headers)
         ],
     )
@@ -204,6 +207,28 @@ def ingest_pdf(
 
     返回入库摘要：页数/路由分布/文字 chunk 数/整页图数/耗时/状态。
     """
+    from src.ingestion.versions import physical_id
+    if physical_id(doc_id) == doc_id:
+        # Public/script callers use the same validation and publication protocol.
+        from src.harness.ingestion import run_ingestion
+        from src.tasks import store
+        documents_store.init_db()
+        if not documents_store.get_document(doc_id, user_id):
+            documents_store.add_document(doc_id, "pdf", user_id=user_id, doc_name=doc_name,
+                                         kb_id=kb_id, status="processing", file_path=str(pdf_path))
+        payload = {"doc_id": doc_id, "user_id": user_id, "kind": "pdf", "file_path": str(pdf_path),
+                   "doc_name": doc_name, "kb_id": kb_id, "force_pdfplumber": force_pdfplumber}
+        task_id = store.create_task("ingest_pdf", payload,
+                                    task_id=doc_id if store.get_task(doc_id) is None else None)
+        result = {}
+        def parse():
+            result.update(ingest_pdf(pdf_path, doc_id, doc_name, kb_id, work_dir, force_pdfplumber, user_id))
+            return result
+        run_ingestion(task_id, user_id, handler=parse)
+        task = store.get_task(task_id)
+        if task["status"] != "done":
+            raise RuntimeError(task.get("error") or "PDF ingestion did not complete")
+        return result
     t0 = time.time()
     doc_name = doc_name or Path(pdf_path).name
     work_dir = work_dir or (UPLOADS_DIR / kb_id / doc_id)

@@ -48,6 +48,9 @@ class AgentState(BaseModel):
     current_step: str = ""
     # 本次 general 节点实际选用的模型角色，供运行轨迹与路由评测使用。
     model_role: str = "main"
+    # 普通对话保留完整反思与记忆流程；持久研究任务可在外层 Harness 已有
+    # 证据验收时使用 job_fast，避免每个计划步骤重复反思和写会话记忆。
+    execution_mode: str = "conversation"
 
     # ── 数据源 ─────────────────────────────────────────────────
     # 当前生效的结构化数据源（对应 StructuredTableRetriever 注册表 key）。
@@ -60,6 +63,8 @@ class AgentState(BaseModel):
     reflection_notes: str = ""
     # 兜底重试次数（防止死循环）
     retry_count: int = 0
+    verification: dict = Field(default_factory=dict)
+    execution_status: str = "running"
 
     # ── 长期记忆 ───────────────────────────────────────────────
     # 稳定用户标识，跨会话记忆的 key；空串时由 load_memory/save_memory

@@ -30,8 +30,6 @@ def render_page_image(pdf_path: str, page_no: int, out_dir: Path) -> str:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"page-{page_no}.png"
-    if out_path.exists():
-        return str(out_path)
     with fitz.open(pdf_path) as doc:
         page = doc[page_no]
         zoom = RENDER_DPI / 72
@@ -58,19 +56,21 @@ def index_page_images(
     """整页渲染 + 多模态向量化 + 入库，返回入库页数。"""
     if not page_nos:
         return 0
+    from src.ingestion.versions import physical_id
+    index_id = physical_id(doc_id)
     collection = get_or_create_chroma_collection(COLLECTION_NAME)
-    pages_dir = work_dir / "pages"
+    pages_dir = work_dir / "versions" / index_id / "pages"
 
     ids, embeddings, metadatas = [], [], []
     for page_no in page_nos:
         image_path = render_page_image(pdf_path, page_no, pages_dir)
         vector = embed_image_file(image_path)
         page_id = f"{doc_id}-p{page_no}"
-        ids.append(f"{page_id}-img")
+        ids.append(f"{index_id}:{page_id}-img")
         embeddings.append(vector)
         metadatas.append(
             {
-                "doc_id": doc_id,
+                "doc_id": index_id,
                 "doc_name": doc_name,
                 "page_id": page_id,
                 "page": page_no + 1,

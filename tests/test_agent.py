@@ -32,8 +32,9 @@ from src.agent.context import (
     trim_history,
 )
 from src.agent.graph import get_graph
+from src.agent.graph import _route_after_general, _route_after_reflection, _route_start
 from src.agent.nodes.common import _info_gap, ask_user, classify_intent
-from src.agent.nodes.general import MAX_TOOL_ROUNDS, _guarded_tool_calls, _ledger_updates, general_tools
+from src.agent.nodes.general import MAX_TOOL_ROUNDS, _guarded_tool_calls, _ledger_updates, _tool_round_limit, general_tools
 from src.agent.state import AgentState
 from src.observability import runs as runs_mod
 from src.retrieval import structured_retriever as sr
@@ -112,6 +113,41 @@ def test_general_react_has_no_special_recommendation_tool():
 def test_general_react_loop_present():
     edges = _edges_of(get_graph().get_graph())
     assert ("general_tools", "general_agent") in edges
+
+
+def test_durable_fast_job_skips_conversation_setup_and_reflection():
+    state = AgentState(
+        execution_mode="job_fast",
+        messages=[AIMessage(content="final answer")],
+    )
+    assert _route_start(state) == "job"
+    assert _route_after_general(state) == "fast_done"
+
+
+def test_normal_conversation_keeps_quality_and_memory_flow():
+    state = AgentState(
+        execution_mode="conversation",
+        messages=[AIMessage(content="answer")],
+        reflection_notes="PASS",
+    )
+    assert _route_start(state) == "conversation"
+    assert _route_after_general(state) == "reflect"
+    assert _route_after_reflection(state) == "save_memory"
+
+
+def test_fast_conversation_stops_after_answer():
+    state = AgentState(messages=[AIMessage(content="answer")], execution_mode="conversation_fast")
+    assert _route_after_general(state) == "fast_done"
+
+
+def test_memory_conversation_saves_without_reflection():
+    state = AgentState(messages=[AIMessage(content="answer")], execution_mode="conversation_memory")
+    assert _route_after_general(state) == "save_memory"
+
+
+def test_fast_job_has_tighter_tool_round_limit():
+    assert _tool_round_limit(AgentState(execution_mode="job_fast")) == 2
+    assert _tool_round_limit(AgentState(execution_mode="conversation")) == MAX_TOOL_ROUNDS
 
 
 # ══════════════ general 节点接线 ══════════════
@@ -627,12 +663,14 @@ def test_trim_history_keeps_system_and_recent():
         HumanMessage(content="q1"),
         AIMessage(content="a1"),
         HumanMessage(content="q2"),
+        AIMessage(content="", tool_calls=[{"name": "search", "args": {}, "id": "c1"}]),
         ToolMessage(content="t", tool_call_id="c1"),
         AIMessage(content="a2"),
     ]
     out = trim_history(msgs, max_turns=1)
     assert out[0].content == "sys"
-    assert len(out) == 3
+    assert len(out) == 5
+    assert out[1].content == "q2"
     assert out[-1].content == "a2"
 
 
@@ -699,8 +737,8 @@ def test_condense_tool_messages_compresses_long_json():
         ToolMessage(content="tool execution error", name="web_search", tool_call_id="c2"),
     ]
     out = condense_tool_messages(msgs, limit=100)
-    assert len(str(out[0].content)) <= 140
-    assert "evidence" in str(out[0].content)
+    assert len(str(out[0].content)) <= 180
+    assert json.loads(out[0].content)["truncated"] is True
     assert out[0].tool_call_id == "c1" and out[0].id == "m1"
     assert out[1].content == "tool execution error"
 

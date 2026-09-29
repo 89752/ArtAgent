@@ -10,7 +10,7 @@ import { AnalysisReport } from "./AnalysisReport";
 
 const FB_REASONS = ["回答不准确", "引用不充分", "过于冗长", "其他"];
 
-function FeedbackPanel({ sid }: { sid: string }) {
+function FeedbackPanel({ sid, turnId }: { sid: string; turnId?: string }) {
   const setFeedbackTurn = useChatStore((s) => s.setFeedbackTurn);
   const markRated = useChatStore((s) => s.markRated);
   const [reason, setReason] = useState("");
@@ -33,6 +33,8 @@ function FeedbackPanel({ sid }: { sid: string }) {
         rating: -1,
         reason,
         comment: comment.trim(),
+        turn_id: turnId || "",
+        run_id: turnId || "",
       });
       markRated(sid);
       setFeedbackTurn(null);
@@ -122,7 +124,7 @@ export const AssistantTurn = memo(function AssistantTurn({
       const res = await sendJson<{ ok: boolean; error?: string }>(
         "/api/feedback",
         "POST",
-        { session_id: sid, rating, reason, comment },
+        { session_id: sid, rating, reason, comment, turn_id: turn.serverTurnId || "", run_id: turn.serverTurnId || "" },
       );
       if (!res.ok) {
         toast(res.error || "反馈提交失败", "err");
@@ -199,7 +201,7 @@ export const AssistantTurn = memo(function AssistantTurn({
           </button>
         </div>
       )}
-      {feedbackOpen && <FeedbackPanel sid={sid} />}
+      {feedbackOpen && <FeedbackPanel sid={sid} turnId={turn.serverTurnId} />}
     </div>
   );
 });

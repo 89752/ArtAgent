@@ -16,6 +16,12 @@ import os
 import shutil
 import sqlite3
 import threading
+import contextvars
+import time
+import uuid
+from contextlib import contextmanager
+from functools import wraps
+import inspect
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -38,6 +44,72 @@ _lock = threading.Lock()
 _db_ready = False
 
 DEFAULT_USER_ID = "web_user"
+_writer = contextvars.ContextVar("conversation_writer", default=None)
+
+
+class ConversationBusy(RuntimeError):
+    pass
+
+
+def serialized_write(function):
+    """Lease the entire read/modify/write operation, not just its final save."""
+    signature = inspect.signature(function)
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        arguments = signature.bind(*args, **kwargs)
+        arguments.apply_defaults()
+        values = arguments.arguments
+        sid = values.get("sid", values.get("session_id", ""))
+        user_id = values.get("user_id", DEFAULT_USER_ID)
+        with conversation_run(sid, user_id):
+            return function(*args, **kwargs)
+    return wrapped
+
+
+@contextmanager
+def conversation_run(session_id: str, user_id: str, ttl: float = 90):
+    """Cross-process single writer with a renewable lease and fenced saves."""
+    owner = os.getenv("ARTAGENT_STREAM_OWNER") or uuid.uuid4().hex
+    with _lock:
+        conn = _get_conn()
+        conn.execute("CREATE TABLE IF NOT EXISTS conversation_leases (user_id TEXT, session_id TEXT, owner TEXT, expires REAL, PRIMARY KEY(user_id,session_id))")
+        cursor = conn.execute("""INSERT INTO conversation_leases VALUES (?,?,?,?)
+            ON CONFLICT(user_id,session_id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires
+            WHERE conversation_leases.expires < ?""", (user_id, session_id, owner, time.time()+ttl, time.time()))
+        conn.commit()
+        if not cursor.rowcount:
+            raise ConversationBusy("此会话正在生成回答，请完成或停止后再提交")
+    stopped = threading.Event()
+    lost = threading.Event()
+
+    def pulse():
+        while not stopped.wait(max(.01, ttl/3)):
+            try:
+                with _lock:
+                    conn = _get_conn()
+                    cursor = conn.execute("UPDATE conversation_leases SET expires=? WHERE user_id=? AND session_id=? AND owner=? AND expires>?",
+                        (time.time()+ttl, user_id, session_id, owner, time.time()))
+                    conn.commit()
+                if not cursor.rowcount:
+                    lost.set()
+                    return
+            except Exception:
+                lost.set()
+                return
+
+    thread = threading.Thread(target=pulse, daemon=True, name="conversation-lease")
+    thread.start()
+    token = _writer.set((user_id, session_id, owner))
+    try:
+        yield lost
+    finally:
+        _writer.reset(token)
+        stopped.set()
+        thread.join(timeout=1)
+        with _lock:
+            conn = _get_conn()
+            conn.execute("DELETE FROM conversation_leases WHERE user_id=? AND session_id=? AND owner=?", (user_id,session_id,owner))
+            conn.commit()
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -87,6 +159,7 @@ def _get_conn() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_conversations_user "
             "ON conversations(user_id, updated_at)"
         )
+        conn.execute("CREATE TABLE IF NOT EXISTS conversation_leases (user_id TEXT, session_id TEXT, owner TEXT, expires REAL, PRIMARY KEY(user_id,session_id))")
         conn.commit()
         _db_ready = True
     return conn
@@ -120,6 +193,16 @@ def save_conversation(
     payload = json.dumps(messages, ensure_ascii=False)
     with _lock:
         conn = _get_conn()
+        writer = _writer.get()
+        conn.execute("BEGIN IMMEDIATE")
+        if writer:
+            lease = conn.execute("SELECT 1 FROM conversation_leases WHERE user_id=? AND session_id=? AND owner=? AND expires>?", (*writer, time.time())).fetchone()
+            if not lease or writer[:2] != (user_id, session_id):
+                conn.rollback()
+                raise ConversationBusy("会话执行租约已失效，旧回答未覆盖新记录")
+        elif conn.execute("SELECT 1 FROM conversation_leases WHERE user_id=? AND session_id=? AND expires>?", (user_id,session_id,time.time())).fetchone():
+            conn.rollback()
+            raise ConversationBusy("会话正在生成回答，请稍后修改")
         conn.execute(
             """
             INSERT INTO conversations (session_id, user_id, title, messages_json, updated_at)
@@ -158,6 +241,7 @@ def list_conversations(
     )
 
 
+@serialized_write
 def rename_conversation(
     session_id: str,
     title: str,
@@ -204,6 +288,7 @@ def delete_conversation(
     """删除单条会话。"""
     with _lock:
         conn = _get_conn()
+        conn.execute("DELETE FROM conversation_leases WHERE user_id=? AND session_id=?", (user_id,session_id))
         conn.execute(
             "DELETE FROM conversations WHERE session_id = ? AND user_id = ?",
             (session_id, user_id),
@@ -216,7 +301,9 @@ def delete_user_conversations(user_id: str) -> int:
     if not user_id:
         return 0
     with _lock:
-        cur = _get_conn().execute(
+        conn = _get_conn()
+        conn.execute("DELETE FROM conversation_leases WHERE user_id=?", (user_id,))
+        cur = conn.execute(
             "DELETE FROM conversations WHERE user_id = ?", (user_id,)
         )
         _get_conn().commit()
@@ -235,6 +322,7 @@ def remove_attachment_from_all(
         return 0
     with _lock:
         conn = _get_conn()
+        conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT session_id, messages_json FROM conversations WHERE user_id = ?",
             (user_id,),
@@ -252,6 +340,9 @@ def remove_attachment_from_all(
             ]
             if len(new_msgs) == len(messages):
                 continue
+            # Revoke a running writer before changing its snapshot. Its next save
+            # is fenced, so deleted attachments cannot be resurrected.
+            conn.execute("DELETE FROM conversation_leases WHERE user_id=? AND session_id=?", (user_id,session_id))
             if new_msgs:
                 title = next(
                     (m["content"] for m in new_msgs if m["role"] == "user"), "新对话"

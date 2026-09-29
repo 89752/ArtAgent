@@ -231,6 +231,27 @@
 .ops-run small { grid-column: 1 / -1; color: var(--ink-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ops-trace { margin-top: 13px; padding: 10px; border-left: 3px solid var(--gold); background: #d9b8740d; font-size: .76rem; line-height: 1.6; color: var(--ink-soft); }
 .ops-trace p { margin: 5px 0 0; }
+.research-results, .research-learning { margin-block: 24px; border-top: 1px solid var(--line); padding-block: 20px; color: var(--ink); line-height: 1.7; overflow-wrap: anywhere; }
+.research-results h4, .research-learning h3 { margin-bottom: 12px; font-size: 1.05rem; }
+.research-results details, .research-learning details { border-bottom: 1px solid var(--line); padding-block: 14px; }
+.research-results summary, .research-learning summary { cursor: pointer; font-weight: 600; }
+.research-report { max-width: 72ch; padding-block: 16px; font-size: 1rem; }
+.research-report table { display: block; overflow-x: auto; max-width: 100%; }
+.research-report td, .research-report th { padding: 8px; border: 1px solid var(--line); }
+.research-report h2, .research-report h3 { margin-top: 24px; }
+.research-results ul, .research-steps, .research-learning ul { padding-inline-start: 22px; }
+.research-error { color: var(--danger); }
+.research-edit { margin-block: 20px; }
+.research-edit label, .ops-section > label { display: block; margin-bottom: 6px; color: var(--ink); }
+.research-instructions { white-space: pre-wrap; }
+.research-docs { border: 0; border-bottom: 1px solid var(--line); margin: 12px 0 18px; padding: 0 0 12px; max-height: 180px; overflow-y: auto; }
+.research-docs label { display: flex; align-items: baseline; gap: 8px; margin-block: 6px; }
+.research-docs input { accent-color: var(--gold-deep); }
+.research-results .df-btn { margin: 8px 8px 0 0; }
+.ops-actions button { min-height: 32px; }
+.ops-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.ops-section textarea { font-size: 1rem; }
+.ops-section :focus-visible, .research-learning :focus-visible { outline: 2px solid var(--gold-deep); outline-offset: 3px; }
 @media (max-width: 760px) { .ops-metrics, .ops-grid { grid-template-columns: 1fr 1fr; } .ops-grid { gap: 12px; } }
 @media (max-width: 520px) { .ops-body { padding: 14px; } .ops-metrics, .ops-grid { grid-template-columns: 1fr; } .ops-card { max-height: 94vh; } }
 

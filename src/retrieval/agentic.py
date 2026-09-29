@@ -1,6 +1,7 @@
 """Bounded agentic retrieval: coverage check, one rewrite, and evidence merge."""
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import re
 from typing import Callable
@@ -45,7 +46,7 @@ def rewrite_query(query: str, missing_terms: list[str], llm=None) -> str:
         if llm is None:
             from src.utils.llm import get_cheap_llm
             llm = get_cheap_llm()
-        candidate = str(llm.invoke(prompt).content).strip().replace("\n", " ")
+        candidate = str(invoke_model(llm, prompt).content).strip().replace("\n", " ")
         return candidate[:500] or query
     except Exception:
         return query

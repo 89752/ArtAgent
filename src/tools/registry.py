@@ -4,6 +4,7 @@ general 节点与技能系统都从这里取工具，新增工具只需在此登
 """
 
 from src.tools.aggregate_stats import aggregate_stats
+from src.tools.artifact import read_artifact
 from src.tools.collections import (
     delete_collection,
     get_collection,
@@ -30,6 +31,7 @@ from src.tools.wiki_lookup import wiki_lookup
 from src.tools.user_image import analyze_user_artwork, read_user_image
 
 GENERAL_TOOLS = [
+    read_artifact,
     semantic_search,
     agentic_retrieve,
     exact_lookup,

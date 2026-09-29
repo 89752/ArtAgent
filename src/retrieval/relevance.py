@@ -20,6 +20,7 @@ Jina Reranker v3.5 精排）仍会混入"形似而答非所问"的噪声候选�
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import os
 
@@ -85,7 +86,6 @@ def llm_relevance_filter(
         return items  # 文本候选无可过滤，省一次 LLM 调用
 
     candidates = text_items[:max_candidates]
-    rest = text_items[max_candidates:]
     numbered = "\n".join(_candidate_line(i, c) for i, c in enumerate(candidates))
     prompt = RELEVANCE_FILTER_PROMPT.format(query=query, candidates=numbered)
 
@@ -97,7 +97,7 @@ def llm_relevance_filter(
             from src.utils.llm import get_cheap_llm
 
             model = get_cheap_llm()
-        raw = model.invoke(prompt).content
+        raw = invoke_model(model, prompt).content
         parsed = parse_json(raw)
     except Exception as e:  # noqa: BLE001 — 任何失败都降级原列表
         logger.warning("[relevance] 过滤调用失败，保留原列表：%s", e)

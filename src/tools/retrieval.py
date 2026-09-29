@@ -43,6 +43,8 @@ def _format_result(result: RetrievalResult) -> dict:
         if len(snippet) > EVIDENCE_SNIPPET_LEN:
             snippet = snippet[:EVIDENCE_SNIPPET_LEN] + "..."
         return {
+            "artwork_id": str(meta.get("artwork_id") or meta.get("id") or meta.get("wikidata_id") or ""),
+            "source_url": str(meta.get("source_url") or meta.get("url") or ""),
             "title": str(meta.get("title") or ""),
             "author": str(meta.get("artist") or ""),
             "date": str(meta.get("year_display") or (meta.get("year") or "")),

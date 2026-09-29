@@ -59,6 +59,10 @@ def _ensure_dir() -> None:
 
 
 def _connect() -> sqlite3.Connection:
+    from src.harness.context import current_run
+    run = current_run()
+    if run is not None and run.task_type == "ingestion":
+        run.check()
     _ensure_dir()
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -69,7 +73,7 @@ def _connect() -> sqlite3.Connection:
 # Init + migration                                                    #
 # ------------------------------------------------------------------ #
 def init_db() -> None:
-    """建表；迁移旧 JSON；重置服务重启导致中断的解析任务（防僵尸轮询）。"""
+    """只初始化存储和迁移；解析状态由持久任务租约决定，不能在 worker 启动时重置。"""
     with _connect() as conn:
         conn.executescript(_CREATE_TABLE_SQL)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
@@ -80,18 +84,6 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id, started_at)"
         )
-        cur = conn.execute(
-            """
-            UPDATE documents SET status = 'failed', error = ?
-            WHERE status IN ('processing', 'pending')
-            """,
-            ("服务重启，解析任务中断，请重新上传",),
-        )
-        if cur.rowcount:
-            logger.info(
-                "[documents_store] 已将 %d 条中断中的解析任务标记为 failed",
-                cur.rowcount,
-            )
         conn.commit()
     _migrate_legacy_json()
 
@@ -298,7 +290,7 @@ def list_all_documents() -> list[dict]:
     """管理员恢复路径：读取所有用户文档，不用于面向用户的 API 列表。"""
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM documents ORDER BY started_at DESC").fetchall()
-    return [_to_status_dict(r) for r in rows]
+    return [{**_to_status_dict(r), "user_id": r["user_id"]} for r in rows]
 
 
 def delete_document(doc_id: str, user_id: str = "web_user") -> bool:

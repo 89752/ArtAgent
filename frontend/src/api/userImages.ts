@@ -1,4 +1,6 @@
 import type { UserImageUploadResult } from "./types";
+import { getToken } from "../lib/user";
+import { authHeaders } from "./client";
 
 /** 用户图片上传（XHR 进度，与文档上传同款封装）。 */
 export function uploadUserImage(
@@ -9,6 +11,8 @@ export function uploadUserImage(
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/user-images/upload");
+    const token = getToken();
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     let lastRender = 0;
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
@@ -49,7 +53,7 @@ export async function attachUserImage(
 ): Promise<void> {
   await fetch(`/api/user-images/${encodeURIComponent(imageId)}/attach`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ session_id: sid }),
   });
 }

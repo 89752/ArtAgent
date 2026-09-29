@@ -10,6 +10,14 @@ export class ApiError extends Error {
   }
 }
 
+export function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token = getToken();
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  };
+}
+
 async function readError(res: Response): Promise<string> {
   try {
     const j = (await res.json()) as { error?: string; detail?: string };
@@ -23,9 +31,8 @@ async function readError(res: Response): Promise<string> {
 }
 
 export async function getJson<T>(url: string): Promise<T> {
-  const token = getToken();
   const res = await fetch(url, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers: authHeaders(),
   });
   if (!res.ok) throw new ApiError(await readError(res), res.status);
   return (await res.json()) as T;
@@ -36,12 +43,10 @@ export async function sendJson<T>(
   method: "POST" | "PATCH" | "DELETE",
   body?: unknown,
 ): Promise<T> {
-  const token = getToken();
   const res = await fetch(url, {
     method,
     headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...authHeaders(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });

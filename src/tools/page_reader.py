@@ -12,6 +12,7 @@
 主要生成开销；log_event 记录调用情况供成本观测。
 """
 
+from src.harness.context import invoke_model
 import base64
 import os
 from pathlib import Path
@@ -45,6 +46,14 @@ def _validate_image_path(image_path: str) -> tuple[Optional[Path], Optional[str]
         return None, f"不支持的图片类型：{path.suffix}"
     if not path.exists():
         return None, f"图片文件不存在：{path}"
+    from src.harness.context import current_run
+    run = current_run()
+    if run is not None:
+        from src.data.documents_store import list_documents
+        allowed = [d for d in list_documents(run.user_id)
+                   if run.document_ids is None or d.get("doc_id") in run.document_ids]
+        if not any(path.is_relative_to((_UPLOADS_ROOT / (d.get("kb_id") or "default") / d["doc_id"]).resolve()) for d in allowed):
+            return None, "该页面不属于当前任务允许读取的资料"
     return path, None
 
 
@@ -55,7 +64,11 @@ def _resolve_page_path(doc_name: str, page: int) -> tuple[Optional[Path], Option
     name = (doc_name or "").strip()
     if not name or not page or page < 1:
         return None, "需要 doc_name 与 page（页码从 1 开始）"
-    docs = list_documents()
+    from src.harness.context import current_run
+    run = current_run()
+    docs = list_documents(run.user_id) if run else list_documents()
+    if run and run.document_ids is not None:
+        docs = [d for d in docs if d.get("doc_id") in run.document_ids]
     candidates = [
         d for d in docs
         if name == (d.get("doc_name") or "").strip()
@@ -64,8 +77,10 @@ def _resolve_page_path(doc_name: str, page: int) -> tuple[Optional[Path], Option
     if not candidates:
         return None, f"未找到文档：{doc_name}"
     doc = candidates[0]
+    version = doc.get("active_index_id")
+    pages_dir = f"versions/{version}/pages" if version and version != doc.get("doc_id") else "pages"
     rel = (
-        f"{doc.get('kb_id') or 'default'}/{doc.get('doc_id')}/pages/"
+        f"{doc.get('kb_id') or 'default'}/{doc.get('doc_id')}/{pages_dir}/"
         f"page-{page - 1}.png"
     )
     return _validate_image_path(str((_UPLOADS_ROOT / rel).resolve()))
@@ -116,7 +131,7 @@ def read_page_image_impl(
                 {"type": "text", "text": prompt},
             ]
         )
-        response = get_vision_llm().invoke([msg])
+        response = invoke_model(get_vision_llm(), [msg])
         description = response.content
     except Exception as e:
         logger.warning("[read_page_image] 视觉读取失败 %s: %s", path, e)

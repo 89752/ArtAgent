@@ -16,6 +16,8 @@ restore_active_tables() 从状态存储重建。
 from __future__ import annotations
 
 import time
+import json
+import threading
 from pathlib import Path
 
 from src.data import documents_store
@@ -31,6 +33,39 @@ from src.utils.logging_config import get_logger, log_event
 logger = get_logger("ingestion.table_pipeline")
 
 CONFIRMABLE_STATUS = ("pending_confirm", "active")  # active 允许改 schema 重确认
+_sync_lock = threading.RLock()
+
+
+def sync_active_tables(hybrid):
+    """Refresh each worker from SQLite before exposing its shared registry."""
+    with _sync_lock:
+        documents_store.init_db()
+        desired = {d["dataset_id"]: d for d in documents_store.list_all_documents()
+                   if d.get("kind") == "table" and d.get("status") == "active"
+                   and d.get("dataset_id") and d.get("confirmed_schema")}
+        signatures = getattr(hybrid, "_table_signatures", {})
+        for name, retriever in list(_REGISTRY.items()):
+            if getattr(retriever, "source", "") == "user_table" and name not in desired:
+                _REGISTRY.pop(name, None)
+        for name, retriever in list(hybrid._retrievers.items()):
+            if getattr(retriever, "source", "") == "user_table" and name not in desired:
+                hybrid._retrievers.pop(name, None)
+                _REGISTRY.pop(name, None)
+                signatures.pop(name, None)
+                if hybrid.active_dataset == name:
+                    hybrid.active_dataset = "core"
+        for name, doc in desired.items():
+            signature = json.dumps([doc.get("table_path"), doc["confirmed_schema"]], sort_keys=True)
+            if signatures.get(name) == signature and name in hybrid._retrievers:
+                continue
+            cs = doc["confirmed_schema"]
+            schema = TableSchema(entity_col=cs["entity_col"], group_axis_col=cs.get("group_axis_col") or None,
+                                 description_col=cs.get("description_col") or "", image_col=cs.get("image_col") or None)
+            retriever = register_structured_dataset(name, schema, source="user_table",
+                df_loader=lambda p=doc["table_path"]: load_table(p).df)
+            hybrid.register(name, retriever)
+            signatures[name] = signature
+        hybrid._table_signatures = signatures
 
 
 def table_dataset_id(doc_id: str, user_id: str | None = None) -> str:
@@ -121,6 +156,34 @@ def _validate_role(col: str | None, columns: list[str], role: str) -> str | None
 
 
 def confirm_table_schema(
+    doc_id: str,
+    roles: dict,
+    user_id: str | None = None,
+) -> dict:
+    """Serialize schema publication with parsing and document deletion."""
+    import time
+    from src.harness.ingestion import document_lock, DocumentBusy
+    from src.tasks import store as tasks_store
+
+    owner_id = user_id or "web_user"
+    deadline = time.monotonic() + 5
+
+    def check():
+        if time.monotonic() >= deadline:
+            raise DocumentBusy("文档正在处理中，请稍后重试确认")
+
+    with document_lock(owner_id, doc_id, check):
+        # Re-read inside the lock: deletion may have won while we waited.
+        if not documents_store.get_document(doc_id, owner_id):
+            raise KeyError(f"非表格文档：{doc_id}")
+        task = tasks_store.get_task(doc_id)
+        if task and task.get("payload", {}).get("user_id") == owner_id:
+            if task.get("status") != "done":
+                raise ValueError("文档解析尚未成功完成，不能确认 schema")
+        return _confirm_table_schema_locked(doc_id, roles, user_id)
+
+
+def _confirm_table_schema_locked(
     doc_id: str,
     roles: dict,
     user_id: str | None = None,

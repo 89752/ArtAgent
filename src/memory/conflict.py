@@ -9,6 +9,7 @@
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 from typing import Callable, Optional
 
@@ -57,7 +58,7 @@ def _default_llm() -> Callable[[str], str]:
     from src.utils.llm import get_deterministic_llm
 
     def _invoke(p: str) -> str:
-        return get_deterministic_llm().invoke(p).content
+        return invoke_model(get_deterministic_llm(), p).content
 
     return _invoke
 

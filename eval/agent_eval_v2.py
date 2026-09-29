@@ -53,7 +53,7 @@ from src.agent.graph import get_graph
 EVAL_DIR = Path(__file__).resolve().parent
 SETS = EVAL_DIR / "sets"
 OUT = EVAL_DIR / "agent_eval_report.md"
-HISTORY = EVAL_DIR / "metrics_history.jsonl"
+HISTORY = Path(os.getenv("ARTAGENT_EVAL_HISTORY_PATH", str(EVAL_DIR / "metrics_history.jsonl")))
 REGRESSIONS = SETS / "regressions.json"
 SEED = 42
 # 记忆身份隔离：评估身份绝不能继承服务进程已有的 MEMORY_USER_ID
@@ -1377,6 +1377,7 @@ def main() -> None:
     parser.add_argument("--diag", action="store_true", help="跑意图诊断（规则分类器）")
     parser.add_argument("--limit", type=int, default=None, help="最多用例数（调试/分块用）")
     parser.add_argument("--pr", action="store_true", help="PR 门禁档：离线检索 20 条 + 意图诊断")
+    parser.add_argument("--gate", action="store_true", help="质量或覆盖不达标时返回非零退出码")
     parser.add_argument("--rejudge", action="store_true", help="用裁判证据增强（工具+状态）重判缓存中的质量/安全用例")
     parser.add_argument("--capture-regressions", action="store_true", help="将本次失败的确定性用例沉淀至 sets/regressions.json")
     parser.add_argument("--out", default=str(OUT), help="报告输出路径")
@@ -1395,8 +1396,14 @@ def main() -> None:
         return
 
     if args.pr:
+        # Never let a developer's .env silently turn the PR gate into paid I/O.
+        os.environ["RERANK_ENABLED"] = "0"
+        os.environ["LEXICAL_TRANSLATE"] = "0"
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        args.agentic_ab_n = None
         if args.retrieval_n is None:
-            args.retrieval_n = 20
+            args.retrieval_n = 0  # Public fixture is mandatory; local corpus is opt-in.
         args.diag = True
         core_path = Path(os.getenv("CORE_DATA_PATH", "./data/core/artworks_core.csv"))
         if not core_path.exists():
@@ -1449,6 +1456,9 @@ def main() -> None:
         args.diag = True
 
     parts: dict = {}
+    if args.pr:
+        from eval.gate import public_retrieval
+        parts["public_retrieval"] = public_retrieval()
     graph = None
     need_agent = bool(
         run_cases_dim or args.multi_turn
@@ -1488,6 +1498,12 @@ def main() -> None:
     if args.capture_regressions:
         print(f"回归集新增：{capture_regressions(parts)} 条")
     print(f"\n报告已写入：{args.out}")
+    if args.pr or args.gate:
+        from eval.gate import gate_decision
+        decision = gate_decision(parts, intent_diag)
+        Path(str(args.out) + ".gate.json").write_text(json.dumps({**decision, "parts": parts, "intent": intent_diag}, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not decision["passed"]:
+            raise SystemExit("评测门禁未通过：" + ", ".join(decision["failures"]))
 
 
 if __name__ == "__main__":

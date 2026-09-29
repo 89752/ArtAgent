@@ -11,6 +11,7 @@
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import os
 import re
@@ -171,7 +172,7 @@ def extract_memories(
         from src.utils.llm import get_deterministic_llm
 
         def _default_llm(p: str) -> str:
-            return get_deterministic_llm().invoke(p).content
+            return invoke_model(get_deterministic_llm(), p).content
 
         llm = _default_llm
     try:
@@ -462,6 +463,11 @@ def schedule_extract(messages, user_id: Optional[str] = None) -> dict:
     human_turns = sum(1 for m in messages if getattr(m, "type", "") == "human")
     if human_turns < 1:
         return {}
+    from src.harness.context import current_run
+    if current_run() is not None:
+        # Scoped executions must finish (and charge) auxiliary work before releasing
+        # their lease. The unscoped interactive/legacy path keeps debouncing.
+        return maybe_extract(messages, user, 0)[1]
     with _extract_lock:
         _pending[user] = {"messages": list(messages), "user_id": user}
         if not _worker_started:

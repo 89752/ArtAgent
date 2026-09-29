@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import base64
 
@@ -106,7 +107,7 @@ def compare_images(
                 {"type": "text", "text": prompt},
             ]
         )
-        response = get_vision_llm().invoke([msg])
+        response = invoke_model(get_vision_llm(), [msg])
         comparison = str(response.content)
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"视觉对比失败：{e}", "a": a, "b": b}

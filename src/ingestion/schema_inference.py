@@ -12,6 +12,7 @@
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 from dataclasses import asdict, dataclass
 
@@ -80,7 +81,7 @@ def infer_table_schema(df: pd.DataFrame, table_name: str = "", llm=None) -> Infe
             from src.utils.llm import get_deterministic_llm
 
             model = get_deterministic_llm()
-        raw = model.invoke(prompt).content
+        raw = invoke_model(model, prompt).content
         parsed = parse_json(raw)
     except Exception as e:  # noqa: BLE001 — 推断失败不拖垮上传，用户仍可手填
         logger.warning("[schema_infer] 推断调用失败：%s", e)

@@ -11,6 +11,7 @@ import contextvars
 import json
 import threading
 import time
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -44,6 +45,7 @@ class ToolSpec:
 
 
 _READ_ONLY_TOOLS = {
+    "read_artifact", "agentic_retrieve",
     "semantic_search", "exact_lookup", "query_painter_knowledge", "image_lookup",
     "read_page_image", "web_search", "recall", "list_collections", "get_collection",
     "list_preferences", "color_analysis", "aggregate_stats", "compare_images",
@@ -91,7 +93,13 @@ def run_with_timeout(fn: Callable[[], Any], timeout_sec: float) -> Any:
 
     worker = threading.Thread(target=_run, daemon=True, name="tool-call")
     worker.start()
-    worker.join(timeout=timeout_sec)
+    deadline = time.monotonic() + timeout_sec
+    from src.harness.context import current_run
+    context = current_run()
+    while worker.is_alive() and time.monotonic() < deadline:
+        worker.join(timeout=min(.1, max(0, deadline-time.monotonic())))
+        if context:
+            context.check()
     if worker.is_alive():
         raise ToolTimeout(f"工具执行超过 {timeout_sec}s")
     if box["error"] is not None:
@@ -194,6 +202,12 @@ def _execute(tool: Any, args: dict, *, context: str = "main", user_id: str = "")
 
     spec = tool_spec(tool)
     name = str(getattr(tool, "name", "?"))
+    from src.harness.context import current_run, RunStopped
+    run = current_run()
+    if run:
+        run.check()
+        if run.allowed_tools is not None and name not in run.allowed_tools:
+            return json.dumps({"status": "TOOL_FORBIDDEN", "tool": name})
     if context == "subagent" and not spec.allowed_for_subagent:
         return json.dumps({"status": "TOOL_FORBIDDEN", "tool": name}, ensure_ascii=False)
     if spec.requires_confirmation and context != "confirmed":
@@ -209,6 +223,18 @@ def _execute(tool: Any, args: dict, *, context: str = "main", user_id: str = "")
             ensure_ascii=False,
         )
     args = decision.params
+    receipt_key = ""
+    if run:
+        run.charge("tool_calls")
+        if run.task_id:
+            from src.harness.storage import start_tool
+            receipt_key = hashlib.sha256(json.dumps([run.user_id, run.task_id, run.step_id, name, args], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            receipt = start_tool(receipt_key, run.user_id, run.task_id)
+            if receipt and receipt["status"] == "done":
+                return receipt["result"]
+            if receipt and not spec.read_only:
+                run.stopped_status = "unknown_execution_state"
+                raise RunStopped("unknown_execution_state")
     timeout = spec.timeout_sec or _timeout_sec()
     retries = spec.retries if spec.retries is not None else _retries()
     # A timeout for a non-idempotent write means the work may still be running
@@ -232,11 +258,24 @@ def _execute(tool: Any, args: dict, *, context: str = "main", user_id: str = "")
             out = run_with_timeout(invoke_with_identity, timeout)
             output_limit = spec.max_output_chars or _output_limit()
             if isinstance(out, str):
-                return out[:output_limit]
+                try:
+                    out = json.loads(out)
+                except (ValueError, TypeError):
+                    pass
             payload = json.dumps(out, ensure_ascii=False, default=str)
-            if len(payload) > output_limit:
+            if run and run.task_id and len(payload) > output_limit and name != "read_artifact":
+                from src.harness.storage import put_artifact
+                full = put_artifact(run.user_id, run.task_id, receipt_key, payload, kind="tool_result", metadata={"tool": name})
+                out = {"artifact_id": full["id"], "summary": _truncate_payload(out, output_limit), "truncated": True}
+            elif len(payload) > output_limit:
                 out = _truncate_payload(out, output_limit)
-            return json.dumps(out, ensure_ascii=False, default=str)
+            result = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, default=str)
+            if receipt_key:
+                from src.harness.storage import finish_tool
+                finish_tool(receipt_key, result)
+            return result
+        except RunStopped:
+            raise
         except ToolTimeout as e:
             logger.warning(
                 "[govern] 工具 %s 超时（后台线程可能仍在执行，副作用可能已生效）",
@@ -244,6 +283,9 @@ def _execute(tool: Any, args: dict, *, context: str = "main", user_id: str = "")
             )
             last_error = e
             if not (spec.read_only and spec.idempotent):
+                if run is not None:
+                    run.stopped_status = "unknown_execution_state"
+                    raise RunStopped("unknown_execution_state") from e
                 return json.dumps(
                     {"status": "UNKNOWN_EXECUTION_STATE", "tool": name,
                      "message": "写操作超时，执行状态未知，禁止自动重试"},

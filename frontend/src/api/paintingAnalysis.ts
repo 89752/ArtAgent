@@ -1,4 +1,5 @@
 import type { AnalysisEvent } from "./types";
+import { authHeaders } from "./client";
 
 export interface StreamAnalysisOptions {
   imageId: string;
@@ -20,7 +21,11 @@ export async function streamPaintingAnalysis(
 
   let res: Response;
   try {
-    res = await fetch(url, { method: "POST", signal: opts.signal });
+    res = await fetch(url, {
+      method: "POST",
+      headers: authHeaders(),
+      signal: opts.signal,
+    });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new Error("网络中断或服务未响应，请稍后重试。");
@@ -76,7 +81,7 @@ export async function persistAnalysisMessage(
     `/api/painting-analysis/${encodeURIComponent(imageId)}/message`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         session_id: sid,
         user_text: opts.userText || "",

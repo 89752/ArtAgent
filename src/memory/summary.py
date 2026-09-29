@@ -8,6 +8,7 @@
 """
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import os
 import sqlite3
@@ -185,7 +186,7 @@ def _summarize(existing: str, recent_text: str,
         from src.utils.llm import get_deterministic_llm
 
         def _default(prompt: str) -> str:
-            return get_deterministic_llm().invoke(prompt).content
+            return invoke_model(get_deterministic_llm(), prompt).content
 
         llm = _default
     prompt = (

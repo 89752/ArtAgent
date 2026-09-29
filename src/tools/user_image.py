@@ -1,6 +1,7 @@
 """用户上传图片的通用读图与分析工具（聊天入口的引擎适配器）。"""
 
 from __future__ import annotations
+from src.harness.context import invoke_model
 
 import base64
 from typing import Optional
@@ -75,7 +76,7 @@ def read_user_image(
                 {"type": "text", "text": prompt},
             ]
         )
-        description = str(llm.invoke([msg]).content)
+        description = str(invoke_model(llm, [msg]).content)
     except Exception as e:  # noqa: BLE001
         return {"success": False, "error": f"视觉读取失败：{e}"}
     log_event(logger, "read_user_image", image_id=image_id, focus=focus)

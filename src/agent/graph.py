@@ -49,9 +49,25 @@ def _build_checkpointer():
 
 def _route_after_reflection(state: AgentState) -> str:
     """反思 RETRY 且未重试过 → 回 general_agent 再来一轮；否则收尾。"""
-    if state.reflection_notes == "RETRY" and state.retry_count < 1:
+    if state.reflection_notes == "RETRY" and state.retry_count <= 1:
         return "retry"
-    return "save_memory"
+    return "end" if state.execution_mode == "job_quality" else "save_memory"
+
+
+def _route_after_general(state: AgentState) -> str:
+    """Research steps use the Harness verifier instead of duplicate LLM reflection."""
+    if N.general_should_continue(state) == "tools":
+        return "tools"
+    if state.execution_mode in {"job_fast", "conversation_fast"}:
+        return "fast_done"
+    if state.execution_mode == "conversation_memory":
+        return "save_memory"
+    return "reflect"
+
+
+def _route_start(state: AgentState) -> str:
+    """Durable jobs have isolated state and do not need conversational memory setup."""
+    return "job" if state.execution_mode.startswith("job_") else "conversation"
 
 
 def build_graph():
@@ -67,7 +83,10 @@ def build_graph():
     add("reflection", N.reflection)
     add("save_memory", N.save_memory)
 
-    builder.add_edge(START, "load_memory")
+    builder.add_conditional_edges(
+        START, _route_start,
+        {"job": "general_agent", "conversation": "load_memory"},
+    )
     builder.add_edge("load_memory", "ask_user")
     # 信息不足 → 追问并短路；其余全部交给 ReAct。意图只用于澄清和 UI
     # 展示，不能把包含“推荐”的复合请求强制截断为单一固定工作流。
@@ -79,15 +98,20 @@ def build_graph():
     # ReAct：有工具调用就执行工具，否则交给反思
     builder.add_conditional_edges(
         "general_agent",
-        N.general_should_continue,
-        {"tools": "general_tools", "done": "reflection"},
+        _route_after_general,
+        {
+            "tools": "general_tools",
+            "fast_done": END,
+            "save_memory": "save_memory",
+            "reflect": "reflection",
+        },
     )
     builder.add_edge("general_tools", "general_agent")
     # 反思：RETRY 且未重试过 → 再跑一轮 ReAct；否则收尾
     builder.add_conditional_edges(
         "reflection",
         _route_after_reflection,
-        {"retry": "general_agent", "save_memory": "save_memory"},
+        {"retry": "general_agent", "save_memory": "save_memory", "end": END},
     )
     builder.add_edge("save_memory", END)
 
